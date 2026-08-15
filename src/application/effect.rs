@@ -16,19 +16,39 @@ pub struct TrayIcon {
     pub tooltip: String,
 }
 
+/// Default wall-clock budget for one settings/Run commit saga.
+pub const COMMIT_DEADLINE_MS: u64 = 5_000;
+
 /// An external action requested by [`crate::application::App`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Effect {
     AddTray(TrayIcon),
     ModifyTray(TrayIcon),
     RemoveTray,
-    SetTimer { kind: TimerKind, interval_ms: u32 },
+    SetTimer {
+        kind: TimerKind,
+        interval_ms: u32,
+    },
     KillTimer(TimerKind),
+    /// Persist `settings` as one generation under a unique operation ID.
+    CommitSettings {
+        operation_id: u64,
+        settings: AppSettings,
+        previous: AppSettings,
+        expected_generation: u64,
+        sync_run_entry: bool,
+        deadline_millis: u64,
+    },
+    /// Best-effort persistence during exit; failures are not surfaced.
     SaveSettings(AppSettings),
+    /// Marks the in-flight commit operation cancelled so late completions are
+    /// ignored.
+    CancelCommit {
+        operation_id: u64,
+    },
     SetThemeMenu(ThemePreference),
     SetFpsMenu(FpsLimit),
     SetStartupMenu(bool),
-    RequestStartup(bool),
     LaunchTaskManager,
     Quit,
 }

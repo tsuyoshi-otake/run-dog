@@ -1,4 +1,6 @@
-use crate::core::{FpsLimit, ResolvedTheme, SystemTimes, ThemePreference};
+use crate::core::{AppSettings, FpsLimit, ResolvedTheme, SystemTimes, ThemePreference};
+
+use super::commit_protocol::CommitStatus;
 
 /// An input to the application state machine.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -9,7 +11,12 @@ pub enum Event {
     SelectTheme(ThemePreference),
     SelectFpsLimit(FpsLimit),
     ToggleStartup,
-    StartupChangeFinished { enabled: bool, succeeded: bool },
+    SettingsCommitFinished {
+        settings: AppSettings,
+        status: CommitStatus,
+        new_generation: u64,
+        last_operation_id: u64,
+    },
     TrayActivated,
     TaskbarRecreated,
     ExitRequested,

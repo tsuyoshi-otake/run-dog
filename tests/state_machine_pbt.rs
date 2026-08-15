@@ -3,13 +3,85 @@
 
 use proptest::prelude::*;
 use run_dog::{
-    application::{dispatch_and_execute, App, Effect, EffectPort, Event, ANIMATION_FRAME_COUNT},
-    core::{AppSettings, FpsLimit, ResolvedTheme, SystemTimes, ThemePreference},
+    application::{
+        dispatch_and_execute, execute_commit, App, CommitGate, CommitOutcome, CommitRequest,
+        DurableStore, Effect, EffectPort, Event, ANIMATION_FRAME_COUNT,
+    },
+    core::{
+        AppSettings, FpsLimit, PendingJournal, ResolvedTheme, SettingsRecord, SystemTimes,
+        ThemePreference,
+    },
 };
 
 #[derive(Default)]
 struct NonLivePort {
     effects: Vec<Effect>,
+    record: Option<SettingsRecord>,
+    pending: Option<PendingJournal>,
+    gate: CommitGate,
+}
+
+impl NonLivePort {
+    fn record(&self) -> SettingsRecord {
+        self.record
+            .unwrap_or_else(|| SettingsRecord::new(0, 0, AppSettings::default()))
+    }
+}
+
+impl DurableStore for NonLivePort {
+    fn load_record(&mut self) -> SettingsRecord {
+        self.record()
+    }
+
+    fn write_record(&mut self, record: SettingsRecord, expected_generation: u64) -> bool {
+        if self.record().generation != expected_generation {
+            return false;
+        }
+        self.record = Some(record);
+        true
+    }
+
+    fn load_pending(&mut self) -> Option<PendingJournal> {
+        self.pending
+    }
+
+    fn write_pending(&mut self, journal: &PendingJournal) -> bool {
+        self.pending = Some(*journal);
+        true
+    }
+
+    fn clear_pending(&mut self) -> bool {
+        self.pending = None;
+        true
+    }
+
+    fn is_tombstoned(&mut self) -> bool {
+        false
+    }
+
+    fn set_startup(&mut self, _enabled: bool) -> bool {
+        true
+    }
+
+    fn now_millis(&self) -> u64 {
+        self.gate.now_millis()
+    }
+
+    fn is_cancelled(&self, operation_id: u64) -> bool {
+        self.gate.is_cancelled(operation_id)
+    }
+
+    fn mark_timed_out(&mut self, operation_id: u64) {
+        self.gate.mark_timed_out(operation_id);
+    }
+
+    fn mark_cancelled(&mut self, operation_id: u64) {
+        self.gate.cancel(operation_id);
+    }
+
+    fn is_timed_out(&self, operation_id: u64) -> bool {
+        self.gate.is_timed_out(operation_id)
+    }
 }
 
 impl EffectPort for NonLivePort {
@@ -17,8 +89,16 @@ impl EffectPort for NonLivePort {
         self.effects.push(effect.clone());
     }
 
-    fn set_startup(&mut self, _enabled: bool) -> bool {
-        true
+    fn execute_commit(&mut self, request: CommitRequest) -> CommitOutcome {
+        execute_commit(self, request)
+    }
+
+    fn cancel_commit(&mut self, operation_id: u64) {
+        self.gate.cancel(operation_id);
+    }
+
+    fn now_millis(&self) -> u64 {
+        self.gate.now_millis()
     }
 }
 

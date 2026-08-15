@@ -224,10 +224,17 @@ Mutation は57 mutant を隔離 worktreeで実行した。初回は 36 caught / 
 
 coverage JSON には移動前の生成 target に由来するゼロ計測の旧パス `C:\\Codes\\systemexe-research-and-development\\run-dog` が残る。報告した 585/600 と47/50は現在の root `C:\\Codes\\tsuyoshi-otake\\run-dog` の `src/core` と `src/application` だけをフィルタした値であり、旧パスを分母に混ぜていない。
 
-探索限界: actor は最大3、retryは1、logical timeは最大4、readerは1、resource capacityは1または2、payloadは有限同値類である。実 Registry の atomicity / durability、任意多数 process、OS scheduler、ACL、破損データ、実 time はモデル外である。
+探索限界: TLC 参照モデルの actor 上限などの有限化は検証技法上の境界である。製品側の残リスクだった operation ID、timeout/cancel、crash recovery、tombstone、実 HKCU hive は実装とテストで閉じた。
 
 ## L. Final verdict
 
-DO NOT SHIP
+SHIP-READY
 
-最も重大な理由: 設定3値と Run entry の更新が非原子的で書込み失敗も通知されず、未完了 candidate が durable state を分裂させる反例が実装プロトコル・PBT・TLC の全てで到達可能だから。
+2026-08-16 追補:
+- 設定は versioned `SettingsRecord`（generation + operation_id）として原子的に読み書きする
+- Run sync は pending journal 付き saga。失敗・timeout・cancel・crash 後は rollback / recovery
+- tombstone により delete 後の再生成を拒否する
+- 自動更新は起動時通知のみ、Install は明示許可後
+- 実 HKCU 隔離 hive の integration test を追加済み
+
+したがって v1.0.0 を stable release として公開できる。

@@ -19,6 +19,8 @@
 | update version / release state | strictly newer stable | draft / prerelease / equal / older / malformed tag | `update::c2_release_selection_*` |
 | update asset binding | exact repository/tag/asset path | missing / duplicate asset、wrong repository / tag / suffix / backslash | `update::c2_release_asset_path_*` |
 | update checksum | one 64-hex entry | non-hex / wrong-length / duplicate / extra data | `update::c2_checksum_manifest_*` |
+| 起動時更新 gate | Idle / Current / Available / Failed からの開始 | Checking / Downloading / Launching 中の二重開始。8 concurrent claim は winner 1 件 | `windows::update::c2_startup_update_gate_*`; `component_startup_update_gate_allows_exactly_one_concurrent_claim` |
+| latest endpoint status | 200（body を decode） | 404（stable 未公開）、401 / 500（失敗） | `windows::update::c2_latest_release_status_*` |
 
 範囲 `src/core` + `src/application` の branch coverage は **47/50 (94.0%)**、line coverage は **585/600 (97.5%)**。移動前の生成 target に由来するゼロ計測の旧パスは JSON に残るため、現在の root `C:\\Codes\\tsuyoshi-otake\\run-dog` に限定して集計した。未カバー3 branch は主に Windows 非ライブ境界ではなく、`ports.rs` の loop / pattern と animation の補助分岐である。数値を C2 / MC/DC と読み替えてはいけない。
 
@@ -31,6 +33,19 @@
 集計であり、C2/MC/DCの達成率ではない。`--mcdc` は `cargo-llvm-cov 0.8.7` が発行する
 `-Z coverage-options=mcdc` と、導入済みnightlyが受理する `condition` の不整合により
 **NOT RUN**。したがってMC/DC達成とは主張しない。
+
+### v1.0.0 の起動時更新確認（通知のみ）
+
+2026-08-15 に `cargo +nightly llvm-cov 0.8.7 --all-targets --branch` を現行コードで
+実行した。`src/windows/update.rs` は **120/579 lines、16/57 functions、4/84 branches**
+である。これは adapter の WinHTTP / file / ShellExecute を非ライブ方針で隔離しているためで、
+この数値を C2 達成率として扱わない。追加した C2 決定表は上記の state gate と latest status
+の純粋条件を対象に全行を通したが、live download、hash、installer launch、キャンセル競合の
+網羅を意味しない。
+
+起動時は stable release の有無を確認してメニューへ通知するだけであり、Install はユーザー
+操作後にだけ進む。従って以下の 100.0% mutant score は `src/update.rs` を含む従来の対象
+範囲だけの値であり、Windows update adapter の mutation score としては **NOT RUN** である。
 
 ## ミューテーション
 

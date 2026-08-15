@@ -55,6 +55,7 @@ const NETWORK_TIMEOUT_MS: i32 = 15_000;
 const NETWORK_RECEIVE_TIMEOUT_MS: i32 = 30_000;
 const NETWORK_BUFFER_BYTES: usize = 16 * 1_024;
 const HASH_BUFFER_BYTES: usize = 32 * 1_024;
+const INNO_SILENT_PARAMETERS: &str = "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS";
 
 /// Values displayed by the tray menu. This type contains no Win32 handles and
 /// can be copied without retaining a network worker.
@@ -105,6 +106,9 @@ pub struct UpdateController {
     repository: UpdateRepository,
     current_version: Version,
     cancelled: Arc<AtomicBool>,
+    /// Serializes the final cancellation check with `ShellExecuteW`. Once
+    /// `cancel` returns, no worker can launch a new installer.
+    launch_gate: Arc<Mutex<()>>,
 }
 
 impl UpdateController {
@@ -116,6 +120,7 @@ impl UpdateController {
             current_version: Version::parse(env!("CARGO_PKG_VERSION"))
                 .expect("Cargo package version must be MAJOR.MINOR.PATCH"),
             cancelled: Arc::new(AtomicBool::new(false)),
+            launch_gate: Arc::new(Mutex::new(())),
         }
     }
 
@@ -126,15 +131,8 @@ impl UpdateController {
 
     /// Starts an asynchronous check if no check or install is already active.
     pub fn check_for_updates(&self) {
-        {
-            let mut state = lock_state(&self.state);
-            if matches!(
-                *state,
-                UpdateState::Checking | UpdateState::Downloading(_) | UpdateState::Launching
-            ) {
-                return;
-            }
-            *state = UpdateState::Checking;
+        if !begin_check(&self.state) {
+            return;
         }
 
         let state = Arc::clone(&self.state);
@@ -165,7 +163,8 @@ impl UpdateController {
     }
 
     /// Streams, verifies, and starts the available installer without blocking
-    /// the message-loop thread. A successful launch requests orderly shutdown.
+    /// the message-loop thread. Called only after the user selects Install in
+    /// the tray menu. A successful launch requests orderly shutdown.
     pub fn install_available(&self, hwnd: HWND) {
         let candidate = {
             let mut state = lock_state(&self.state);
@@ -180,27 +179,19 @@ impl UpdateController {
         let state = Arc::clone(&self.state);
         let repository = self.repository.clone();
         let cancelled = Arc::clone(&self.cancelled);
+        let launch_gate = Arc::clone(&self.launch_gate);
         let hwnd = hwnd as usize;
         let worker = thread::Builder::new()
             .name("run-dog-update-install".to_owned())
             .spawn(move || {
-                if cancelled.load(Ordering::Acquire) {
-                    return;
-                }
-
-                match download_verify_and_launch(&repository, &candidate, &cancelled) {
-                    Ok(()) if !cancelled.load(Ordering::Acquire) => {
-                        *lock_state(&state) = UpdateState::Launching;
-                        let _ = unsafe {
-                            PostMessageW(hwnd as HWND, UPDATE_REQUEST_EXIT_MESSAGE, 0, 0)
-                        };
-                    }
-                    Ok(()) | Err(()) => {
-                        if !cancelled.load(Ordering::Acquire) {
-                            *lock_state(&state) = UpdateState::Failed;
-                        }
-                    }
-                }
+                install_candidate(
+                    &state,
+                    &repository,
+                    &candidate,
+                    &cancelled,
+                    &launch_gate,
+                    hwnd as HWND,
+                );
             });
 
         if worker.is_err() {
@@ -210,6 +201,7 @@ impl UpdateController {
 
     /// Prevents a worker from launching an installer after the user exits.
     pub fn cancel(&self) {
+        let _launch_gate = lock_launch_gate(&self.launch_gate);
         self.cancelled.store(true, Ordering::Release);
     }
 }
@@ -220,6 +212,47 @@ fn lock_state(state: &Mutex<UpdateState>) -> MutexGuard<'_, UpdateState> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+fn lock_launch_gate(gate: &Mutex<()>) -> MutexGuard<'_, ()> {
+    gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn begin_check(state: &Mutex<UpdateState>) -> bool {
+    let mut state = lock_state(state);
+    if matches!(
+        *state,
+        UpdateState::Checking | UpdateState::Downloading(_) | UpdateState::Launching
+    ) {
+        return false;
+    }
+    *state = UpdateState::Checking;
+    true
+}
+
+fn install_candidate(
+    state: &Mutex<UpdateState>,
+    repository: &UpdateRepository,
+    candidate: &UpdateCandidate,
+    cancelled: &AtomicBool,
+    launch_gate: &Mutex<()>,
+    hwnd: HWND,
+) {
+    if cancelled.load(Ordering::Acquire) {
+        return;
+    }
+
+    match download_verify_and_launch(repository, candidate, cancelled, launch_gate) {
+        Ok(()) if !cancelled.load(Ordering::Acquire) => {
+            *lock_state(state) = UpdateState::Launching;
+            let _ = unsafe { PostMessageW(hwnd, UPDATE_REQUEST_EXIT_MESSAGE, 0, 0) };
+        }
+        Ok(()) | Err(()) => {
+            if !cancelled.load(Ordering::Acquire) {
+                *lock_state(state) = UpdateState::Failed;
+            }
+        }
+    }
+}
+
 fn fetch_latest_release(
     repository: &UpdateRepository,
     current_version: &Version,
@@ -228,8 +261,8 @@ fn fetch_latest_release(
     let (status, response) =
         https_get(API_HOST, &path, API_HEADERS, MAX_RELEASE_METADATA_BYTES).map_err(|_| ())?;
 
-    if status != 200 {
-        return Err(());
+    if !latest_release_body_is_available(status)? {
+        return Ok(None);
     }
 
     let release: GitHubRelease = serde_json::from_slice(&response).map_err(|_| ())?;
@@ -249,10 +282,21 @@ fn fetch_latest_release(
     select_update(repository, current_version, &release).map_err(|_| ())
 }
 
+/// Maps GitHub's latest-release response into the update protocol's terminal
+/// states. A repository with only pre-releases returns 404 from this endpoint.
+fn latest_release_body_is_available(status: u32) -> Result<bool, ()> {
+    match status {
+        200 => Ok(true),
+        404 => Ok(false),
+        _ => Err(()),
+    }
+}
+
 fn download_verify_and_launch(
     repository: &UpdateRepository,
     candidate: &UpdateCandidate,
     cancelled: &AtomicBool,
+    launch_gate: &Mutex<()>,
 ) -> Result<(), ()> {
     let checksum_path =
         github_release_download_path(repository, &candidate.checksum_url, CHECKSUM_ASSET_NAME)
@@ -276,7 +320,19 @@ fn download_verify_and_launch(
         return Err(());
     }
 
-    launch_installer(&installer_path).map_err(|_| ())
+    launch_installer_if_not_cancelled(&installer_path, cancelled, launch_gate).map_err(|_| ())
+}
+
+fn launch_installer_if_not_cancelled(
+    installer_path: &Path,
+    cancelled: &AtomicBool,
+    launch_gate: &Mutex<()>,
+) -> Result<(), String> {
+    let _launch_gate = lock_launch_gate(launch_gate);
+    if cancelled.load(Ordering::Acquire) {
+        return Err("update cancelled".to_owned());
+    }
+    launch_installer(installer_path)
 }
 
 fn download_installer(
@@ -371,7 +427,7 @@ fn launch_installer(path: &Path) -> Result<(), String> {
         .ok_or_else(|| "installer path is not valid UTF-16 input".to_owned())?;
     let operation = wide("open");
     let installer = wide(path);
-    let parameters = wide("/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS");
+    let parameters = wide(INNO_SILENT_PARAMETERS);
     let result = unsafe {
         ShellExecuteW(
             ptr::null_mut(),
@@ -600,9 +656,28 @@ fn last_error(operation: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::AtomicBool;
+    use std::{
+        sync::{
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+            Arc, Mutex,
+        },
+        thread,
+    };
 
-    use super::{is_cancelled, sha256_reader, GitHubRelease};
+    use crate::update::{UpdateCandidate, Version};
+
+    use super::{
+        begin_check, is_cancelled, latest_release_body_is_available, sha256_reader, GitHubRelease,
+        UpdateState, INNO_SILENT_PARAMETERS,
+    };
+
+    fn candidate() -> UpdateCandidate {
+        UpdateCandidate {
+            version: Version::parse("1.2.4").unwrap(),
+            installer_url: "https://github.com/example/run-dog/releases/download/v1.2.4/RunDog-Setup-x64.exe".to_owned(),
+            checksum_url: "https://github.com/example/run-dog/releases/download/v1.2.4/RunDog-Setup-x64.exe.sha256".to_owned(),
+        }
+    }
 
     #[test]
     fn component_github_release_decoder_requires_named_download_assets() {
@@ -640,5 +715,72 @@ mod tests {
         assert!(!is_cancelled(Some(&cancelled)));
         cancelled.store(true, std::sync::atomic::Ordering::Release);
         assert!(is_cancelled(Some(&cancelled)));
+    }
+
+    #[test]
+    fn c2_startup_update_gate_rejects_each_active_state_and_allows_terminal_rechecks() {
+        for state in [
+            UpdateState::Idle,
+            UpdateState::Current,
+            UpdateState::Available(candidate()),
+            UpdateState::Failed,
+        ] {
+            let state = Mutex::new(state);
+            assert!(begin_check(&state));
+            assert!(matches!(*state.lock().unwrap(), UpdateState::Checking));
+        }
+
+        for state in [
+            UpdateState::Checking,
+            UpdateState::Downloading(candidate()),
+            UpdateState::Launching,
+        ] {
+            let state = Mutex::new(state);
+            assert!(!begin_check(&state));
+        }
+    }
+
+    #[test]
+    fn component_startup_update_gate_allows_exactly_one_concurrent_claim() {
+        let state = Arc::new(Mutex::new(UpdateState::Idle));
+        let successful_claims = Arc::new(AtomicUsize::new(0));
+
+        thread::scope(|scope| {
+            for _ in 0..8 {
+                let state = Arc::clone(&state);
+                let successful_claims = Arc::clone(&successful_claims);
+                scope.spawn(move || {
+                    if begin_check(&state) {
+                        successful_claims.fetch_add(1, Ordering::Relaxed);
+                    }
+                });
+            }
+        });
+
+        assert_eq!(successful_claims.load(Ordering::Relaxed), 1);
+        assert!(matches!(*state.lock().unwrap(), UpdateState::Checking));
+    }
+
+    #[test]
+    fn component_inno_parameters_suppress_prompts_and_close_the_old_process() {
+        assert_eq!(
+            INNO_SILENT_PARAMETERS
+                .split_ascii_whitespace()
+                .collect::<Vec<_>>(),
+            [
+                "/VERYSILENT",
+                "/SUPPRESSMSGBOXES",
+                "/NORESTART",
+                "/CLOSEAPPLICATIONS",
+            ]
+        );
+    }
+
+    #[test]
+    fn c2_latest_release_status_distinguishes_release_absence_from_endpoint_failure() {
+        assert_eq!(latest_release_body_is_available(200), Ok(true));
+        assert_eq!(latest_release_body_is_available(404), Ok(false));
+        assert_eq!(latest_release_body_is_available(401), Err(()));
+        assert_eq!(latest_release_body_is_available(500), Err(()));
     }
 }

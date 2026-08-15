@@ -12,7 +12,7 @@
 
 ![RunDog が表示された Windows タスクバー](assets/rundog-taskbar.png)
 
-`RunDog` は、Windows の通知領域で CPU 使用率に応じて犬の 3 フレーム・アニメーションを表示する、低負荷の Rust 製常駐アプリケーションです。ローカルに導入されていた RunCat 2.0.0 の振る舞いを参考にした独立実装であり、RunCat のコードや画像を含みません。
+`RunDog` は、Windows の通知領域で CPU 使用率に応じて犬の 3 フレーム・アニメーションを表示する、低負荷の Rust 製常駐アプリケーションです。
 
 ## 機能
 
@@ -20,7 +20,7 @@
 - CPU 使用率に応じた 5–40 FPS のアニメーション（既定の上限は 20 FPS）
 - System / Light / Dark テーマ、10 / 20 / 30 / 40 FPS 上限の右クリックメニュー
 - サインイン時の起動、ダブルクリックによる Task Manager 起動、Explorer 再起動後の tray 再登録
-- GitHub Releases の stable release を起動時に一度だけ非同期確認し、右クリックメニューから更新
+- GitHub Releases の stable release を起動時に一度だけ非同期確認し、検証済みの新版をサイレント導入
 - 単一インスタンス、単一 message-loop thread、GUI framework / polling thread / 常時 I/O なし
 
 配備された `dark-dog-*.ico` は ICO ヘッダーではなく 32×32 ARGB BMP です。RunDog は起動時に検証して `HICON` を一度だけ作成し、Dark 用は原画、Light 用は alpha を保った反転色を使います。アニメーション中にファイルを読み直しません。
@@ -38,15 +38,17 @@ cargo build --release
 ## 自動更新と配布
 
 RunDog は起動時に一度だけ、GitHub Releases の latest published stable release
-を短命なバックグラウンド worker で確認します。常時ポーリングはしません。
-新しい版があれば右クリックメニューに `Install RunDog vX.Y.Z` が現れます。
-選択すると installer を 16 KiB 単位でディスクへ stream し、SHA-256 sidecar
-を照合してから Inno Setup を起動します。開始済みの worker は終了後に保持されず、
-通常の tray loop の CPU 使用率には影響しません。
+を短命なバックグラウンド worker で確認します。新しい stable release があれば右クリック
+メニューに `Install RunDog vX.Y.Z` を出し、通知します。ダウンロードと installer 起動は
+メニューからの明示操作があるときだけ行います。常時ポーリングはしません。
 
-ダウンロードと installer 起動は、未署名の executable を無操作で実行しないよう、
-メニューからの明示操作が必要です。検出は自動、導入は one-click です。Inno Setup
-は既存の RunDog を閉じ、同じ per-user install path を更新して再起動します。
+ユーザーが Install を選ぶと、固定名の installer と SHA-256 sidecar がそろい、asset URL が
+設定済み repository と release tag へ一致する場合だけ、installer を 16 KiB 単位でディスクへ
+stream して照合します。照合に成功すると Inno Setup を
+`/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS` で起動し、既存の RunDog を
+正常終了して同じ per-user install path を更新・再起動します。worker と WinHTTP handle は
+この一回の処理後に解放されます。右クリックメニューでは確認中・更新中・失敗などの状態を
+確認でき、必要なら手動で再確認できます。
 
 この仕組みは token を埋め込まないため、配布先の GitHub repository と Release assets
 は public である必要があります。private repository の Releases は認証なしの client
@@ -56,20 +58,35 @@ RunDog は起動時に一度だけ、GitHub Releases の latest published stable
 Authenticode の証明書・署名は使用しません。そのため Windows SmartScreen 等の警告が
 出る可能性があります。SHA-256 sidecar は転送破損・取り違えを fail-closed にする
 検査であり、コード署名の代替や、GitHub repository 自体が侵害された場合の真正性保証
-ではありません。
+ではありません。stable release の公開権限を保護し、利用者はこの制約を理解した上で
+導入してください。
 
 ローカルで unsigned installer を作るには Inno Setup 6 を導入してから次を実行します。
 
-    .\scripts\build-installer.ps1 -Version 0.1.0
+    .\scripts\build-installer.ps1 -Version 1.0.0
 
 作成物は `dist\RunDog-Setup-x64.exe` と
 `dist\RunDog-Setup-x64.exe.sha256` です。タグ `vX.Y.Z` を push すると
 [release workflow](.github/workflows/release.yml) が同じ asset pair を GitHub Release
 へ公開します。asset contract は [installer/README.md](installer/README.md) にあります。
 
-## リソース方針
+## リソース方針とリリース版の実測
 
-CPU サンプリングは 2 秒ごと、静止に近い時のアニメーションは 5 FPS（200 ms）です。CPU 使用率により速度が変わったときだけ timer を再設定し、設定はユーザー操作または正常終了時だけ保存します。更新確認は起動時とユーザーによる再確認時だけで、release metadata は最大 1 MiB、checksum は最大 16 KiB、installer は最大 100 MiB として stream 処理します。性能目標と、実機でのみ行う測定手順は [PLAN.md](PLAN.md) と [scripts/measure.ps1](scripts/measure.ps1) に記載しています。数値目標はまだ実機測定で主張していません。
+CPU サンプリングは 2 秒ごと、静止に近い時のアニメーションは 5 FPS（200 ms）です。CPU 使用率により速度が変わったときだけ timer を再設定し、設定はユーザー操作または正常終了時だけ保存します。更新確認は起動時とユーザーによる再確認時だけで、release metadata は最大 1 MiB、checksum は最大 16 KiB、installer は最大 100 MiB として stream 処理します。
+
+2026-08-15 に、公開済みの pre-release [v0.1.0 asset](https://github.com/systemexe-research-and-development/run-dog/releases/tag/v0.1.0) の `RunDog-Setup-x64.exe`（SHA-256 `8331cb50602e74170956147d488362868678c45149a3503a7f64cfce70d0798e`）を実インストールし、常駐が落ち着いたアイドル状態を測定しました。対象環境は Windows 11 Pro 10.0.26200（Intel N150、4 logical processors）、既定の 20 FPS 上限です。60 秒以上のウォームアップ後、[scripts/measure.ps1](scripts/measure.ps1) を `-DurationSeconds 60 -IntervalMilliseconds 1000` で実行し、60 標本の P95 は nearest-rank で算出しました。CPU は 1 コアではなくマシン全体に占める割合です。
+
+| 指標 | 平均 | P95 | 最大 | 初期予算 | 評価 |
+| --- | ---: | ---: | ---: | ---: | --- |
+| CPU（マシン全体） | 0.0579% | 0.3864% | 0.3894% | 平均 0.10%、P95 0.25% 以下 | 平均は達成、P95 は未達 |
+| Working Set | 15.625 MiB | 15.625 MiB | 15.625 MiB | 12 MiB 以下 | 未達 |
+| Private Bytes | 2.328 MiB | 2.328 MiB | 2.328 MiB | 8 MiB 以下 | 達成 |
+| Handles | 245 | 245 | 245 | 100 以下 | 未達 |
+| Threads | 2 | 2 | 2 | 2 以下 | 達成 |
+
+同じ PC で以前に採った RunCat v2.0.0 の 30 秒暫定ベースラインとの参考比較では、RunDog の平均 CPU は 81.5%、Working Set は 65.0%、Private Bytes は 90.6%、Handles は 45.6% 少ない値でした。比較時間が 30 秒対 60 秒で完全に同一ではないため、これは方向性の確認であって厳密な性能ゲートの合格証明ではありません。
+
+したがって、常駐時の平均 CPU と Private Bytes は軽量な水準を確認できましたが、全ての初期性能予算を満たしたとは主張しません。特に P95 CPU、Working Set、Handles と、8 時間 soak は未達または未測定です。これらを profiler で分解してから閾値を変更せずに改善することを残課題とします。性能目標と再現手順は [PLAN.md](PLAN.md) に記載しています。
 
 ## テスト
 
@@ -77,7 +94,7 @@ CPU サンプリングは 2 秒ごと、静止に近い時のアニメーショ�
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-targets
-cargo llvm-cov --all-targets --json --summary-only --output-path target\coverage-summary.json
+cargo +nightly llvm-cov --all-targets --json --summary-only --output-path target\coverage-summary.json
 ```
 
 [TESTING.md](TESTING.md) は、C2（condition coverage）、PBT、ISTQB コンポーネントテスト、Fake のみを使う非ライブ結合テストの範囲を定義しています。更新 protocol のテストも fixture の release metadata と checksum manifest だけを使います。テストは HKCU、実トレイ、Task Manager、実 CPU API、ネットワークに触れません。
@@ -89,3 +106,7 @@ cargo llvm-cov --all-targets --json --summary-only --output-path target\coverage
 ## 謝辞
 
 RunDog は [RunCat365](https://github.com/runcat-dev/RunCat365) を機能上の参考にしています。詳細は [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) を参照してください。
+
+## License
+
+RunDog は [MIT License](LICENSE) で提供します。
