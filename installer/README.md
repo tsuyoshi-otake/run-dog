@@ -13,9 +13,14 @@ The checksum file must contain one sha256sum-style entry for the installer:
 
 <64 lowercase-or-uppercase hexadecimal characters>  RunDog-Setup-x64.exe
 
+At application startup, RunDog checks this endpoint once. A strictly newer
+release that satisfies this asset contract is downloaded, hash-checked, and
+started with Inno Setup's silent arguments. There is no resident update polling
+worker; a GitHub latest-endpoint 404 means no published stable release exists.
+
 Build it locally with PowerShell:
 
-.\scripts\build-installer.ps1 -Version 0.1.0
+.\scripts\build-installer.ps1 -Version 1.0.0
 
 ISCC.exe from Inno Setup 6 must be installed. The script builds the Rust
 release executable, creates dist\RunDog-Setup-x64.exe, and writes its sidecar

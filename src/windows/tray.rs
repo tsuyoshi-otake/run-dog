@@ -98,7 +98,8 @@ impl TrayAdapter {
             Effect::SetTimer { .. }
             | Effect::KillTimer(TimerKind::CpuSampling | TimerKind::Animation)
             | Effect::SaveSettings(_)
-            | Effect::RequestStartup(_)
+            | Effect::CommitSettings { .. }
+            | Effect::CancelCommit { .. }
             | Effect::LaunchTaskManager
             | Effect::Quit => {}
         }

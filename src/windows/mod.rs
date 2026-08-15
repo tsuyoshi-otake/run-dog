@@ -3,7 +3,7 @@
 
 mod cpu;
 mod icons;
-mod registry;
+pub mod registry;
 mod tray;
 mod update;
 
@@ -29,7 +29,10 @@ use windows_sys::Win32::{
 };
 
 use crate::{
-    application::{dispatch_and_execute, App, Effect, EffectPort, Event, TimerKind},
+    application::{
+        dispatch_and_execute, App, CommitOutcome, CommitRequest, DurableStore, Effect, EffectPort,
+        Event, TimerKind,
+    },
     core::{AppSettings, ResolvedTheme},
 };
 
@@ -55,7 +58,12 @@ pub fn run() -> Result<(), String> {
         return Ok(());
     };
 
-    let settings = registry::load_settings();
+    let mut store = registry::RegistryStore::production();
+    let recovered = store.recover();
+    registry::reconcile_launch_at_startup(recovered.settings);
+    let settings = recovered.settings;
+    let settings_generation = recovered.generation;
+    let last_operation_id = recovered.last_operation_id;
     let system_theme = registry::system_theme();
     let icons = IconFrames::load()?;
     let hinstance = unsafe { GetModuleHandleW(ptr::null()) };
@@ -94,7 +102,14 @@ pub fn run() -> Result<(), String> {
         return Err(last_error("CreateWindowExW"));
     }
 
-    let mut context = Box::new(WindowContext::new(settings, system_theme, icons));
+    let mut context = Box::new(WindowContext::new(
+        settings,
+        settings_generation,
+        last_operation_id,
+        system_theme,
+        icons,
+        store,
+    ));
     let raw_context: *mut WindowContext = &mut *context;
     unsafe {
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, raw_context.cast::<()>() as isize);
@@ -141,11 +156,23 @@ struct WindowContext {
 }
 
 impl WindowContext {
-    fn new(settings: AppSettings, system_theme: ResolvedTheme, icons: IconFrames) -> Self {
+    fn new(
+        settings: AppSettings,
+        settings_generation: u64,
+        last_operation_id: u64,
+        system_theme: ResolvedTheme,
+        icons: IconFrames,
+        store: registry::RegistryStore,
+    ) -> Self {
         Self {
-            app: App::new(settings, system_theme),
+            app: App::with_persistence(
+                settings,
+                settings_generation,
+                last_operation_id,
+                system_theme,
+            ),
             cpu: WindowsCpuSource,
-            platform: WindowsPlatform::new(icons, settings),
+            platform: WindowsPlatform::new(icons, settings, store),
             updater: UpdateController::new(),
             taskbar_recreated_message: 0,
         }
@@ -155,6 +182,8 @@ impl WindowContext {
         for effect in self.app.start() {
             self.platform.apply(&effect);
         }
+        // Notify only: the tray menu offers Install after a newer stable release
+        // is found. Download and launch require an explicit user command.
         self.updater.check_for_updates();
     }
 
@@ -169,10 +198,11 @@ impl WindowContext {
 struct WindowsPlatform {
     hwnd: HWND,
     tray: TrayAdapter,
+    store: registry::RegistryStore,
 }
 
 impl WindowsPlatform {
-    fn new(icons: IconFrames, settings: AppSettings) -> Self {
+    fn new(icons: IconFrames, settings: AppSettings, store: registry::RegistryStore) -> Self {
         Self {
             hwnd: ptr::null_mut(),
             tray: TrayAdapter::new(
@@ -181,6 +211,7 @@ impl WindowsPlatform {
                 settings.fps_limit,
                 settings.launch_at_startup,
             ),
+            store,
         }
     }
 
@@ -209,12 +240,21 @@ impl EffectPort for WindowsPlatform {
             | Effect::SetThemeMenu(_)
             | Effect::SetFpsMenu(_)
             | Effect::SetStartupMenu(_)
-            | Effect::RequestStartup(_) => {}
+            | Effect::CommitSettings { .. }
+            | Effect::CancelCommit { .. } => {}
         }
     }
 
-    fn set_startup(&mut self, enabled: bool) -> bool {
-        registry::set_launch_at_startup(enabled)
+    fn execute_commit(&mut self, request: CommitRequest) -> CommitOutcome {
+        self.store.execute_commit(request)
+    }
+
+    fn cancel_commit(&mut self, operation_id: u64) {
+        self.store.cancel(operation_id);
+    }
+
+    fn now_millis(&self) -> u64 {
+        self.store.now_millis()
     }
 }
 

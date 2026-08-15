@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 
 use crate::core::{AppSettings, ResolvedTheme, SystemTimes};
 
-use super::{App, Effect, Event};
+use super::{commit_protocol::CommitRequest, App, Effect, Event};
 
 /// Read-only CPU port. The production adapter reads `GetSystemTimes`; tests
 /// provide a finite in-memory sample queue.
@@ -14,7 +14,8 @@ pub trait CpuSource {
 /// the state machine, instead of leaking registry details into application code.
 pub trait SettingsStore {
     fn load(&mut self) -> AppSettings;
-    fn save(&mut self, settings: AppSettings);
+    fn load_generation(&mut self) -> u64;
+    fn load_last_operation_id(&mut self) -> u64;
 }
 
 /// Supplies the operating-system theme in a testable form.
@@ -31,7 +32,9 @@ pub trait Clock {
 /// Executes an effect at the platform boundary.
 pub trait EffectPort {
     fn apply(&mut self, effect: &Effect);
-    fn set_startup(&mut self, enabled: bool) -> bool;
+    fn execute_commit(&mut self, request: CommitRequest) -> super::CommitOutcome;
+    fn cancel_commit(&mut self, operation_id: u64);
+    fn now_millis(&self) -> u64;
 }
 
 /// Dispatches a CPU tick only when the source supplied a snapshot.
@@ -41,20 +44,43 @@ pub fn dispatch_cpu_tick<P: EffectPort, S: CpuSource>(app: &mut App, source: &mu
     }
 }
 
-/// Runs an event and its internally generated startup-result event(s).
-///
-/// This is deliberately small: it makes success and failure of registry work
-/// explicit to integration tests, and avoids a live platform dependency.
+/// Runs an event and its internally generated commit-result event(s).
 pub fn dispatch_and_execute<P: EffectPort>(app: &mut App, port: &mut P, event: Event) {
     let mut pending_events = VecDeque::from([event]);
     while let Some(event) = pending_events.pop_front() {
         for effect in app.dispatch(event) {
-            if let Effect::RequestStartup(enabled) = effect {
-                port.apply(&effect);
-                let succeeded = port.set_startup(enabled);
-                pending_events.push_back(Event::StartupChangeFinished { enabled, succeeded });
-            } else {
-                port.apply(&effect);
+            match effect {
+                Effect::CommitSettings {
+                    operation_id,
+                    settings,
+                    previous,
+                    expected_generation,
+                    sync_run_entry,
+                    deadline_millis: _,
+                } => {
+                    port.apply(&effect);
+                    let outcome = port.execute_commit(CommitRequest {
+                        operation_id,
+                        expected_generation,
+                        settings,
+                        previous,
+                        sync_run_entry,
+                        deadline_millis: port
+                            .now_millis()
+                            .saturating_add(super::effect::COMMIT_DEADLINE_MS),
+                    });
+                    pending_events.push_back(Event::SettingsCommitFinished {
+                        settings,
+                        status: outcome.status,
+                        new_generation: outcome.generation,
+                        last_operation_id: outcome.last_operation_id,
+                    });
+                }
+                Effect::CancelCommit { operation_id } => {
+                    port.cancel_commit(operation_id);
+                    port.apply(&effect);
+                }
+                other => port.apply(&other),
             }
         }
     }

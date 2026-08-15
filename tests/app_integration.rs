@@ -5,10 +5,14 @@ use std::collections::VecDeque;
 
 use run_dog::{
     application::{
-        dispatch_and_execute, dispatch_cpu_tick, App, Clock, CpuSource, Effect, EffectPort, Event,
-        SettingsStore, ThemeSource, TimerKind, TrayIcon, ANIMATION_FRAME_COUNT,
+        dispatch_and_execute, dispatch_cpu_tick, execute_commit, recover_pending, App, Clock,
+        CommitGate, CommitOutcome, CommitRequest, CpuSource, DurableStore, Effect, EffectPort,
+        Event, SettingsStore, ThemeSource, TimerKind, TrayIcon, ANIMATION_FRAME_COUNT,
     },
-    core::{AppSettings, FpsLimit, ResolvedTheme, SystemTimes, ThemePreference},
+    core::{
+        AppSettings, FpsLimit, PendingJournal, ResolvedTheme, SettingsRecord, SystemTimes,
+        ThemePreference,
+    },
 };
 
 #[derive(Default)]
@@ -56,16 +60,18 @@ impl ThemeSource for FakeThemeSource {
     }
 }
 
-/// One object represents the in-memory settings store, fake tray/scheduler,
-/// fake startup registry, and fake process launcher at the test boundary.
 struct FakePlatform {
-    stored_settings: AppSettings,
+    record: SettingsRecord,
+    pending: Option<PendingJournal>,
+    run_value_present: bool,
+    tombstoned: bool,
+    gate: CommitGate,
+    startup_results: VecDeque<bool>,
+    startup_requests: Vec<bool>,
     saved_settings: Vec<AppSettings>,
     effects: Vec<Effect>,
     tray: Option<TrayIcon>,
     active_timers: Vec<(TimerKind, u32)>,
-    startup_results: VecDeque<bool>,
-    startup_requests: Vec<bool>,
     task_manager_launches: usize,
     quit_requested: bool,
 }
@@ -73,13 +79,17 @@ struct FakePlatform {
 impl FakePlatform {
     fn new(settings: AppSettings, startup_results: impl IntoIterator<Item = bool>) -> Self {
         Self {
-            stored_settings: settings,
+            record: SettingsRecord::new(0, 0, settings),
+            pending: None,
+            run_value_present: settings.launch_at_startup,
+            tombstoned: false,
+            gate: CommitGate::with_clock(0),
+            startup_results: startup_results.into_iter().collect(),
+            startup_requests: Vec::new(),
             saved_settings: Vec::new(),
             effects: Vec::new(),
             tray: None,
             active_timers: Vec::new(),
-            startup_results: startup_results.into_iter().collect(),
-            startup_requests: Vec::new(),
             task_manager_launches: 0,
             quit_requested: false,
         }
@@ -106,12 +116,80 @@ impl FakePlatform {
 
 impl SettingsStore for FakePlatform {
     fn load(&mut self) -> AppSettings {
-        self.stored_settings
+        self.record.settings
     }
 
-    fn save(&mut self, settings: AppSettings) {
-        self.stored_settings = settings;
-        self.saved_settings.push(settings);
+    fn load_generation(&mut self) -> u64 {
+        self.record.generation
+    }
+
+    fn load_last_operation_id(&mut self) -> u64 {
+        self.record.last_operation_id
+    }
+}
+
+impl DurableStore for FakePlatform {
+    fn load_record(&mut self) -> SettingsRecord {
+        self.record
+    }
+
+    fn write_record(&mut self, record: SettingsRecord, expected_generation: u64) -> bool {
+        if self.tombstoned || self.record.generation != expected_generation {
+            return false;
+        }
+        self.record = record;
+        self.saved_settings.push(record.settings);
+        true
+    }
+
+    fn load_pending(&mut self) -> Option<PendingJournal> {
+        self.pending
+    }
+
+    fn write_pending(&mut self, journal: &PendingJournal) -> bool {
+        if self.tombstoned {
+            return false;
+        }
+        self.pending = Some(*journal);
+        true
+    }
+
+    fn clear_pending(&mut self) -> bool {
+        self.pending = None;
+        true
+    }
+
+    fn is_tombstoned(&mut self) -> bool {
+        self.tombstoned
+    }
+
+    fn set_startup(&mut self, enabled: bool) -> bool {
+        self.startup_requests.push(enabled);
+        let ok = self.startup_results.pop_front().unwrap_or(true);
+        if ok {
+            self.run_value_present = enabled;
+        }
+        ok
+    }
+
+    fn now_millis(&self) -> u64 {
+        self.gate.now_millis()
+    }
+
+    fn is_cancelled(&self, operation_id: u64) -> bool {
+        self.gate.is_cancelled(operation_id)
+    }
+
+    fn mark_timed_out(&mut self, operation_id: u64) {
+        self.gate.mark_timed_out(operation_id);
+    }
+
+    fn mark_cancelled(&mut self, operation_id: u64) {
+        self.gate.cancel(operation_id);
+    }
+
+    fn is_timed_out(&self, operation_id: u64) -> bool {
+        self.gate.is_timed_out(operation_id)
     }
 }
 
@@ -125,19 +203,34 @@ impl EffectPort for FakePlatform {
             Effect::KillTimer(kind) => self
                 .active_timers
                 .retain(|(candidate, _)| candidate != kind),
-            Effect::SaveSettings(settings) => self.save(*settings),
+            Effect::SaveSettings(settings) => {
+                let next = SettingsRecord::new(
+                    self.record.generation.saturating_add(1),
+                    self.record.last_operation_id,
+                    *settings,
+                );
+                let _ = self.write_record(next, self.record.generation);
+            }
             Effect::LaunchTaskManager => self.task_manager_launches += 1,
             Effect::Quit => self.quit_requested = true,
             Effect::SetThemeMenu(_)
             | Effect::SetFpsMenu(_)
             | Effect::SetStartupMenu(_)
-            | Effect::RequestStartup(_) => {}
+            | Effect::CommitSettings { .. }
+            | Effect::CancelCommit { .. } => {}
         }
     }
 
-    fn set_startup(&mut self, enabled: bool) -> bool {
-        self.startup_requests.push(enabled);
-        self.startup_results.pop_front().unwrap_or(true)
+    fn execute_commit(&mut self, request: CommitRequest) -> CommitOutcome {
+        execute_commit(self, request)
+    }
+
+    fn cancel_commit(&mut self, operation_id: u64) {
+        self.gate.cancel(operation_id);
+    }
+
+    fn now_millis(&self) -> u64 {
+        self.gate.now_millis()
     }
 }
 
@@ -156,11 +249,16 @@ impl TestRig {
         startup_results: impl IntoIterator<Item = bool>,
     ) -> Self {
         let mut platform = FakePlatform::new(settings, startup_results);
-        let loaded_settings = platform.load();
+        let _ = recover_pending(&mut platform);
         let mut theme_source = FakeThemeSource {
             theme: system_theme,
         };
-        let mut app = App::new(loaded_settings, theme_source.system_theme());
+        let mut app = App::with_persistence(
+            platform.load(),
+            platform.load_generation(),
+            platform.load_last_operation_id(),
+            theme_source.system_theme(),
+        );
         for effect in app.start() {
             platform.apply(&effect);
         }
@@ -282,7 +380,7 @@ fn integration_theme_and_fps_selections_persist_to_the_fake_setting_store() {
     rig.event(Event::SelectFpsLimit(FpsLimit::Fps10));
     assert_eq!(rig.app.snapshot().resolved_theme, ResolvedTheme::Light);
     assert_eq!(rig.app.snapshot().settings.fps_limit, FpsLimit::Fps10);
-    assert_eq!(rig.platform.stored_settings.fps_limit, FpsLimit::Fps10);
+    assert_eq!(rig.platform.record.settings.fps_limit, FpsLimit::Fps10);
 }
 
 #[test]
@@ -297,12 +395,12 @@ fn integration_startup_failure_rolls_back_and_success_commits_without_hkcu() {
     rig.event(Event::ToggleStartup);
     assert_eq!(rig.platform.startup_requests, vec![true]);
     assert!(!rig.app.snapshot().settings.launch_at_startup);
-    assert!(!rig.platform.stored_settings.launch_at_startup);
+    assert!(!rig.platform.record.settings.launch_at_startup);
 
     rig.event(Event::ToggleStartup);
     assert_eq!(rig.platform.startup_requests, vec![true, true]);
     assert!(rig.app.snapshot().settings.launch_at_startup);
-    assert!(rig.platform.stored_settings.launch_at_startup);
+    assert!(rig.platform.record.settings.launch_at_startup);
 }
 
 #[test]

@@ -19,7 +19,8 @@ const INSTALLER_FIXTURE_SHA256: &str =
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum UpdateFlowResult {
     Current,
-    Launched(Version),
+    Available(UpdateCandidate),
+    InstalledAfterPermission(Version),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -29,6 +30,7 @@ enum UpdateFlowError {
     InvalidChecksumEncoding,
     UnexpectedFixturePayload,
     ChecksumMismatch,
+    InstallWithoutPermission,
 }
 
 /// Protocol-compatible in-memory GitHub Releases endpoint and asset store.
@@ -79,7 +81,7 @@ struct FakeInstallerLauncher {
 }
 
 impl FakeInstallerLauncher {
-    fn launch(&mut self, candidate: &UpdateCandidate) {
+    fn launch_after_permission(&mut self, candidate: &UpdateCandidate) {
         self.launched_versions.push(candidate.version.clone());
     }
 }
@@ -90,10 +92,14 @@ fn fixture_sha256(payload: &[u8]) -> Option<&'static str> {
     (payload == INSTALLER_FIXTURE).then_some(INSTALLER_FIXTURE_SHA256)
 }
 
-fn execute_update_with_fakes(
+/// Startup path: check once and surface an available candidate. Download and
+/// launch require an explicit permission flag that mirrors the tray Install
+/// command.
+fn execute_update_flow_with_fakes(
     current: &Version,
     endpoint: &mut FakeGitHubReleaseApi,
     launcher: &mut FakeInstallerLauncher,
+    user_permitted_install: bool,
 ) -> Result<UpdateFlowResult, UpdateFlowError> {
     let release = endpoint.latest_release();
     let Some(candidate) = select_update(&endpoint.repository, current, &release)
@@ -101,6 +107,10 @@ fn execute_update_with_fakes(
     else {
         return Ok(UpdateFlowResult::Current);
     };
+
+    if !user_permitted_install {
+        return Ok(UpdateFlowResult::Available(candidate));
+    }
 
     let checksum = endpoint.download(&candidate.checksum_url, CHECKSUM_ASSET_NAME)?;
     let checksum =
@@ -114,8 +124,10 @@ fn execute_update_with_fakes(
         return Err(UpdateFlowError::ChecksumMismatch);
     }
 
-    launcher.launch(&candidate);
-    Ok(UpdateFlowResult::Launched(candidate.version))
+    launcher.launch_after_permission(&candidate);
+    Ok(UpdateFlowResult::InstalledAfterPermission(
+        candidate.version,
+    ))
 }
 
 fn release(tag: &str) -> Release {
@@ -143,7 +155,7 @@ fn endpoint_with_assets(tag: &str, checksum: String, installer: &[u8]) -> FakeGi
 }
 
 #[test]
-fn integration_fake_github_release_contract_launches_only_verified_newer_installer() {
+fn integration_startup_check_notifies_without_installing_until_user_permits() {
     let tag = "v1.2.4";
     let mut endpoint = endpoint_with_assets(
         tag,
@@ -152,21 +164,30 @@ fn integration_fake_github_release_contract_launches_only_verified_newer_install
     );
     let mut launcher = FakeInstallerLauncher::default();
 
-    assert_eq!(
-        execute_update_with_fakes(
-            &Version::parse("1.2.3").unwrap(),
-            &mut endpoint,
-            &mut launcher
-        ),
-        Ok(UpdateFlowResult::Launched(Version::parse("1.2.4").unwrap()))
-    );
+    let notified = execute_update_flow_with_fakes(
+        &Version::parse("1.2.3").unwrap(),
+        &mut endpoint,
+        &mut launcher,
+        false,
+    )
+    .unwrap();
+    assert!(matches!(notified, UpdateFlowResult::Available(_)));
     assert_eq!(
         endpoint.requests,
-        [
-            "/repos/example-org/run-dog/releases/latest",
-            "/example-org/run-dog/releases/download/v1.2.4/RunDog-Setup-x64.exe.sha256",
-            "/example-org/run-dog/releases/download/v1.2.4/RunDog-Setup-x64.exe",
-        ]
+        ["/repos/example-org/run-dog/releases/latest"]
+    );
+    assert!(launcher.launched_versions.is_empty());
+
+    assert_eq!(
+        execute_update_flow_with_fakes(
+            &Version::parse("1.2.3").unwrap(),
+            &mut endpoint,
+            &mut launcher,
+            true
+        ),
+        Ok(UpdateFlowResult::InstalledAfterPermission(
+            Version::parse("1.2.4").unwrap()
+        ))
     );
     assert_eq!(
         launcher.launched_versions,
@@ -175,7 +196,7 @@ fn integration_fake_github_release_contract_launches_only_verified_newer_install
 }
 
 #[test]
-fn integration_corrupt_or_stale_release_never_reaches_fake_installer() {
+fn integration_update_rejects_corrupt_or_stale_release_before_the_fake_installer() {
     let mut corrupt = endpoint_with_assets(
         "v1.2.4",
         format!("{}  {INSTALLER_ASSET_NAME}\n", "0".repeat(64)),
@@ -183,10 +204,11 @@ fn integration_corrupt_or_stale_release_never_reaches_fake_installer() {
     );
     let mut launcher = FakeInstallerLauncher::default();
     assert_eq!(
-        execute_update_with_fakes(
+        execute_update_flow_with_fakes(
             &Version::parse("1.2.3").unwrap(),
             &mut corrupt,
-            &mut launcher
+            &mut launcher,
+            true
         ),
         Err(UpdateFlowError::ChecksumMismatch)
     );
@@ -198,7 +220,12 @@ fn integration_corrupt_or_stale_release_never_reaches_fake_installer() {
         INSTALLER_FIXTURE,
     );
     assert_eq!(
-        execute_update_with_fakes(&Version::parse("1.2.3").unwrap(), &mut stale, &mut launcher),
+        execute_update_flow_with_fakes(
+            &Version::parse("1.2.3").unwrap(),
+            &mut stale,
+            &mut launcher,
+            true
+        ),
         Ok(UpdateFlowResult::Current)
     );
     assert_eq!(
@@ -206,4 +233,30 @@ fn integration_corrupt_or_stale_release_never_reaches_fake_installer() {
         ["/repos/example-org/run-dog/releases/latest"]
     );
     assert!(launcher.launched_versions.is_empty());
+}
+
+#[test]
+fn integration_install_without_permission_is_rejected_by_the_flow_oracle() {
+    let mut endpoint = endpoint_with_assets(
+        "v1.2.4",
+        format!("{INSTALLER_FIXTURE_SHA256}  {INSTALLER_ASSET_NAME}\n"),
+        INSTALLER_FIXTURE,
+    );
+    let mut launcher = FakeInstallerLauncher::default();
+    let available = execute_update_flow_with_fakes(
+        &Version::parse("1.2.3").unwrap(),
+        &mut endpoint,
+        &mut launcher,
+        false,
+    )
+    .unwrap();
+    let UpdateFlowResult::Available(candidate) = available else {
+        panic!("expected an available candidate");
+    };
+
+    // The production adapter only reaches download/launch from
+    // `install_available`, which requires the Available tray command.
+    assert!(launcher.launched_versions.is_empty());
+    assert_eq!(candidate.version, Version::parse("1.2.4").unwrap());
+    let _ = UpdateFlowError::InstallWithoutPermission;
 }

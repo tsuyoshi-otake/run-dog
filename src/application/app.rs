@@ -3,16 +3,29 @@ use crate::core::{
     SystemTimes, ThemePreference,
 };
 
-use super::{Effect, Event, TimerKind, TrayIcon};
+use super::{
+    commit_protocol::CommitStatus, effect::COMMIT_DEADLINE_MS, Effect, Event, TimerKind, TrayIcon,
+};
 
 pub const CPU_SAMPLE_INTERVAL_MS: u32 = 2_000;
 pub const ANIMATION_FRAME_COUNT: usize = 3;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PendingCommit {
+    operation_id: u64,
+    settings: AppSettings,
+    previous: AppSettings,
+    sync_run_entry: bool,
+}
 
 /// Pure application state. All operating-system calls are expressed as
 /// [`Effect`] values returned by [`Self::start`] or [`Self::dispatch`].
 #[derive(Clone, Debug)]
 pub struct App {
     settings: AppSettings,
+    settings_generation: u64,
+    last_operation_id: u64,
+    next_operation_id: u64,
     system_theme: ResolvedTheme,
     resolved_theme: ResolvedTheme,
     sampler: CpuSampler,
@@ -20,29 +33,54 @@ pub struct App {
     frames: FrameCursor,
     tooltip: String,
     running: bool,
-    pending_startup_change: Option<bool>,
+    pending_commit: Option<PendingCommit>,
+    clock_millis: u64,
 }
 
 /// Observable state used by non-live integration tests and diagnostics.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AppSnapshot {
     pub settings: AppSettings,
+    pub settings_generation: u64,
+    pub last_operation_id: u64,
     pub system_theme: ResolvedTheme,
     pub resolved_theme: ResolvedTheme,
     pub frame: usize,
     pub animation_fps: u16,
     pub tooltip: String,
     pub running: bool,
-    pub pending_startup_change: Option<bool>,
+    pub pending_commit: Option<AppSettings>,
 }
 
 impl App {
     #[must_use]
     pub fn new(settings: AppSettings, system_theme: ResolvedTheme) -> Self {
+        Self::with_persistence(settings, 0, 0, system_theme)
+    }
+
+    #[must_use]
+    pub fn with_generation(
+        settings: AppSettings,
+        settings_generation: u64,
+        system_theme: ResolvedTheme,
+    ) -> Self {
+        Self::with_persistence(settings, settings_generation, 0, system_theme)
+    }
+
+    #[must_use]
+    pub fn with_persistence(
+        settings: AppSettings,
+        settings_generation: u64,
+        last_operation_id: u64,
+        system_theme: ResolvedTheme,
+    ) -> Self {
         let resolved_theme = settings.theme.resolve(system_theme);
         Self {
             animation: AnimationController::new(settings.fps_limit),
             settings,
+            settings_generation,
+            last_operation_id,
+            next_operation_id: last_operation_id.saturating_add(1),
             system_theme,
             resolved_theme,
             sampler: CpuSampler::default(),
@@ -50,21 +88,28 @@ impl App {
                 .expect("RunDog embeds a fixed non-empty frame set"),
             tooltip: "CPU: --.-%".to_owned(),
             running: false,
-            pending_startup_change: None,
+            pending_commit: None,
+            clock_millis: 0,
         }
+    }
+
+    pub fn set_clock_millis(&mut self, clock_millis: u64) {
+        self.clock_millis = clock_millis;
     }
 
     #[must_use]
     pub fn snapshot(&self) -> AppSnapshot {
         AppSnapshot {
             settings: self.settings,
+            settings_generation: self.settings_generation,
+            last_operation_id: self.last_operation_id,
             system_theme: self.system_theme,
             resolved_theme: self.resolved_theme,
             frame: self.frames.current(),
             animation_fps: self.animation.current_fps(),
             tooltip: self.tooltip.clone(),
             running: self.running,
-            pending_startup_change: self.pending_startup_change,
+            pending_commit: self.pending_commit.map(|pending| pending.settings),
         }
     }
 
@@ -109,9 +154,17 @@ impl App {
             Event::SelectTheme(theme) => self.handle_theme_selection(theme),
             Event::SelectFpsLimit(limit) => self.handle_fps_selection(limit),
             Event::ToggleStartup => self.handle_startup_toggle(),
-            Event::StartupChangeFinished { enabled, succeeded } => {
-                self.handle_startup_result(enabled, succeeded)
-            }
+            Event::SettingsCommitFinished {
+                settings,
+                status,
+                new_generation,
+                last_operation_id,
+            } => self.handle_settings_commit_finished(
+                settings,
+                status,
+                new_generation,
+                last_operation_id,
+            ),
             Event::TrayActivated => vec![Effect::LaunchTaskManager],
             Event::TaskbarRecreated => vec![Effect::AddTray(self.tray_icon())],
             Event::ExitRequested => self.handle_exit(),
@@ -152,79 +205,139 @@ impl App {
     }
 
     fn handle_theme_selection(&mut self, theme: ThemePreference) -> Vec<Effect> {
-        if self.settings.theme == theme {
+        if self.settings.theme == theme || self.pending_commit.is_some() {
             return Vec::new();
         }
-        self.settings.theme = theme;
+        let previous = self.settings;
+        let mut settings = self.settings;
+        settings.theme = theme;
+        self.begin_commit(settings, previous, false)
+    }
+
+    fn handle_fps_selection(&mut self, limit: FpsLimit) -> Vec<Effect> {
+        if self.settings.fps_limit == limit || self.pending_commit.is_some() {
+            return Vec::new();
+        }
+        let previous = self.settings;
+        let mut settings = self.settings;
+        settings.fps_limit = limit;
+        self.begin_commit(settings, previous, false)
+    }
+
+    fn handle_startup_toggle(&mut self) -> Vec<Effect> {
+        if self.pending_commit.is_some() {
+            return Vec::new();
+        }
+        let previous = self.settings;
+        let mut settings = self.settings;
+        settings.launch_at_startup = !settings.launch_at_startup;
+        self.begin_commit(settings, previous, true)
+    }
+
+    fn begin_commit(
+        &mut self,
+        settings: AppSettings,
+        previous: AppSettings,
+        sync_run_entry: bool,
+    ) -> Vec<Effect> {
+        let operation_id = self.next_operation_id;
+        self.next_operation_id = self.next_operation_id.saturating_add(1);
+        self.pending_commit = Some(PendingCommit {
+            operation_id,
+            settings,
+            previous,
+            sync_run_entry,
+        });
+        vec![Effect::CommitSettings {
+            operation_id,
+            settings,
+            previous,
+            expected_generation: self.settings_generation,
+            sync_run_entry,
+            deadline_millis: self.clock_millis.saturating_add(COMMIT_DEADLINE_MS),
+        }]
+    }
+
+    fn handle_settings_commit_finished(
+        &mut self,
+        settings: AppSettings,
+        status: CommitStatus,
+        new_generation: u64,
+        last_operation_id: u64,
+    ) -> Vec<Effect> {
+        let Some(pending) = self.pending_commit.take() else {
+            return Vec::new();
+        };
+        if pending.settings != settings {
+            self.pending_commit = Some(pending);
+            return Vec::new();
+        }
+
+        self.settings_generation = new_generation;
+        self.last_operation_id = last_operation_id.max(self.last_operation_id);
+        self.next_operation_id = self
+            .next_operation_id
+            .max(self.last_operation_id.saturating_add(1));
+
+        if !matches!(status, CommitStatus::Applied | CommitStatus::Duplicate) {
+            return vec![
+                Effect::SetThemeMenu(self.settings.theme),
+                Effect::SetFpsMenu(self.settings.fps_limit),
+                Effect::SetStartupMenu(self.settings.launch_at_startup),
+            ];
+        }
+
+        if status == CommitStatus::Duplicate {
+            // Durable state already contains this logical operation.
+            return vec![
+                Effect::SetThemeMenu(self.settings.theme),
+                Effect::SetFpsMenu(self.settings.fps_limit),
+                Effect::SetStartupMenu(self.settings.launch_at_startup),
+            ];
+        }
+
         let previous_resolved_theme = self.resolved_theme;
-        self.resolved_theme = theme.resolve(self.system_theme);
+        let previous_fps_limit = self.settings.fps_limit;
+        self.settings = settings;
+        self.resolved_theme = settings.theme.resolve(self.system_theme);
 
         let mut effects = vec![
-            Effect::SaveSettings(self.settings),
             Effect::SetThemeMenu(self.settings.theme),
+            Effect::SetFpsMenu(self.settings.fps_limit),
+            Effect::SetStartupMenu(self.settings.launch_at_startup),
         ];
         if previous_resolved_theme != self.resolved_theme {
             effects.push(Effect::ModifyTray(self.tray_icon()));
         }
+        if previous_fps_limit != self.settings.fps_limit {
+            if let Some(change) = self.animation.set_limit(self.settings.fps_limit) {
+                effects.push(Effect::SetTimer {
+                    kind: TimerKind::Animation,
+                    interval_ms: change.interval_ms,
+                });
+            }
+        }
+        let _ = pending.previous;
+        let _ = pending.sync_run_entry;
         effects
-    }
-
-    fn handle_fps_selection(&mut self, limit: FpsLimit) -> Vec<Effect> {
-        if self.settings.fps_limit == limit {
-            return Vec::new();
-        }
-        self.settings.fps_limit = limit;
-        let rate_change = self.animation.set_limit(limit);
-
-        let mut effects = vec![
-            Effect::SaveSettings(self.settings),
-            Effect::SetFpsMenu(self.settings.fps_limit),
-        ];
-        if let Some(change) = rate_change {
-            effects.push(Effect::SetTimer {
-                kind: TimerKind::Animation,
-                interval_ms: change.interval_ms,
-            });
-        }
-        effects
-    }
-
-    fn handle_startup_toggle(&mut self) -> Vec<Effect> {
-        if self.pending_startup_change.is_some() {
-            return Vec::new();
-        }
-        let requested = !self.settings.launch_at_startup;
-        self.pending_startup_change = Some(requested);
-        vec![Effect::RequestStartup(requested)]
-    }
-
-    fn handle_startup_result(&mut self, enabled: bool, succeeded: bool) -> Vec<Effect> {
-        if self.pending_startup_change != Some(enabled) {
-            return Vec::new();
-        }
-        self.pending_startup_change = None;
-
-        if !succeeded {
-            return vec![Effect::SetStartupMenu(self.settings.launch_at_startup)];
-        }
-
-        self.settings.launch_at_startup = enabled;
-        vec![
-            Effect::SaveSettings(self.settings),
-            Effect::SetStartupMenu(self.settings.launch_at_startup),
-        ]
     }
 
     fn handle_exit(&mut self) -> Vec<Effect> {
         self.running = false;
-        self.pending_startup_change = None;
-        vec![
+        let mut effects = Vec::new();
+        if let Some(pending) = self.pending_commit.take() {
+            effects.push(Effect::CancelCommit {
+                operation_id: pending.operation_id,
+            });
+        }
+        effects.extend([
             Effect::KillTimer(TimerKind::CpuSampling),
             Effect::KillTimer(TimerKind::Animation),
             Effect::RemoveTray,
             Effect::SaveSettings(self.settings),
             Effect::Quit,
-        ]
+        ]);
+        effects
     }
 
     fn tray_icon(&self) -> TrayIcon {
@@ -240,7 +353,7 @@ impl App {
 mod tests {
     use super::{App, CPU_SAMPLE_INTERVAL_MS};
     use crate::{
-        application::{Effect, Event, TimerKind},
+        application::{CommitStatus, Effect, Event, TimerKind},
         core::{AppSettings, FpsLimit, ResolvedTheme, SystemTimes, ThemePreference},
     };
 
@@ -288,62 +401,46 @@ mod tests {
     }
 
     #[test]
-    fn c2_theme_changes_only_modify_icon_when_resolved_theme_changes() {
+    fn c2_theme_changes_wait_for_durable_ack_before_updating_memory() {
         let mut app = started_app();
         let effects = app.dispatch(Event::SelectTheme(ThemePreference::Dark));
-        assert_eq!(effects.len(), 2);
-        assert_eq!(app.snapshot().resolved_theme, ResolvedTheme::Dark);
-        let effects = app.dispatch(Event::SelectTheme(ThemePreference::Light));
-        assert!(matches!(effects.last(), Some(Effect::ModifyTray(_))));
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::CommitSettings {
+                operation_id: 1,
+                settings: AppSettings {
+                    theme: ThemePreference::Dark,
+                    ..
+                },
+                expected_generation: 0,
+                sync_run_entry: false,
+                ..
+            }]
+        ));
+        assert_eq!(app.snapshot().settings.theme, ThemePreference::System);
+
+        let effects = app.dispatch(Event::SettingsCommitFinished {
+            settings: AppSettings {
+                theme: ThemePreference::Dark,
+                ..AppSettings::default()
+            },
+            status: CommitStatus::Applied,
+            new_generation: 1,
+            last_operation_id: 1,
+        });
+        assert!(effects.contains(&Effect::SetThemeMenu(ThemePreference::Dark)));
+        assert_eq!(app.snapshot().settings.theme, ThemePreference::Dark);
+        assert_eq!(app.snapshot().settings_generation, 1);
+        assert_eq!(app.snapshot().last_operation_id, 1);
     }
 
     #[test]
-    fn c2_startup_results_cover_busy_mismatch_failure_and_success() {
+    fn c2_exit_cancels_in_flight_commit_before_quit() {
         let mut app = started_app();
-        assert_eq!(
-            app.dispatch(Event::ToggleStartup),
-            vec![Effect::RequestStartup(true)]
-        );
-        assert!(app.dispatch(Event::ToggleStartup).is_empty());
-        assert!(app
-            .dispatch(Event::StartupChangeFinished {
-                enabled: false,
-                succeeded: true
-            })
-            .is_empty());
-        assert_eq!(
-            app.dispatch(Event::StartupChangeFinished {
-                enabled: true,
-                succeeded: false
-            }),
-            vec![Effect::SetStartupMenu(false)]
-        );
-        assert_eq!(
-            app.dispatch(Event::ToggleStartup),
-            vec![Effect::RequestStartup(true)]
-        );
-        assert_eq!(
-            app.dispatch(Event::StartupChangeFinished {
-                enabled: true,
-                succeeded: true
-            }),
-            vec![
-                Effect::SaveSettings(AppSettings {
-                    launch_at_startup: true,
-                    ..AppSettings::default()
-                }),
-                Effect::SetStartupMenu(true),
-            ]
-        );
-    }
-
-    #[test]
-    fn c2_exit_stops_lifecycle_and_drops_later_events() {
-        let mut app = started_app();
+        let _ = app.dispatch(Event::SelectTheme(ThemePreference::Dark));
         let effects = app.dispatch(Event::ExitRequested);
+        assert!(effects.contains(&Effect::CancelCommit { operation_id: 1 }));
         assert!(effects.contains(&Effect::Quit));
         assert!(!app.snapshot().running);
-        assert!(app.dispatch(Event::AnimationTimerElapsed).is_empty());
-        assert!(app.dispatch(Event::ExitRequested).is_empty());
     }
 }

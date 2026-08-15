@@ -28,7 +28,7 @@ ISTQB のコンポーネントテストとして、各コンポーネントを�
 | 速度制御 | 上昇/下降、ヒステリシス境界、上限の縮小/拡大、同値入力 |
 | アプリ状態 | 初回開始/重複開始、pending startup、一致/不一致結果、成功/失敗、終了後イベント |
 | 設定/テーマ | `None`、有効値、無効値、System/Light/Dark の解決 |
-| 更新 protocol | draft/prerelease、older/equal/newer version、asset 欠落/重複、cross-repository/tag URL、checksum 正常/不正/重複 |
+| 更新 protocol | draft/prerelease、older/equal/newer version、asset 欠落/重複、cross-repository/tag URL、checksum 正常/不正/重複、latest 404、起動時 worker の重複防止 |
 | Win32 converter | 有効/短縮/不正データ、既知/未知のトレイコマンド |
 
 `cargo llvm-cov` を利用できる CI では、この決定表を condition/MC/DC 計測結果と照合する。Stable の通常テストは同じ決定表と PBT を実行する。
@@ -46,11 +46,15 @@ ISTQB のコンポーネントテストとして、各コンポーネントを�
 
 更新判定は `src/update.rs` の独立 oracle で検証する。`tests/update_protocol_integration.rs`
 は GitHub latest API、release asset、checksum、installer launcher をプロトコル互換の
-in-memory fake で接続し、新版の verified launch と破損/stale artifact の launch 抑止を
-結合レベルで検証する。GitHub JSON decoder、WinHTTP、download、SHA-256、ShellExecute、
-Inno Setup は実呼出ししない。release descriptor、version、asset URL、checksum manifest
-の境界は component test と 2,048 ケースの PBT で固定するため、test 実行がネットワークや
-installer を起動することはない。
+in-memory fake で接続し、**起動時チェックは通知のみ**、Install 許可後の verified launch、
+破損/stale artifact の launch 抑止を結合レベルで検証する。GitHub JSON decoder、WinHTTP、
+download、SHA-256、ShellExecute、Inno Setup は実呼出ししない。release descriptor、
+version、asset URL、checksum manifest の境界は component test と 2,048 ケースの PBT で
+固定するため、test 実行がネットワークや installer を起動することはない。`windows::update`
+の C2 テストは、active な Checking / Downloading / Launching 中に二つ目の check worker
+を受け付けないこと、404（stable release 未公開）を endpoint failure と区別すること、
+Inno Setup の無表示引数を固定することを検証する。加えて 8 concurrent claim の
+コンポーネントテストで、開始権を得る worker がちょうど 1 件になることを確認する。
 
 更新PBTは固定 seed `0x5EED_2026_0815_0001` を使い、縮小済みの反例は
 `verification/evidence/update-pbt-counterexamples.regressions` に保存する。

@@ -43,6 +43,10 @@ finally {
 }
 
 $compilerCandidates = @($env:ISCC)
+$localApplicationData = [Environment]::GetFolderPath('LocalApplicationData')
+if ($localApplicationData) {
+    $compilerCandidates += Join-Path $localApplicationData 'Programs\Inno Setup 6\ISCC.exe'
+}
 $programFilesX86 = [Environment]::GetEnvironmentVariable('ProgramFiles(x86)')
 if ($programFilesX86) {
     $compilerCandidates += Join-Path $programFilesX86 'Inno Setup 6\ISCC.exe'
