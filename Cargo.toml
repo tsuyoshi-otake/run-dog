@@ -1,0 +1,54 @@
+[package]
+name = "run-dog"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97"
+description = "A low-overhead Windows tray CPU monitor inspired by RunCat."
+license = "UNLICENSED"
+publish = false
+
+[lib]
+name = "run_dog"
+path = "src/lib.rs"
+
+[[bin]]
+name = "RunDog"
+path = "src/main.rs"
+
+[dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Networking_WinHttp",
+    "Win32_Security",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(windows)'.dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+sha2 = "0.10.9"
+
+[dev-dependencies]
+proptest = "1.11.0"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+unused_must_use = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"

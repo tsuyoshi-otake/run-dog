@@ -1,0 +1,55 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify Rust sources
+        shell: pwsh
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets --all-features -- -D warnings
+          cargo test --all-targets
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --yes --no-progress
+
+      - name: Build unsigned installer and checksum
+        shell: pwsh
+        env:
+          RUN_DOG_UPDATE_REPOSITORY: ${{ github.repository }}
+        run: .\scripts\build-installer.ps1 -Version $env:GITHUB_REF_NAME
+
+      - name: Verify release asset contract
+        shell: pwsh
+        run: |
+          $checksum = Get-Content -LiteralPath .\dist\RunDog-Setup-x64.exe.sha256 -Raw
+          if ($checksum -notmatch '^[0-9a-f]{64}  RunDog-Setup-x64\.exe\r?\n$') {
+            throw 'Checksum sidecar does not match the updater contract.'
+          }
+
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create $env:GITHUB_REF_NAME
+          .\dist\RunDog-Setup-x64.exe
+          .\dist\RunDog-Setup-x64.exe.sha256
+          --verify-tag
+          --title "RunDog $env:GITHUB_REF_NAME"
+          --generate-notes
