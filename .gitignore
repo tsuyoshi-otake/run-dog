@@ -1,0 +1,8 @@
+/target/
+/dist/
+*.pdb
+*.log
+
+# Reproducible cargo-mutants workspaces (logs and per-mutant diffs) are kept
+# locally; the concise audit and regression evidence is versioned instead.
+verification/evidence/**/mutants.out/

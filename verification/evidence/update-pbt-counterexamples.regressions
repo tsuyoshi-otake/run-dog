@@ -1,0 +1,4 @@
+# Seeds for failure cases in the GitHub Release update PBT.
+#
+# Proptest reads this file before generating the deterministic 2,048 cases.
+# A minimized counterexample is appended automatically if the property fails.
