@@ -10,8 +10,8 @@ use run_dog::{
         Event, SettingsStore, ThemeSource, TimerKind, TrayIcon, ANIMATION_FRAME_COUNT,
     },
     core::{
-        AppSettings, FpsLimit, PendingJournal, ResolvedTheme, SettingsRecord, SystemTimes,
-        ThemePreference,
+        AppSettings, FpsLimit, MemoryStatus, PendingJournal, ResolvedTheme, SettingsRecord,
+        SystemTimes, ThemePreference,
     },
 };
 
@@ -34,19 +34,30 @@ impl Clock for FakeClock {
 
 struct FakeCpu {
     samples: VecDeque<SystemTimes>,
+    memory: VecDeque<MemoryStatus>,
 }
 
 impl FakeCpu {
     fn new(samples: impl IntoIterator<Item = SystemTimes>) -> Self {
         Self {
             samples: samples.into_iter().collect(),
+            memory: VecDeque::new(),
         }
+    }
+
+    fn with_memory(mut self, memory: impl IntoIterator<Item = MemoryStatus>) -> Self {
+        self.memory = memory.into_iter().collect();
+        self
     }
 }
 
 impl CpuSource for FakeCpu {
     fn read_system_times(&mut self) -> Option<SystemTimes> {
         self.samples.pop_front()
+    }
+
+    fn read_memory(&mut self) -> Option<MemoryStatus> {
+        self.memory.pop_front()
     }
 }
 
@@ -292,7 +303,7 @@ fn integration_boot_uses_only_fake_ports_and_configures_the_two_timers() {
     assert_eq!(rig.platform.timer_interval(TimerKind::Animation), Some(200));
     assert_eq!(
         rig.platform.tray.as_ref().map(|tray| tray.tooltip.as_str()),
-        Some("CPU: --.-%")
+        Some("CPU: --.-%\nMemory: --.-%")
     );
     assert_eq!(rig.app.snapshot().frame, 0);
 }
@@ -309,19 +320,29 @@ fn integration_cpu_sampling_changes_speed_without_rearming_an_unchanged_timer() 
         ],
         [],
     );
+    rig.cpu = FakeCpu::new([
+        SystemTimes::new(0, 0, 0),
+        SystemTimes::new(0, 100, 0),
+        SystemTimes::new(0, 200, 0),
+    ])
+    .with_memory([
+        MemoryStatus::new(16_u64 << 30, 8_u64 << 30),
+        MemoryStatus::new(16_u64 << 30, 8_u64 << 30),
+        MemoryStatus::new(16_u64 << 30, 4_u64 << 30),
+    ]);
 
     rig.cpu_tick();
     assert_eq!(rig.clock.now_millis(), 2_000);
     assert_eq!(
         rig.platform.tray.as_ref().map(|tray| tray.tooltip.as_str()),
-        Some("CPU: --.-%")
+        Some("CPU: --.-%\nMemory: 50.0%")
     );
 
     rig.cpu_tick();
     assert_eq!(rig.platform.timer_interval(TimerKind::Animation), Some(50));
     assert_eq!(
         rig.platform.tray.as_ref().map(|tray| tray.tooltip.as_str()),
-        Some("CPU: 100.0%")
+        Some("CPU: 100.0%\nMemory: 50.0%")
     );
     let rearm_count = rig
         .platform

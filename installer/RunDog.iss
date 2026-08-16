@@ -2,7 +2,7 @@
 ; The release workflow invokes ISCC with /DAppVersion=X.Y.Z.
 
 #ifndef AppVersion
-  #define AppVersion "1.0.0"
+  #define AppVersion "1.1.0"
 #endif
 
 #ifndef UpdateRepository
@@ -29,6 +29,7 @@ SolidCompression=yes
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayIcon={app}\{#AppExeName}
+SetupIconFile=..\assets\rundog.ico
 CloseApplications=yes
 CloseApplicationsFilter={#AppExeName}
 RestartApplications=no

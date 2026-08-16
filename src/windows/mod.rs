@@ -2,10 +2,15 @@
 //! integration tests can exercise the rest of the crate without live OS state.
 
 mod cpu;
+mod flyout;
 mod icons;
+mod memory;
+mod notify_icon;
 pub mod registry;
+mod storage;
 mod tray;
 mod update;
+mod usage;
 
 use std::ptr;
 
@@ -41,9 +46,13 @@ use self::{
     icons::IconFrames,
     tray::{
         event_for_command, TrayAdapter, COMMAND_CHECK_FOR_UPDATES, COMMAND_INSTALL_UPDATE,
-        TRAY_CALLBACK_MESSAGE,
+        PROMOTE_TIMER_ID, TRAY_CALLBACK_MESSAGE,
     },
     update::{UpdateController, UPDATE_REQUEST_EXIT_MESSAGE},
+    usage::{
+        UsageCollector, UsageTick, USAGE_CONTINUE_INTERVAL_MS, USAGE_FIRST_INTERVAL_MS,
+        USAGE_IDLE_INTERVAL_MS, USAGE_READY_MESSAGE, USAGE_TIMER_ID,
+    },
 };
 
 const WINDOW_CLASS_NAME: &str = "SystemExe.RunDog.MessageWindow";
@@ -152,6 +161,7 @@ struct WindowContext {
     cpu: WindowsCpuSource,
     platform: WindowsPlatform,
     updater: UpdateController,
+    usage: UsageCollector,
     taskbar_recreated_message: u32,
 }
 
@@ -174,6 +184,7 @@ impl WindowContext {
             cpu: WindowsCpuSource,
             platform: WindowsPlatform::new(icons, settings, store),
             updater: UpdateController::new(),
+            usage: UsageCollector::new(),
             taskbar_recreated_message: 0,
         }
     }
@@ -185,11 +196,31 @@ impl WindowContext {
         // Notify only: the tray menu offers Install after a newer stable release
         // is found. Download and launch require an explicit user command.
         self.updater.check_for_updates();
+        self.arm_usage_timer(USAGE_FIRST_INTERVAL_MS);
+    }
+
+    fn arm_usage_timer(&self, interval_ms: u32) {
+        if !self.platform.hwnd.is_null() {
+            let _ = unsafe { SetTimer(self.platform.hwnd, USAGE_TIMER_ID, interval_ms, None) };
+        }
+    }
+
+    fn tick_usage(&mut self) {
+        let more = self.usage.tick(self.platform.hwnd);
+        self.dispatch(Event::UsageSample(self.usage.snapshot()));
+        let interval = match more {
+            UsageTick::MoreWork => USAGE_CONTINUE_INTERVAL_MS,
+            UsageTick::Idle => USAGE_IDLE_INTERVAL_MS,
+        };
+        self.arm_usage_timer(interval);
     }
 
     fn dispatch(&mut self, event: Event) {
         if matches!(&event, Event::ExitRequested) {
             self.updater.cancel();
+            if !self.platform.hwnd.is_null() {
+                let _ = unsafe { KillTimer(self.platform.hwnd, USAGE_TIMER_ID) };
+            }
         }
         dispatch_and_execute(&mut self.app, &mut self.platform, event);
     }
@@ -299,13 +330,19 @@ unsafe extern "system" fn window_proc(
     if message == WM_TIMER {
         match wparam {
             TIMER_CPU => {
-                if let Some(sample) =
+                if let Some(times) =
                     crate::application::CpuSource::read_system_times(&mut context.cpu)
                 {
-                    context.dispatch(Event::CpuSample(sample));
+                    context.dispatch(Event::CpuSample {
+                        times,
+                        memory: self::memory::read_memory_status(),
+                        storage: self::storage::read_storage_status(),
+                    });
                 }
             }
             TIMER_ANIMATION => context.dispatch(Event::AnimationTimerElapsed),
+            PROMOTE_TIMER_ID => context.platform.tray.on_promote_timer(),
+            USAGE_TIMER_ID => context.tick_usage(),
             _ => {}
         }
         return 0;
@@ -323,6 +360,15 @@ unsafe extern "system" fn window_proc(
             context.platform.tray.show_menu(&update_state);
         } else if TrayAdapter::is_activation_notification(notification) {
             context.dispatch(Event::TrayActivated);
+        } else {
+            context.platform.tray.handle_hover(notification);
+        }
+        return 0;
+    }
+
+    if message == USAGE_READY_MESSAGE {
+        if context.usage.take_claude_limits() {
+            context.dispatch(Event::UsageSample(context.usage.snapshot()));
         }
         return 0;
     }

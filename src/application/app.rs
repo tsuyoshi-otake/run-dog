@@ -1,6 +1,7 @@
 use crate::core::{
-    AnimationController, AppSettings, CpuSampler, FpsLimit, FrameCursor, ResolvedTheme,
-    SystemTimes, ThemePreference,
+    AnimationController, AppSettings, CpuBreakdown, CpuSampler, FpsLimit, FrameCursor,
+    MemoryStatus, ResolvedTheme, Sparkline, StorageStatus, SystemTimes, ThemePreference,
+    UsageSnapshot,
 };
 
 use super::{
@@ -31,6 +32,11 @@ pub struct App {
     sampler: CpuSampler,
     animation: AnimationController,
     frames: FrameCursor,
+    memory: Option<MemoryStatus>,
+    storage: Option<StorageStatus>,
+    cpu_sparkline: Sparkline,
+    memory_sparkline: Sparkline,
+    usage: UsageSnapshot,
     tooltip: String,
     running: bool,
     pending_commit: Option<PendingCommit>,
@@ -38,7 +44,7 @@ pub struct App {
 }
 
 /// Observable state used by non-live integration tests and diagnostics.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct AppSnapshot {
     pub settings: AppSettings,
     pub settings_generation: u64,
@@ -48,6 +54,11 @@ pub struct AppSnapshot {
     pub frame: usize,
     pub animation_fps: u16,
     pub tooltip: String,
+    pub cpu_sparkline: Sparkline,
+    pub memory_sparkline: Sparkline,
+    pub cpu_breakdown: Option<CpuBreakdown>,
+    pub storage: Option<StorageStatus>,
+    pub usage: UsageSnapshot,
     pub running: bool,
     pub pending_commit: Option<AppSettings>,
 }
@@ -86,7 +97,12 @@ impl App {
             sampler: CpuSampler::default(),
             frames: FrameCursor::new(ANIMATION_FRAME_COUNT)
                 .expect("RunDog embeds a fixed non-empty frame set"),
-            tooltip: "CPU: --.-%".to_owned(),
+            memory: None,
+            storage: None,
+            cpu_sparkline: Sparkline::new(),
+            memory_sparkline: Sparkline::new(),
+            usage: UsageSnapshot::default(),
+            tooltip: format_tooltip(None, None),
             running: false,
             pending_commit: None,
             clock_millis: 0,
@@ -108,6 +124,11 @@ impl App {
             frame: self.frames.current(),
             animation_fps: self.animation.current_fps(),
             tooltip: self.tooltip.clone(),
+            cpu_sparkline: self.cpu_sparkline,
+            memory_sparkline: self.memory_sparkline,
+            cpu_breakdown: self.sampler.latest_breakdown(),
+            storage: self.storage,
+            usage: self.usage,
             running: self.running,
             pending_commit: self.pending_commit.map(|pending| pending.settings),
         }
@@ -145,7 +166,11 @@ impl App {
         }
 
         match event {
-            Event::CpuSample(sample) => self.handle_cpu_sample(sample),
+            Event::CpuSample {
+                times,
+                memory,
+                storage,
+            } => self.handle_cpu_sample(times, memory, storage),
             Event::AnimationTimerElapsed => {
                 self.frames.advance();
                 vec![Effect::ModifyTray(self.tray_icon())]
@@ -167,29 +192,60 @@ impl App {
             ),
             Event::TrayActivated => vec![Effect::LaunchTaskManager],
             Event::TaskbarRecreated => vec![Effect::AddTray(self.tray_icon())],
+            Event::UsageSample(usage) => {
+                if self.usage == usage {
+                    Vec::new()
+                } else {
+                    self.usage = usage;
+                    vec![Effect::ModifyTray(self.tray_icon())]
+                }
+            }
             Event::ExitRequested => self.handle_exit(),
         }
     }
 
-    fn handle_cpu_sample(&mut self, sample: SystemTimes) -> Vec<Effect> {
-        let Some(load) = self.sampler.push(sample) else {
-            return Vec::new();
-        };
+    fn handle_cpu_sample(
+        &mut self,
+        sample: SystemTimes,
+        memory: Option<MemoryStatus>,
+        storage: Option<StorageStatus>,
+    ) -> Vec<Effect> {
+        let cpu_load = self.sampler.push(sample);
+        if memory.is_some_and(|status| status.usage_percent().is_some()) {
+            self.memory = memory;
+        }
+        if storage.is_some_and(|status| status.used_percent().is_some()) {
+            self.storage = storage;
+        }
 
-        let next_tooltip = format!("CPU: {:.1}%", load.value());
+        if let Some(_load) = cpu_load {
+            let spark = self
+                .sampler
+                .latest_breakdown()
+                .map(|breakdown| breakdown.total.value())
+                .unwrap_or(0.0);
+            self.cpu_sparkline.push(spark);
+            if let Some(percent) = self.memory.and_then(MemoryStatus::usage_percent) {
+                self.memory_sparkline.push(percent);
+            }
+        }
+
+        let next_tooltip =
+            format_tooltip(self.sampler.latest().map(|load| load.value()), self.memory);
         let tooltip_changed = self.tooltip != next_tooltip;
         self.tooltip = next_tooltip;
-        let rate_change = self.animation.update(load);
 
         let mut effects = Vec::with_capacity(2);
-        if tooltip_changed {
+        if tooltip_changed || cpu_load.is_some() {
             effects.push(Effect::ModifyTray(self.tray_icon()));
         }
-        if let Some(change) = rate_change {
-            effects.push(Effect::SetTimer {
-                kind: TimerKind::Animation,
-                interval_ms: change.interval_ms,
-            });
+        if let Some(load) = cpu_load {
+            if let Some(change) = self.animation.update(load) {
+                effects.push(Effect::SetTimer {
+                    kind: TimerKind::Animation,
+                    interval_ms: change.interval_ms,
+                });
+            }
         }
         effects
     }
@@ -345,8 +401,29 @@ impl App {
             theme: self.resolved_theme,
             frame: self.frames.current(),
             tooltip: self.tooltip.clone(),
+            cpu_sparkline: self.cpu_sparkline,
+            memory_sparkline: self.memory_sparkline,
+            cpu_breakdown: self.sampler.latest_breakdown(),
+            memory: self.memory,
+            storage: self.storage,
+            usage: self.usage,
         }
     }
+}
+
+fn format_percent(value: Option<f32>) -> String {
+    match value {
+        Some(percent) => format!("{percent:.1}%"),
+        None => "--.-%".to_owned(),
+    }
+}
+
+fn format_tooltip(cpu_percent: Option<f32>, memory: Option<MemoryStatus>) -> String {
+    format!(
+        "CPU: {}\nMemory: {}",
+        format_percent(cpu_percent),
+        format_percent(memory.and_then(MemoryStatus::usage_percent))
+    )
 }
 
 #[cfg(test)]
@@ -354,7 +431,7 @@ mod tests {
     use super::{App, CPU_SAMPLE_INTERVAL_MS};
     use crate::{
         application::{CommitStatus, Effect, Event, TimerKind},
-        core::{AppSettings, FpsLimit, ResolvedTheme, SystemTimes, ThemePreference},
+        core::{AppSettings, FpsLimit, MemoryStatus, ResolvedTheme, SystemTimes, ThemePreference},
     };
 
     fn started_app() -> App {
@@ -382,9 +459,9 @@ mod tests {
     fn c2_event_paths_cover_ignored_first_sample_change_and_unchanged_paths() {
         let mut app = started_app();
         assert!(app
-            .dispatch(Event::CpuSample(SystemTimes::new(0, 0, 0)))
+            .dispatch(Event::cpu_sample(SystemTimes::new(0, 0, 0)))
             .is_empty());
-        let effects = app.dispatch(Event::CpuSample(SystemTimes::new(0, 100, 0)));
+        let effects = app.dispatch(Event::cpu_sample(SystemTimes::new(0, 100, 0)));
         assert!(effects.contains(&Effect::SetTimer {
             kind: TimerKind::Animation,
             interval_ms: 50,
@@ -432,6 +509,63 @@ mod tests {
         assert_eq!(app.snapshot().settings.theme, ThemePreference::Dark);
         assert_eq!(app.snapshot().settings_generation, 1);
         assert_eq!(app.snapshot().last_operation_id, 1);
+    }
+
+    #[test]
+    fn component_tooltip_shows_memory_percent_independently_of_the_first_cpu_sample() {
+        let mut app = started_app();
+        assert_eq!(app.snapshot().tooltip, "CPU: --.-%\nMemory: --.-%");
+
+        let effects = app.dispatch(Event::CpuSample {
+            times: SystemTimes::new(0, 0, 0),
+            memory: Some(MemoryStatus::new(16_u64 << 30, 8_u64 << 30)),
+            storage: None,
+        });
+        assert!(effects.contains(&Effect::ModifyTray(app.tray_icon())));
+        assert_eq!(app.snapshot().tooltip, "CPU: --.-%\nMemory: 50.0%");
+        assert_eq!(app.snapshot().cpu_sparkline.len(), 0);
+
+        let _ = app.dispatch(Event::CpuSample {
+            times: SystemTimes::new(0, 100, 0),
+            memory: Some(MemoryStatus::new(16_u64 << 30, 4_u64 << 30)),
+            storage: Some(crate::core::StorageStatus::new(100, 25)),
+        });
+        assert_eq!(app.snapshot().tooltip, "CPU: 100.0%\nMemory: 75.0%");
+        assert_eq!(app.snapshot().cpu_sparkline.len(), 1);
+        assert_eq!(app.snapshot().memory_sparkline.len(), 1);
+        assert_eq!(
+            app.snapshot()
+                .cpu_breakdown
+                .map(|breakdown| breakdown.total.value()),
+            Some(100.0)
+        );
+        assert_eq!(
+            app.snapshot()
+                .storage
+                .and_then(crate::core::StorageStatus::used_percent),
+            Some(75.0)
+        );
+
+        let effects = app.dispatch(Event::CpuSample {
+            times: SystemTimes::new(0, 200, 0),
+            memory: Some(MemoryStatus::new(0, 0)),
+            storage: Some(crate::core::StorageStatus::new(0, 0)),
+        });
+        assert_eq!(app.snapshot().tooltip, "CPU: 100.0%\nMemory: 75.0%");
+        assert_eq!(app.snapshot().cpu_sparkline.len(), 2);
+        assert_eq!(app.snapshot().memory_sparkline.len(), 2);
+        assert!(effects.contains(&Effect::ModifyTray(app.tray_icon())));
+    }
+
+    #[test]
+    fn component_usage_sample_updates_tray_only_when_the_snapshot_changes() {
+        let mut app = started_app();
+        let mut usage = crate::core::UsageSnapshot::default();
+        usage.claude.today_cents = 725;
+        let effects = app.dispatch(Event::UsageSample(usage));
+        assert!(effects.contains(&Effect::ModifyTray(app.tray_icon())));
+        assert_eq!(app.snapshot().usage.claude.today_cents, 725);
+        assert!(app.dispatch(Event::UsageSample(usage)).is_empty());
     }
 
     #[test]

@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RunDog</title>
+    <meta
+      name="description"
+      content="通知領域で犬を飼ってみませんか？走る速さで Windows の CPU 負荷がわかります。"
+    />
+    <meta property="og:title" content="RunDog" />
+    <meta
+      property="og:description"
+      content="通知領域で犬を飼ってみませんか？走る速さで Windows の CPU 負荷がわかります。"
+    />
+    <meta property="og:image" content="./images/hover.png" />
+    <link rel="icon" href="./images/taskbar.png" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Outfit:ital,wght@0,400;0,600;0,700;1,700&family=Noto+Sans+JP:wght@400;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <main id="content">
+      <header class="hero">
+        <h1>RunDog</h1>
+        <p class="tagline" data-i18n="tagline">通知領域で犬を飼ってみませんか？</p>
+      </header>
+
+      <p class="lead" data-i18n="lead">
+        犬の走る速さで Windows の CPU 負荷がわかります。タスクバーをちらっと見るだけで十分です。
+      </p>
+
+      <figure class="shot shot-wide">
+        <img
+          src="./images/taskbar.png"
+          alt="通知領域を走る RunDog"
+          data-i18n-alt="altTaskbar"
+        />
+      </figure>
+
+      <p class="cta-wrap">
+        <a
+          class="download"
+          href="https://github.com/tsuyoshi-otake/run-dog/releases/latest/download/RunDog-Setup-x64.exe"
+        >
+          <span data-i18n="download">Windows 向けにダウンロード</span>
+          <small>GitHub Releases</small>
+        </a>
+      </p>
+      <p class="requirement">
+        <span data-i18n="requirement">Windows 10 / 11（64-bit）</span>
+        ·
+        <a href="https://github.com/tsuyoshi-otake/run-dog" data-i18n="viewGithub">GitHub で見る</a>
+      </p>
+
+      <h2 data-i18n="featuresTitle">特長</h2>
+      <div class="cards" id="features"></div>
+
+      <h2 data-i18n="metricsTitle">ホバーカード</h2>
+      <div class="split">
+        <figure class="shot">
+          <img
+            src="./images/flyout.png"
+            width="320"
+            alt="ホバー時の RunDog カード"
+            data-i18n-alt="altFlyout"
+          />
+        </figure>
+        <div>
+          <p data-i18n="metricsLead">
+            犬にポインターを重ねるとカードが開きます。数字を探しに行く必要はありません。
+          </p>
+          <ul id="metrics"></ul>
+        </div>
+      </div>
+
+      <h2 data-i18n="usageTitle">Claude Code と Codex</h2>
+      <p data-i18n="usageBody">
+        サブスクリプションの 5 時間・7 日上限と、API 相当の利用料をカードへ出します。claude や
+        codex を起動せず、必要なログだけを読みます。
+      </p>
+
+      <h2 data-i18n="faqTitle">よくある質問</h2>
+      <div id="faq"></div>
+
+      <footer>
+        <p>
+          <a href="./privacy.html" data-i18n="privacy">プライバシー</a>
+          ·
+          <a href="https://github.com/tsuyoshi-otake/run-dog">GitHub</a>
+        </p>
+        <nav class="langs" id="langs" aria-label="Language"></nav>
+        <p>© 2026 Tsuyoshi Otake · MIT License</p>
+      </footer>
+    </main>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
