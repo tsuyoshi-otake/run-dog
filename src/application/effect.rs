@@ -1,4 +1,7 @@
-use crate::core::{AppSettings, FpsLimit, ResolvedTheme, ThemePreference};
+use crate::core::{
+    AppSettings, CpuBreakdown, FpsLimit, MemoryStatus, ResolvedTheme, Sparkline, StorageStatus,
+    ThemePreference, UsageSnapshot,
+};
 
 /// Timer identities are stable values, so the Windows adapter never needs to
 /// derive a timer ID from a pointer or allocation.
@@ -9,18 +12,24 @@ pub enum TimerKind {
 }
 
 /// Complete visual state for a shell tray notification.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TrayIcon {
     pub theme: ResolvedTheme,
     pub frame: usize,
     pub tooltip: String,
+    pub cpu_sparkline: Sparkline,
+    pub memory_sparkline: Sparkline,
+    pub cpu_breakdown: Option<CpuBreakdown>,
+    pub memory: Option<MemoryStatus>,
+    pub storage: Option<StorageStatus>,
+    pub usage: UsageSnapshot,
 }
 
 /// Default wall-clock budget for one settings/Run commit saga.
 pub const COMMIT_DEADLINE_MS: u64 = 5_000;
 
 /// An external action requested by [`crate::application::App`].
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Effect {
     AddTray(TrayIcon),
     ModifyTray(TrayIcon),

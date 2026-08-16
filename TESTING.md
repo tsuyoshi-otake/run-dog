@@ -9,12 +9,15 @@ ISTQB のコンポーネントテストとして、各コンポーネントを�
 | コンポーネント | 代表的なテスト設計技法 | 隔離する依存 |
 | --- | --- | --- |
 | `core::cpu` | 同値分割、境界値、C2 | FILETIME/OS CPU API |
+| `core::memory` / `core::storage` | 同値分割、境界値、C2、PBT | GlobalMemoryStatusEx / SHGetDiskFreeSpaceExW |
+| `core::sparkline` | 境界値、容量超過、非有限値 | Tray/GDI |
 | `core::animation` | 同値分割、境界値、C2、PBT | Timer/Tray |
 | `core::settings` / `theme` | 有効値・無効値の同値分割、PBT | Registry/OS theme |
+| `core::usage` | 同値分割、境界値 | セッション jsonl / OAuth / WinHTTP |
 | `application::App` | 状態遷移、決定表、C2 | すべての Win32 副作用 |
 | `update` | release/version の同値分割、asset 契約、checksum 境界、C2、PBT | GitHub REST、WinHTTP、file hash、Inno Setup |
 | `windows::icons` | 正常/短縮/不正 header のエラー推測 | GDI icon 作成 |
-| `windows::cpu` / `tray` / `registry` | インターフェース、境界値、コマンド同値分割 | GetSystemTimes、Shell、HKCU |
+| `windows::cpu` / `tray` / `registry` / `usage` | インターフェース、境界値、コマンド同値分割、jsonl payload | GetSystemTimes、Shell、HKCU、セッションホーム、WinHTTP |
 
 終了基準は、対象コンポーネントの正常系・境界値・異常系・状態遷移がテストされ、C2 の条件表に未到達条件がないこと、PBT の不変条件が 2,048 ケースで満たされることとする。
 
@@ -25,8 +28,9 @@ ISTQB のコンポーネントテストとして、各コンポーネントを�
 | 判断 | 真/偽を検証する条件 |
 | --- | --- |
 | CPU 差分 | counter regression、ゼロ total、`idle > kernel`、有効な差分 |
+| メモリ使用率 | `total == 0`、`available > total`、0% / 100% / 中間値 |
 | 速度制御 | 上昇/下降、ヒステリシス境界、上限の縮小/拡大、同値入力 |
-| アプリ状態 | 初回開始/重複開始、pending startup、一致/不一致結果、成功/失敗、終了後イベント |
+| アプリ状態 | 初回開始/重複開始、pending startup、一致/不一致結果、成功/失敗、終了後イベント、UsageSample の変化/同一 |
 | 設定/テーマ | `None`、有効値、無効値、System/Light/Dark の解決 |
 | 更新 protocol | draft/prerelease、older/equal/newer version、asset 欠落/重複、cross-repository/tag URL、checksum 正常/不正/重複、latest 404、起動時 worker の重複防止 |
 | Win32 converter | 有効/短縮/不正データ、既知/未知のトレイコマンド |
@@ -42,7 +46,7 @@ ISTQB のコンポーネントテストとして、各コンポーネントを�
 - `FakePlatform`: in-memory settings、tray、scheduler、startup registry、process launcher
 - `FakeThemeSource`: 固定テーマ入力
 
-これにより、起動、CPU 変化、アニメーション、テーマ、FPS、起動時実行の commit/rollback、Explorer 再起動、Task Manager effect、終了を結合レベルで検証する。`tests/state_machine_pbt.rs` は同じく非ライブの event sequence PBT である。
+これにより、起動、CPU 変化、アニメーション、テーマ、FPS、起動時実行の commit/rollback、Explorer 再起動、Task Manager effect、利用料スナップショット、終了を結合レベルで検証する。`tests/state_machine_pbt.rs` は同じく非ライブの event sequence PBT である。
 
 更新判定は `src/update.rs` の独立 oracle で検証する。`tests/update_protocol_integration.rs`
 は GitHub latest API、release asset、checksum、installer launcher をプロトコル互換の

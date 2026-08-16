@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use crate::core::{AppSettings, ResolvedTheme, SystemTimes};
+use crate::core::{AppSettings, MemoryStatus, ResolvedTheme, StorageStatus, SystemTimes};
 
 use super::{commit_protocol::CommitRequest, App, Effect, Event};
 
@@ -8,6 +8,12 @@ use super::{commit_protocol::CommitRequest, App, Effect, Event};
 /// provide a finite in-memory sample queue.
 pub trait CpuSource {
     fn read_system_times(&mut self) -> Option<SystemTimes>;
+    fn read_memory(&mut self) -> Option<MemoryStatus> {
+        None
+    }
+    fn read_storage(&mut self) -> Option<StorageStatus> {
+        None
+    }
 }
 
 /// Settings port intentionally exposes only the small data structure needed by
@@ -39,8 +45,17 @@ pub trait EffectPort {
 
 /// Dispatches a CPU tick only when the source supplied a snapshot.
 pub fn dispatch_cpu_tick<P: EffectPort, S: CpuSource>(app: &mut App, source: &mut S, port: &mut P) {
-    if let Some(sample) = source.read_system_times() {
-        dispatch_and_execute(app, port, Event::CpuSample(sample));
+    if let Some(times) = source.read_system_times() {
+        let memory = source.read_memory();
+        dispatch_and_execute(
+            app,
+            port,
+            Event::CpuSample {
+                times,
+                memory,
+                storage: source.read_storage(),
+            },
+        );
     }
 }
 

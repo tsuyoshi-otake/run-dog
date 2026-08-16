@@ -1,0 +1,579 @@
+export const LANGS = [
+  { id: "ja", label: "日本語" },
+  { id: "en", label: "English" },
+  { id: "zh", label: "简体中文" },
+  { id: "ko", label: "한국어" },
+  { id: "vi", label: "Tiếng Việt" },
+  { id: "fr", label: "Français" },
+  { id: "de", label: "Deutsch" },
+  { id: "es", label: "Español" },
+];
+
+export const I18N = {
+  ja: {
+    title: "RunDog",
+    description:
+      "通知領域で犬を飼ってみませんか？走る速さで Windows の CPU 負荷がわかります。",
+    tagline: "通知領域で犬を飼ってみませんか？",
+    lead: "犬の走る速さで Windows の CPU 負荷がわかります。タスクバーをちらっと見るだけで十分です。",
+    download: "Windows 向けにダウンロード",
+    requirement: "Windows 10 / 11（64-bit）",
+    viewGithub: "GitHub で見る",
+    altTaskbar: "通知領域を走る RunDog",
+    altFlyout: "ホバー時の RunDog カード",
+    featuresTitle: "特長",
+    features: [
+      {
+        title: "ひと目で負荷がわかる",
+        body: "CPU が忙しくなるほど犬は速く走り、落ち着いているときはゆっくり歩きます。数字を読む必要はありません。",
+      },
+      {
+        title: "必要なメトリクスをカードで",
+        body: "CPU、メモリ、ストレージ。気になる情報を通知領域からすぐ確認できます。",
+      },
+      {
+        title: "Claude と Codex も見守る",
+        body: "サブスクリプションの上限と API 相当の利用料を、CLI を起動せずに表示します。",
+      },
+    ],
+    metricsTitle: "ホバーカード",
+    metricsLead: "犬にポインターを重ねるとカードが開きます。数字を探しに行く必要はありません。",
+    metrics: [
+      "CPU 使用率と System / User / Idle",
+      "メモリ使用量",
+      "ストレージ使用量",
+      "Claude Code の 5 時間・7 日上限",
+      "Codex CLI の上限と API 相当の利用料",
+    ],
+    usageTitle: "Claude Code と Codex",
+    usageBody:
+      "サブスクリプションの 5 時間・7 日上限と、API 相当の利用料をカードへ出します。claude や codex を起動せず、必要なログだけを読みます。",
+    faqTitle: "よくある質問",
+    faq: [
+      {
+        q: "対応している言語は？",
+        a: "この紹介ページは日本語、英語、中国語、韓国語、ベトナム語、フランス語、ドイツ語、スペイン語に対応しています。アプリ本体のカード表記は英語です。",
+      },
+      {
+        q: "RunCat と同じものですか？",
+        a: "いいえ。RunDog は Windows 向けに新しく書いた独立したアプリです。RunCat の置き換えではなく、走るペットで負荷を伝えるという発想へのオマージュです。",
+      },
+      {
+        q: "外部にデータを送りますか？",
+        a: "起動時に GitHub Releases へ更新確認を一度行います。Claude や Codex を使っている場合のみ、その認証情報で各社の上限 API を問い合わせます。広告や解析 SDK はありません。",
+      },
+      {
+        q: "SmartScreen の警告が出ますか？",
+        a: "コード署名はないため、警告が出ることがあります。インストーラーには SHA-256 の照合があります。公開元の GitHub リポジトリから導入してください。",
+      },
+      {
+        q: "動作環境は？",
+        a: "Windows 10 または 11 の 64-bit です。",
+      },
+    ],
+    privacy: "プライバシー",
+    privacyTitle: "プライバシー",
+    back: "RunDog に戻る",
+    privacyBody: [
+      "RunDog はアカウントを作りません。CPU・メモリ・ストレージは Windows の API で端末内だけ読みます。設定はユーザーのレジストリに保存します。",
+      "起動時に一度だけ、GitHub Releases へ新しい版があるか確認します。ダウンロードと導入は、メニューから明示したときだけです。",
+      "Claude Code や Codex CLI を使っている場合、そのホームディレクトリのログと、すでに端末にある認証情報で各社の上限を問い合わせることがあります。トークンを第三者と共有することはありません。",
+      "広告、解析、クラッシュ報告の SDK は入れていません。",
+    ],
+  },
+  en: {
+    title: "RunDog",
+    description:
+      "A dog in the notification area. How fast it runs tells you the CPU load on Windows.",
+    tagline: "A dog living in the notification area.",
+    lead: "The dog tells you Windows CPU usage by how fast it runs — one glance at the taskbar is all it takes.",
+    download: "Download for Windows",
+    requirement: "Windows 10 / 11 (64-bit)",
+    viewGithub: "View on GitHub",
+    altTaskbar: "RunDog running in the notification area",
+    altFlyout: "RunDog hover card",
+    featuresTitle: "Features",
+    features: [
+      {
+        title: "Load at a glance",
+        body: "The dog speeds up as your CPU gets busier and slows to a stroll when things are calm. No numbers to read — just watch it run.",
+      },
+      {
+        title: "A compact system card",
+        body: "CPU, memory, and storage — keep an eye on what matters right from the notification area.",
+      },
+      {
+        title: "Claude and Codex, too",
+        body: "Subscription rate limits and API-equivalent cost, without launching the CLIs.",
+      },
+    ],
+    metricsTitle: "Hover card",
+    metricsLead: "Point at the dog and the card opens. You do not have to go hunting for numbers.",
+    metrics: [
+      "CPU usage with System / User / Idle",
+      "Memory use",
+      "Storage use",
+      "Claude Code 5-hour and 7-day limits",
+      "Codex CLI limits and API-equivalent cost",
+    ],
+    usageTitle: "Claude Code and Codex",
+    usageBody:
+      "The card shows 5-hour and 7-day subscription windows plus API-equivalent cost. RunDog never launches claude or codex — it only reads the logs it needs.",
+    faqTitle: "FAQ",
+    faq: [
+      {
+        q: "What languages does it support?",
+        a: "This site is in Japanese, English, Chinese, Korean, Vietnamese, French, German, and Spanish. The app card itself is labeled in English.",
+      },
+      {
+        q: "Is this the same as RunCat?",
+        a: "No. RunDog is a new Windows app. It is not a replacement for RunCat — it is an homage to the idea of a running pet that shows load.",
+      },
+      {
+        q: "Does it send data off the machine?",
+        a: "It checks GitHub Releases once at startup. If you use Claude or Codex, it may query their limit APIs with credentials already on the PC. There is no ads or analytics SDK.",
+      },
+      {
+        q: "Will SmartScreen warn me?",
+        a: "There is no code signature, so Windows may warn. The installer is checked with SHA-256. Install from the project's GitHub repository.",
+      },
+      {
+        q: "What are the requirements?",
+        a: "64-bit Windows 10 or 11.",
+      },
+    ],
+    privacy: "Privacy",
+    privacyTitle: "Privacy",
+    back: "Back to RunDog",
+    privacyBody: [
+      "RunDog does not create an account. CPU, memory, and storage are read locally through Windows APIs. Settings live in the current user's registry.",
+      "At startup it checks GitHub Releases once for a newer build. Download and install happen only when you choose them from the menu.",
+      "If you use Claude Code or Codex CLI, RunDog may read their local logs and query vendor limit APIs with credentials already on the machine. Tokens are never shared with third parties.",
+      "There is no advertising, analytics, or crash-reporting SDK.",
+    ],
+  },
+  zh: {
+    title: "RunDog",
+    description: "要不要在通知区域养一只小狗？跑得越快，说明 Windows 的 CPU 越忙。",
+    tagline: "要不要在通知区域养一只小狗？",
+    lead: "小狗跑得越快，说明 Windows 的 CPU 越忙。看一眼任务栏就够了。",
+    download: "下载 Windows 版",
+    requirement: "Windows 10 / 11（64 位）",
+    viewGithub: "在 GitHub 上查看",
+    altTaskbar: "在通知区域奔跑的 RunDog",
+    altFlyout: "悬停时的 RunDog 卡片",
+    featuresTitle: "特点",
+    features: [
+      {
+        title: "一眼看出负载",
+        body: "CPU 越忙，狗跑得越快；空闲时就慢慢走。不用读数字，看它跑就行。",
+      },
+      {
+        title: "卡片里的系统信息",
+        body: "CPU、内存、存储，从通知区域就能确认。",
+      },
+      {
+        title: "也照看 Claude 和 Codex",
+        body: "显示订阅限额和相当于 API 的费用，不必启动 CLI。",
+      },
+    ],
+    metricsTitle: "悬停卡片",
+    metricsLead: "把指针放到小狗上，卡片就会打开。不必到处找数字。",
+    metrics: [
+      "CPU 使用率以及 System / User / Idle",
+      "内存用量",
+      "存储用量",
+      "Claude Code 的 5 小时和 7 天限额",
+      "Codex CLI 的限额和相当于 API 的费用",
+    ],
+    usageTitle: "Claude Code 与 Codex",
+    usageBody:
+      "卡片会显示 5 小时、7 天的订阅限额，以及相当于 API 的费用。不会启动 claude 或 codex，只读取必要的日志。",
+    faqTitle: "常见问题",
+    faq: [
+      {
+        q: "支持哪些语言？",
+        a: "本介绍页支持日语、英语、中文、韩语、越南语、法语、德语和西班牙语。应用卡片上的文字为英语。",
+      },
+      {
+        q: "和 RunCat 是同一个软件吗？",
+        a: "不是。RunDog 是为 Windows 新写的独立应用，不是 RunCat 的替代品，只是向“用奔跑的宠物表示负载”这一想法致敬。",
+      },
+      {
+        q: "会把数据发送到外部吗？",
+        a: "启动时会向 GitHub Releases 检查一次更新。仅在使用 Claude 或 Codex 时，才会用本机已有的凭据查询各公司的限额 API。没有广告或分析 SDK。",
+      },
+      {
+        q: "SmartScreen 会警告吗？",
+        a: "没有代码签名，因此可能会出现警告。安装包带有 SHA-256 校验。请从项目的 GitHub 仓库安装。",
+      },
+      {
+        q: "运行环境是什么？",
+        a: "64 位 Windows 10 或 11。",
+      },
+    ],
+    privacy: "隐私",
+    privacyTitle: "隐私",
+    back: "返回 RunDog",
+    privacyBody: [
+      "RunDog 不创建账户。CPU、内存和存储只通过 Windows API 在本机读取。设置保存在当前用户的注册表中。",
+      "启动时只会向 GitHub Releases 检查一次是否有新版本。下载和安装仅在你从菜单明确选择时进行。",
+      "如果使用 Claude Code 或 Codex CLI，可能会读取其主目录中的日志，并用本机已有的凭据查询厂商限额 API。令牌不会提供给第三方。",
+      "不包含广告、分析或崩溃报告 SDK。",
+    ],
+  },
+  ko: {
+    title: "RunDog",
+    description: "알림 영역에서 강아지를 키워 보시겠어요? 뛰는 속도로 Windows CPU 부하를 알 수 있습니다.",
+    tagline: "알림 영역에서 강아지를 키워 보시겠어요?",
+    lead: "강아지가 뛰는 속도로 Windows CPU 사용량을 알 수 있습니다. 작업 표시줄만 힐끗 보면 됩니다.",
+    download: "Windows용 다운로드",
+    requirement: "Windows 10 / 11 (64비트)",
+    viewGithub: "GitHub에서 보기",
+    altTaskbar: "알림 영역에서 달리는 RunDog",
+    altFlyout: "호버 시 RunDog 카드",
+    featuresTitle: "특징",
+    features: [
+      {
+        title: "한눈에 부하를 알 수 있습니다",
+        body: "CPU가 바빠질수록 강아지는 빨리 달리고, 한가할 때는 천천히 걷습니다. 숫자를 읽을 필요는 없습니다.",
+      },
+      {
+        title: "필요한 지표를 카드로",
+        body: "CPU, 메모리, 저장소. 알림 영역에서 바로 확인할 수 있습니다.",
+      },
+      {
+        title: "Claude와 Codex도 지켜봅니다",
+        body: "구독 한도와 API에 해당하는 비용을 CLI를 실행하지 않고 표시합니다.",
+      },
+    ],
+    metricsTitle: "호버 카드",
+    metricsLead: "강아지에 포인터를 올리면 카드가 열립니다. 숫자를 찾아다닐 필요가 없습니다.",
+    metrics: [
+      "CPU 사용률과 System / User / Idle",
+      "메모리 사용량",
+      "저장소 사용량",
+      "Claude Code 5시간·7일 한도",
+      "Codex CLI 한도와 API에 해당하는 비용",
+    ],
+    usageTitle: "Claude Code와 Codex",
+    usageBody:
+      "구독의 5시간·7일 한도와 API에 해당하는 비용을 카드에 표시합니다. claude나 codex를 실행하지 않고 필요한 로그만 읽습니다.",
+    faqTitle: "자주 묻는 질문",
+    faq: [
+      {
+        q: "어떤 언어를 지원하나요?",
+        a: "이 소개 페이지는 일본어, 영어, 중국어, 한국어, 베트남어, 프랑스어, 독일어, 스페인어를 지원합니다. 앱 카드의 표기는 영어입니다.",
+      },
+      {
+        q: "RunCat과 같은 앱인가요?",
+        a: "아닙니다. RunDog는 Windows용으로 새로 작성한 독립 앱입니다. RunCat을 대체하는 것이 아니라, 달리는 반려동물로 부하를 전한다는 발상에 대한 오마주입니다.",
+      },
+      {
+        q: "데이터를 외부로 보내나요?",
+        a: "시작할 때 GitHub Releases에서 업데이트를 한 번 확인합니다. Claude나 Codex를 쓰는 경우에만 이미 있는 자격 증명으로 각 회사의 한도 API를 조회합니다. 광고나 분석 SDK는 없습니다.",
+      },
+      {
+        q: "SmartScreen 경고가 나오나요?",
+        a: "코드 서명이 없어 경고가 나올 수 있습니다. 설치 파일은 SHA-256으로 검증됩니다. 프로젝트 GitHub 저장소에서 설치하세요.",
+      },
+      {
+        q: "동작 환경은?",
+        a: "64비트 Windows 10 또는 11입니다.",
+      },
+    ],
+    privacy: "개인정보",
+    privacyTitle: "개인정보",
+    back: "RunDog로 돌아가기",
+    privacyBody: [
+      "RunDog는 계정을 만들지 않습니다. CPU·메모리·저장소는 Windows API로 기기 안에서만 읽습니다. 설정은 현재 사용자 레지스트리에 저장됩니다.",
+      "시작할 때 GitHub Releases에서 새 버전이 있는지 한 번만 확인합니다. 다운로드와 설치는 메뉴에서 명시적으로 선택할 때만 진행됩니다.",
+      "Claude Code나 Codex CLI를 사용하는 경우 홈 디렉터리 로그와 이미 기기에 있는 자격 증명으로 공급업체 한도 API를 조회할 수 있습니다. 토큰을 제3자와 공유하지 않습니다.",
+      "광고, 분석, 충돌 보고 SDK는 포함되어 있지 않습니다.",
+    ],
+  },
+  vi: {
+    title: "RunDog",
+    description:
+      "Nuôi một chú chó trên khay hệ thống. Tốc độ chạy cho biết CPU của Windows.",
+    tagline: "Nuôi một chú chó trên khay hệ thống nhé?",
+    lead: "Tốc độ chạy của chú chó cho biết CPU của Windows — chỉ cần liếc nhìn khay hệ thống.",
+    download: "Tải cho Windows",
+    requirement: "Windows 10 / 11 (64-bit)",
+    viewGithub: "Xem trên GitHub",
+    altTaskbar: "RunDog chạy trên khay hệ thống",
+    altFlyout: "Thẻ RunDog khi di chuột",
+    featuresTitle: "Điểm nổi bật",
+    features: [
+      {
+        title: "Nhìn một cái là biết tải",
+        body: "CPU càng bận chó chạy càng nhanh, lúc rảnh thì đi chậm. Không cần đọc số — cứ nhìn nó chạy.",
+      },
+      {
+        title: "Thông số hệ thống trên thẻ",
+        body: "CPU, bộ nhớ, dung lượng lưu trữ — xem ngay từ khay hệ thống.",
+      },
+      {
+        title: "Theo dõi cả Claude và Codex",
+        body: "Hạn mức gói đăng ký và chi phí tương đương API, không cần chạy CLI.",
+      },
+    ],
+    metricsTitle: "Thẻ khi di chuột",
+    metricsLead: "Đưa con trỏ vào chú chó là thẻ mở ra. Không phải đi tìm số liệu.",
+    metrics: [
+      "Mức dùng CPU với System / User / Idle",
+      "Bộ nhớ",
+      "Lưu trữ",
+      "Hạn mức 5 giờ và 7 ngày của Claude Code",
+      "Hạn mức Codex CLI và chi phí tương đương API",
+    ],
+    usageTitle: "Claude Code và Codex",
+    usageBody:
+      "Thẻ hiện hạn mức 5 giờ, 7 ngày của gói đăng ký và chi phí tương đương API. Không khởi chạy claude hay codex — chỉ đọc nhật ký cần thiết.",
+    faqTitle: "Câu hỏi thường gặp",
+    faq: [
+      {
+        q: "Hỗ trợ ngôn ngữ nào?",
+        a: "Trang giới thiệu có tiếng Nhật, Anh, Trung, Hàn, Việt, Pháp, Đức và Tây Ban Nha. Nhãn trên thẻ ứng dụng là tiếng Anh.",
+      },
+      {
+        q: "Có phải RunCat không?",
+        a: "Không. RunDog là ứng dụng Windows viết mới, độc lập. Không phải bản thay RunCat — chỉ tôn vinh ý tưởng thú cưng chạy để báo tải.",
+      },
+      {
+        q: "Có gửi dữ liệu ra ngoài không?",
+        a: "Khi khởi động sẽ kiểm tra GitHub Releases một lần. Nếu dùng Claude hoặc Codex, có thể gọi API hạn mức bằng thông tin xác thực đã có trên máy. Không có SDK quảng cáo hay phân tích.",
+      },
+      {
+        q: "SmartScreen có cảnh báo không?",
+        a: "Không có chữ ký mã nên Windows có thể cảnh báo. Bộ cài được kiểm tra SHA-256. Hãy cài từ kho GitHub của dự án.",
+      },
+      {
+        q: "Yêu cầu hệ thống?",
+        a: "Windows 10 hoặc 11 64-bit.",
+      },
+    ],
+    privacy: "Quyền riêng tư",
+    privacyTitle: "Quyền riêng tư",
+    back: "Quay lại RunDog",
+    privacyBody: [
+      "RunDog không tạo tài khoản. CPU, bộ nhớ và lưu trữ được đọc cục bộ qua API Windows. Cài đặt lưu trong registry của người dùng hiện tại.",
+      "Khi khởi động chỉ kiểm tra GitHub Releases một lần xem có bản mới không. Tải và cài chỉ khi bạn chọn rõ từ menu.",
+      "Nếu dùng Claude Code hoặc Codex CLI, có thể đọc nhật ký cục bộ và gọi API hạn mức của nhà cung cấp với thông tin xác thực đã có trên máy. Token không chia sẻ với bên thứ ba.",
+      "Không có SDK quảng cáo, phân tích hay báo cáo sự cố.",
+    ],
+  },
+  fr: {
+    title: "RunDog",
+    description:
+      "Un chien dans la zone de notification. Sa vitesse indique la charge CPU de Windows.",
+    tagline: "Et si vous adoptiez un chien dans la zone de notification ?",
+    lead: "La vitesse du chien indique la charge CPU de Windows. Un coup d'œil à la barre des tâches suffit.",
+    download: "Télécharger pour Windows",
+    requirement: "Windows 10 / 11 (64 bits)",
+    viewGithub: "Voir sur GitHub",
+    altTaskbar: "RunDog dans la zone de notification",
+    altFlyout: "Carte RunDog au survol",
+    featuresTitle: "Points forts",
+    features: [
+      {
+        title: "La charge d'un coup d'œil",
+        body: "Plus le CPU est occupé, plus le chien court vite. Au calme, il se promène. Pas besoin de lire des chiffres.",
+      },
+      {
+        title: "Une carte système compacte",
+        body: "CPU, mémoire et stockage — le nécessaire, depuis la zone de notification.",
+      },
+      {
+        title: "Claude et Codex aussi",
+        body: "Plafonds d'abonnement et coût équivalent API, sans lancer les CLI.",
+      },
+    ],
+    metricsTitle: "Carte au survol",
+    metricsLead: "Pointez le chien : la carte s'ouvre. Inutile d'aller chercher les chiffres.",
+    metrics: [
+      "Utilisation CPU avec System / User / Idle",
+      "Mémoire",
+      "Stockage",
+      "Plafonds 5 h et 7 j de Claude Code",
+      "Plafonds Codex CLI et coût équivalent API",
+    ],
+    usageTitle: "Claude Code et Codex",
+    usageBody:
+      "La carte affiche les fenêtres d'abonnement 5 h et 7 j, plus le coût équivalent API. RunDog ne lance ni claude ni codex : il ne lit que les journaux nécessaires.",
+    faqTitle: "FAQ",
+    faq: [
+      {
+        q: "Quelles langues sont prises en charge ?",
+        a: "Ce site existe en japonais, anglais, chinois, coréen, vietnamien, français, allemand et espagnol. Les libellés de la carte de l'application sont en anglais.",
+      },
+      {
+        q: "Est-ce le même logiciel que RunCat ?",
+        a: "Non. RunDog est une application Windows écrite à neuf. Ce n'est pas un remplacement de RunCat, mais un hommage à l'idée d'un animal qui court pour indiquer la charge.",
+      },
+      {
+        q: "Envoie-t-il des données à l'extérieur ?",
+        a: "Au démarrage, il interroge GitHub Releases une fois. Si vous utilisez Claude ou Codex, il peut interroger leurs API de plafond avec des identifiants déjà présents. Pas de SDK pub ou d'analyse.",
+      },
+      {
+        q: "SmartScreen va-t-il m'avertir ?",
+        a: "Sans signature de code, Windows peut afficher un avertissement. L'installateur est vérifié par SHA-256. Installez depuis le dépôt GitHub du projet.",
+      },
+      {
+        q: "Quelle configuration ?",
+        a: "Windows 10 ou 11 64 bits.",
+      },
+    ],
+    privacy: "Confidentialité",
+    privacyTitle: "Confidentialité",
+    back: "Retour à RunDog",
+    privacyBody: [
+      "RunDog ne crée pas de compte. CPU, mémoire et stockage sont lus localement via les API Windows. Les réglages sont dans le registre de l'utilisateur.",
+      "Au démarrage, il vérifie une fois GitHub Releases. Le téléchargement et l'installation n'ont lieu que si vous les choisissez dans le menu.",
+      "Si vous utilisez Claude Code ou Codex CLI, RunDog peut lire leurs journaux locaux et interroger les API de plafond avec des identifiants déjà sur la machine. Les jetons ne sont pas partagés avec des tiers.",
+      "Aucun SDK de publicité, d'analyse ou de rapport de plantage.",
+    ],
+  },
+  de: {
+    title: "RunDog",
+    description:
+      "Ein Hund im Infobereich. Wie schnell er läuft, zeigt die CPU-Last von Windows.",
+    tagline: "Möchten Sie einen Hund im Infobereich halten?",
+    lead: "Wie schnell der Hund läuft, zeigt die CPU-Last von Windows. Ein Blick auf die Taskleiste reicht.",
+    download: "Für Windows herunterladen",
+    requirement: "Windows 10 / 11 (64-Bit)",
+    viewGithub: "Auf GitHub ansehen",
+    altTaskbar: "RunDog im Infobereich",
+    altFlyout: "RunDog-Karte beim Zeigen",
+    featuresTitle: "Merkmale",
+    features: [
+      {
+        title: "Last auf einen Blick",
+        body: "Je beschäftigter die CPU, desto schneller läuft der Hund. In Ruhe geht er spazieren. Keine Zahlen lesen — einfach zusehen.",
+      },
+      {
+        title: "Kompakte Systemkarte",
+        body: "CPU, Speicher und Datenträger — das Wichtige direkt aus dem Infobereich.",
+      },
+      {
+        title: "Auch Claude und Codex",
+        body: "Abo-Limits und API-äquivalente Kosten, ohne die CLIs zu starten.",
+      },
+    ],
+    metricsTitle: "Karte beim Zeigen",
+    metricsLead: "Zeigen Sie auf den Hund, und die Karte öffnet sich. Zahlen muss man nicht suchen.",
+    metrics: [
+      "CPU-Auslastung mit System / User / Idle",
+      "Speicher",
+      "Datenträger",
+      "5-Stunden- und 7-Tage-Limits von Claude Code",
+      "Codex-CLI-Limits und API-äquivalente Kosten",
+    ],
+    usageTitle: "Claude Code und Codex",
+    usageBody:
+      "Die Karte zeigt 5-Stunden- und 7-Tage-Abo-Fenster sowie API-äquivalente Kosten. RunDog startet weder claude noch codex — es liest nur die nötigen Protokolle.",
+    faqTitle: "Häufige Fragen",
+    faq: [
+      {
+        q: "Welche Sprachen werden unterstützt?",
+        a: "Diese Seite gibt es auf Japanisch, Englisch, Chinesisch, Koreanisch, Vietnamesisch, Französisch, Deutsch und Spanisch. Die Kartenbeschriftung der App ist Englisch.",
+      },
+      {
+        q: "Ist das dasselbe wie RunCat?",
+        a: "Nein. RunDog ist eine neue, eigenständige Windows-App. Kein Ersatz für RunCat, sondern eine Hommage an das laufende Haustier als Lastanzeige.",
+      },
+      {
+        q: "Werden Daten nach außen gesendet?",
+        a: "Beim Start prüft es einmal GitHub Releases. Wenn Sie Claude oder Codex nutzen, kann es deren Limit-APIs mit bereits vorhandenen Anmeldedaten abfragen. Kein Werbe- oder Analyse-SDK.",
+      },
+      {
+        q: "Warnt SmartScreen?",
+        a: "Ohne Codesignatur kann Windows warnen. Der Installer wird per SHA-256 geprüft. Installieren Sie aus dem GitHub-Repository des Projekts.",
+      },
+      {
+        q: "Welche Voraussetzungen?",
+        a: "64-Bit-Windows 10 oder 11.",
+      },
+    ],
+    privacy: "Datenschutz",
+    privacyTitle: "Datenschutz",
+    back: "Zurück zu RunDog",
+    privacyBody: [
+      "RunDog legt kein Konto an. CPU, Speicher und Datenträger werden lokal über Windows-APIs gelesen. Einstellungen liegen in der Registry des aktuellen Benutzers.",
+      "Beim Start prüft es einmal GitHub Releases auf eine neuere Version. Download und Installation nur, wenn Sie sie im Menü wählen.",
+      "Wenn Sie Claude Code oder Codex CLI nutzen, kann RunDog lokale Protokolle lesen und Limit-APIs der Anbieter mit bereits vorhandenen Anmeldedaten abfragen. Tokens werden nicht an Dritte weitergegeben.",
+      "Kein SDK für Werbung, Analyse oder Absturzberichte.",
+    ],
+  },
+  es: {
+    title: "RunDog",
+    description:
+      "Un perro en el área de notificación. Su velocidad indica la carga de CPU de Windows.",
+    tagline: "¿Y si crías un perro en el área de notificación?",
+    lead: "La velocidad del perro indica la carga de CPU de Windows. Basta una mirada a la barra de tareas.",
+    download: "Descargar para Windows",
+    requirement: "Windows 10 / 11 (64 bits)",
+    viewGithub: "Ver en GitHub",
+    altTaskbar: "RunDog en el área de notificación",
+    altFlyout: "Tarjeta de RunDog al pasar el puntero",
+    featuresTitle: "Características",
+    features: [
+      {
+        title: "La carga de un vistazo",
+        body: "Cuanto más ocupada está la CPU, más rápido corre el perro. En calma, pasea. No hace falta leer números.",
+      },
+      {
+        title: "Una tarjeta de sistema compacta",
+        body: "CPU, memoria y almacenamiento: lo importante, desde el área de notificación.",
+      },
+      {
+        title: "También Claude y Codex",
+        body: "Límites de la suscripción y coste equivalente a la API, sin lanzar las CLI.",
+      },
+    ],
+    metricsTitle: "Tarjeta al pasar el puntero",
+    metricsLead: "Apunta al perro y se abre la tarjeta. No hay que ir a buscar los números.",
+    metrics: [
+      "Uso de CPU con System / User / Idle",
+      "Memoria",
+      "Almacenamiento",
+      "Límites de 5 h y 7 d de Claude Code",
+      "Límites de Codex CLI y coste equivalente a la API",
+    ],
+    usageTitle: "Claude Code y Codex",
+    usageBody:
+      "La tarjeta muestra las ventanas de suscripción de 5 h y 7 d, más el coste equivalente a la API. RunDog no lanza claude ni codex: solo lee los registros necesarios.",
+    faqTitle: "Preguntas frecuentes",
+    faq: [
+      {
+        q: "¿Qué idiomas admite?",
+        a: "Este sitio está en japonés, inglés, chino, coreano, vietnamita, francés, alemán y español. Las etiquetas de la tarjeta de la aplicación están en inglés.",
+      },
+      {
+        q: "¿Es lo mismo que RunCat?",
+        a: "No. RunDog es una aplicación de Windows escrita de nuevo. No sustituye a RunCat: es un homenaje a la idea de una mascota que corre para mostrar la carga.",
+      },
+      {
+        q: "¿Envía datos al exterior?",
+        a: "Al arrancar consulta GitHub Releases una vez. Si usas Claude o Codex, puede consultar sus API de límites con credenciales ya presentes. No hay SDK de anuncios ni de analítica.",
+      },
+      {
+        q: "¿Avisará SmartScreen?",
+        a: "No hay firma de código, así que Windows puede avisar. El instalador se comprueba con SHA-256. Instálalo desde el repositorio GitHub del proyecto.",
+      },
+      {
+        q: "¿Qué se necesita?",
+        a: "Windows 10 u 11 de 64 bits.",
+      },
+    ],
+    privacy: "Privacidad",
+    privacyTitle: "Privacidad",
+    back: "Volver a RunDog",
+    privacyBody: [
+      "RunDog no crea una cuenta. CPU, memoria y almacenamiento se leen en el equipo con las API de Windows. Los ajustes viven en el registro del usuario actual.",
+      "Al arrancar comprueba GitHub Releases una sola vez. La descarga e instalación solo ocurren si las eliges en el menú.",
+      "Si usas Claude Code o Codex CLI, puede leer sus registros locales y consultar las API de límites con credenciales ya en el equipo. Los tokens no se comparten con terceros.",
+      "No incluye SDK de publicidad, analítica ni informes de fallos.",
+    ],
+  },
+};

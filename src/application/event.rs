@@ -1,11 +1,18 @@
-use crate::core::{AppSettings, FpsLimit, ResolvedTheme, SystemTimes, ThemePreference};
+use crate::core::{
+    AppSettings, FpsLimit, MemoryStatus, ResolvedTheme, StorageStatus, SystemTimes,
+    ThemePreference, UsageSnapshot,
+};
 
 use super::commit_protocol::CommitStatus;
 
 /// An input to the application state machine.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Event {
-    CpuSample(SystemTimes),
+    CpuSample {
+        times: SystemTimes,
+        memory: Option<MemoryStatus>,
+        storage: Option<StorageStatus>,
+    },
     AnimationTimerElapsed,
     SystemThemeChanged(ResolvedTheme),
     SelectTheme(ThemePreference),
@@ -19,5 +26,17 @@ pub enum Event {
     },
     TrayActivated,
     TaskbarRecreated,
+    UsageSample(UsageSnapshot),
     ExitRequested,
+}
+
+impl Event {
+    #[must_use]
+    pub const fn cpu_sample(times: SystemTimes) -> Self {
+        Self::CpuSample {
+            times,
+            memory: None,
+            storage: None,
+        }
+    }
 }

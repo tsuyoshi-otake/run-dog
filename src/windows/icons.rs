@@ -42,11 +42,19 @@ impl IconFrames {
     #[must_use]
     pub fn icon(&self, theme: ResolvedTheme, frame: usize) -> HICON {
         let index = frame % self.dark.len();
-        match theme {
-            ResolvedTheme::Light => self.light[index].raw(),
-            ResolvedTheme::Dark => self.dark[index].raw(),
+        // The original artwork is a dark dog. Light taskbars need that original;
+        // dark taskbars need the inverted light dog so the silhouette stays visible.
+        if uses_inverted_artwork(theme) {
+            self.light[index].raw()
+        } else {
+            self.dark[index].raw()
         }
     }
+}
+
+#[must_use]
+const fn uses_inverted_artwork(theme: ResolvedTheme) -> bool {
+    matches!(theme, ResolvedTheme::Dark)
 }
 
 /// Small local helper because stable Rust does not yet provide array
@@ -224,7 +232,10 @@ fn create_icon(bitmap: &BgraBitmap) -> Result<OwnedIcon, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{invert_visible_pixels, parse_embedded_bmp, FRAME_HEIGHT, FRAME_WIDTH};
+    use super::{
+        invert_visible_pixels, parse_embedded_bmp, uses_inverted_artwork, FRAME_HEIGHT, FRAME_WIDTH,
+    };
+    use crate::core::ResolvedTheme;
 
     #[test]
     fn component_embedded_dog_frame_has_expected_bitmap_contract() {
@@ -252,6 +263,18 @@ mod tests {
         let mut invalid_compression = source.to_vec();
         invalid_compression[30..34].copy_from_slice(&2_u32.to_le_bytes());
         assert!(parse_embedded_bmp(&invalid_compression).is_err());
+    }
+
+    #[test]
+    fn component_system_light_theme_keeps_the_dark_dog_for_taskbar_contrast() {
+        assert!(
+            !uses_inverted_artwork(ResolvedTheme::Light),
+            "light taskbar must keep the original dark dog"
+        );
+        assert!(
+            uses_inverted_artwork(ResolvedTheme::Dark),
+            "dark taskbar must use the inverted light dog"
+        );
     }
 
     #[test]

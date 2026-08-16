@@ -111,7 +111,11 @@ fn event_from_code(code: u8, times: &mut SystemTimes) -> Event {
             times.idle += idle_delta;
             times.kernel += kernel_delta;
             times.user += user_delta;
-            Event::CpuSample(*times)
+            Event::CpuSample {
+                times: *times,
+                memory: None,
+                storage: None,
+            }
         }
         1 => Event::AnimationTimerElapsed,
         2 => Event::SystemThemeChanged(ResolvedTheme::Light),
