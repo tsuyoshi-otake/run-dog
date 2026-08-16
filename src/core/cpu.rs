@@ -33,6 +33,34 @@ impl CpuLoad {
     }
 }
 
+/// One sampling interval split into Windows kernel / user / idle shares.
+///
+/// `kernel` already includes idle, so `system` is kernel minus idle. The four
+/// percentages are independent ratios of the same interval; they are not
+/// required to sum to exactly 100 after floating-point conversion.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CpuBreakdown {
+    pub total: CpuLoad,
+    pub system: CpuLoad,
+    pub user: CpuLoad,
+    pub idle: CpuLoad,
+}
+
+fn interval_ticks(previous: SystemTimes, current: SystemTimes) -> Option<(u64, u64, u64, u64)> {
+    let idle = current.idle.checked_sub(previous.idle)?;
+    let kernel = current.kernel.checked_sub(previous.kernel)?;
+    let user = current.user.checked_sub(previous.user)?;
+    let total = kernel.checked_add(user)?;
+    if total == 0 || idle > kernel {
+        return None;
+    }
+    Some((idle, kernel, user, total))
+}
+
+fn ratio(part: u64, total: u64) -> CpuLoad {
+    CpuLoad::percent((part as f64 * 100.0 / total as f64) as f32)
+}
+
 /// Computes whole-machine usage from two cumulative snapshots.
 ///
 /// `kernel` already includes `idle` on Windows. A counter reset, an invalid
@@ -40,19 +68,21 @@ impl CpuLoad {
 /// than manufacturing a sample.
 #[must_use]
 pub fn usage_between(previous: SystemTimes, current: SystemTimes) -> Option<CpuLoad> {
-    let idle = current.idle.checked_sub(previous.idle)?;
-    let kernel = current.kernel.checked_sub(previous.kernel)?;
-    let user = current.user.checked_sub(previous.user)?;
-    let total = kernel.checked_add(user)?;
+    breakdown_between(previous, current).map(|breakdown| breakdown.total)
+}
 
-    if total == 0 || idle > kernel {
-        return None;
-    }
-
+/// Same interval as [`usage_between`], with kernel / user / idle shares.
+#[must_use]
+pub fn breakdown_between(previous: SystemTimes, current: SystemTimes) -> Option<CpuBreakdown> {
+    let (idle, kernel, user, total) = interval_ticks(previous, current)?;
+    let system = kernel - idle;
     let busy = total - idle;
-    Some(CpuLoad::percent(
-        (busy as f64 * 100.0 / total as f64) as f32,
-    ))
+    Some(CpuBreakdown {
+        total: ratio(busy, total),
+        system: ratio(system, total),
+        user: ratio(user, total),
+        idle: ratio(idle, total),
+    })
 }
 
 /// Stateful sampler that retains only the preceding snapshot and performs a
@@ -61,6 +91,7 @@ pub fn usage_between(previous: SystemTimes, current: SystemTimes) -> Option<CpuL
 pub struct CpuSampler {
     previous: Option<SystemTimes>,
     smoothed: Option<CpuLoad>,
+    raw: Option<CpuBreakdown>,
     smoothing_factor: f32,
 }
 
@@ -76,6 +107,7 @@ impl CpuSampler {
         Self {
             previous: None,
             smoothed: None,
+            raw: None,
             smoothing_factor: smoothing_factor.clamp(0.0, 1.0),
         }
     }
@@ -84,12 +116,13 @@ impl CpuSampler {
     #[must_use]
     pub fn push(&mut self, current: SystemTimes) -> Option<CpuLoad> {
         let previous = self.previous.replace(current)?;
-        let raw = usage_between(previous, current)?;
+        let raw = breakdown_between(previous, current)?;
+        self.raw = Some(raw);
         let next = match self.smoothed {
             Some(smoothed) => CpuLoad::percent(
-                smoothed.value() + self.smoothing_factor * (raw.value() - smoothed.value()),
+                smoothed.value() + self.smoothing_factor * (raw.total.value() - smoothed.value()),
             ),
-            None => raw,
+            None => raw.total,
         };
         self.smoothed = Some(next);
         Some(next)
@@ -99,11 +132,17 @@ impl CpuSampler {
     pub const fn latest(&self) -> Option<CpuLoad> {
         self.smoothed
     }
+
+    /// Unsmoothed kernel / user / idle shares from the latest valid interval.
+    #[must_use]
+    pub const fn latest_breakdown(&self) -> Option<CpuBreakdown> {
+        self.raw
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{usage_between, CpuSampler, SystemTimes};
+    use super::{breakdown_between, usage_between, CpuSampler, SystemTimes};
     use proptest::prelude::*;
 
     #[test]
@@ -130,6 +169,27 @@ mod tests {
                 .map(|value| value.value()),
             Some(0.0)
         );
+    }
+
+    #[test]
+    fn component_breakdown_splits_kernel_user_and_idle_shares() {
+        let breakdown = breakdown_between(SystemTimes::new(0, 0, 0), SystemTimes::new(50, 80, 20))
+            .expect("monotonic interval is valid");
+        assert_eq!(breakdown.total.value(), 50.0);
+        assert_eq!(breakdown.system.value(), 30.0);
+        assert_eq!(breakdown.user.value(), 20.0);
+        assert_eq!(breakdown.idle.value(), 50.0);
+        assert_eq!(
+            sampler_raw_after_valid_interval().map(|value| value.total.value()),
+            Some(50.0)
+        );
+    }
+
+    fn sampler_raw_after_valid_interval() -> Option<super::CpuBreakdown> {
+        let mut sampler = CpuSampler::new(1.0);
+        let _ = sampler.push(SystemTimes::new(0, 0, 0));
+        let _ = sampler.push(SystemTimes::new(50, 80, 20));
+        sampler.latest_breakdown()
     }
 
     #[test]

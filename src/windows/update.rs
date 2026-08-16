@@ -352,9 +352,11 @@ fn download_installer(
     let download_result = (|| {
         let mut file = File::create(&partial_path).map_err(|error| error.to_string())?;
         let status = https_request_to_writer(
+            "GET",
             RELEASE_HOST,
             &asset_path,
             "",
+            None,
             MAX_INSTALLER_BYTES,
             &mut file,
             Some(cancelled),
@@ -449,21 +451,54 @@ fn launch_installer(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn https_get(
+pub(super) fn https_get(
     host: &str,
     path: &str,
     headers: &str,
     maximum_bytes: usize,
 ) -> Result<(u32, Vec<u8>), String> {
-    let mut body = Vec::new();
-    let status = https_request_to_writer(host, path, headers, maximum_bytes, &mut body, None)?;
-    Ok((status, body))
+    https_bytes("GET", host, path, headers, None, maximum_bytes)
 }
 
-fn https_request_to_writer(
+pub(super) fn https_post(
     host: &str,
     path: &str,
     headers: &str,
+    payload: &[u8],
+    maximum_bytes: usize,
+) -> Result<(u32, Vec<u8>), String> {
+    https_bytes("POST", host, path, headers, Some(payload), maximum_bytes)
+}
+
+fn https_bytes(
+    verb: &str,
+    host: &str,
+    path: &str,
+    headers: &str,
+    payload: Option<&[u8]>,
+    maximum_bytes: usize,
+) -> Result<(u32, Vec<u8>), String> {
+    let mut body = Vec::new();
+    let status = https_request_to_writer(
+        verb,
+        host,
+        path,
+        headers,
+        payload,
+        maximum_bytes,
+        &mut body,
+        None,
+    )?;
+    Ok((status, body))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn https_request_to_writer(
+    verb: &str,
+    host: &str,
+    path: &str,
+    headers: &str,
+    payload: Option<&[u8]>,
     maximum_bytes: usize,
     writer: &mut impl Write,
     cancelled: Option<&AtomicBool>,
@@ -499,12 +534,12 @@ fn https_request_to_writer(
     let connection = HttpHandle::new("WinHttpConnect", unsafe {
         WinHttpConnect(session.0, host_wide.as_ptr(), 443, 0)
     })?;
-    let verb = wide("GET");
+    let verb_wide = wide(verb);
     let path_wide = wide(path);
     let request = HttpHandle::new("WinHttpOpenRequest", unsafe {
         WinHttpOpenRequest(
             connection.0,
-            verb.as_ptr(),
+            verb_wide.as_ptr(),
             path_wide.as_ptr(),
             ptr::null(),
             ptr::null(),
@@ -518,14 +553,22 @@ fn https_request_to_writer(
     } else {
         (headers_wide.as_ptr(), (headers_wide.len() - 1) as u32)
     };
+    let (optional, optional_len, total_len) = match payload {
+        Some(bytes) if !bytes.is_empty() => (
+            bytes.as_ptr().cast::<c_void>(),
+            bytes.len() as u32,
+            bytes.len() as u32,
+        ),
+        _ => (ptr::null(), 0, 0),
+    };
     if unsafe {
         WinHttpSendRequest(
             request.0,
             headers_pointer,
             headers_length,
-            ptr::null(),
-            0,
-            0,
+            optional.cast_mut(),
+            optional_len,
+            total_len,
             0,
         )
     } == 0

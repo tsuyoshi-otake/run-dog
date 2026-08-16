@@ -1,29 +1,29 @@
 # RunDog
 
-<p align="center">
-  <img src="assets/rundog-dog.png" alt="RunDog の犬" width="360">
-</p>
-
 <p align="center">通知領域で元気に走る、軽量な CPU モニター。</p>
 
-## タスクバー上の RunDog
+<p align="center"><a href="https://tsuyoshi-otake.github.io/run-dog/">紹介ページ</a></p>
 
-実際に RunDog を起動した Windows タスクバーです。右端の通知領域に犬が表示されます。
+<p align="center">
+  <img src="assets/rundog-taskbar.png" alt="通知領域の RunDog">
+</p>
 
-![RunDog が表示された Windows タスクバー](assets/rundog-taskbar.png)
+<p align="center">
+  <img src="assets/rundog-flyout.png" alt="ホバー時の RunDog カード" width="320">
+</p>
 
-`RunDog` は、Windows の通知領域で CPU 使用率に応じて犬の 3 フレーム・アニメーションを表示する、低負荷の Rust 製常駐アプリケーションです。
+`RunDog` は、Windows の通知領域で CPU 使用率に応じて犬の 3 フレーム・アニメーションを表示する、低負荷の Rust 製常駐アプリケーションです。犬にポインターを重ねると、CPU / メモリ / ストレージと Claude Code / Codex CLI の利用状況がカードで開きます。
 
 ## 機能
 
-- `GetSystemTimes` の累積値差分による全体 CPU 使用率の表示
+- `GetSystemTimes` の累積値差分による全体 CPU 使用率と、`GlobalMemoryStatusEx` によるメモリ使用率、システムボリュームの使用量。ホバーで CPU / メモリ / ストレージのカードと直近 1 分のスパークライン、Claude Code / Codex CLI のサブスクリミットと API 相当利用料を表示
 - CPU 使用率に応じた 5–40 FPS のアニメーション（既定の上限は 20 FPS）
 - System / Light / Dark テーマ、10 / 20 / 30 / 40 FPS 上限の右クリックメニュー
-- サインイン時の起動、ダブルクリックによる Task Manager 起動、Explorer 再起動後の tray 再登録
+- Windows のスタートアップで起動、初回トレイ登録時の通知領域ピン留め（ユーザーが隠した場合は維持）、ダブルクリックによる Task Manager 起動、Explorer 再起動後の tray 再登録
 - GitHub Releases の stable release を起動時に一度だけ非同期確認し、検証済みの新版をサイレント導入
 - 単一インスタンス、単一 message-loop thread、GUI framework / polling thread / 常時 I/O なし
 
-配備された `dark-dog-*.ico` は ICO ヘッダーではなく 32×32 ARGB BMP です。RunDog は起動時に検証して `HICON` を一度だけ作成し、Dark 用は原画、Light 用は alpha を保った反転色を使います。アニメーション中にファイルを読み直しません。
+配備された `dark-dog-*.ico` は ICO ヘッダーではなく 32×32 ARGB BMP です。RunDog は起動時に検証して `HICON` を一度だけ作成します。原画は暗い犬で、ライトなタスクバーでは原画、ダークなタスクバーでは alpha を保った反転色を使います。アニメーション中にファイルを読み直しません。
 
 ## ビルド
 
@@ -63,7 +63,7 @@ Authenticode の証明書・署名は使用しません。そのため Windows S
 
 ローカルで unsigned installer を作るには Inno Setup 6 を導入してから次を実行します。
 
-    .\scripts\build-installer.ps1 -Version 1.0.0
+    .\scripts\build-installer.ps1 -Version 1.1.0
 
 作成物は `dist\RunDog-Setup-x64.exe` と
 `dist\RunDog-Setup-x64.exe.sha256` です。タグ `vX.Y.Z` を push すると
@@ -72,7 +72,7 @@ Authenticode の証明書・署名は使用しません。そのため Windows S
 
 ## リソース方針とリリース版の実測
 
-CPU サンプリングは 2 秒ごと、静止に近い時のアニメーションは 5 FPS（200 ms）です。CPU 使用率により速度が変わったときだけ timer を再設定し、設定はユーザー操作または正常終了時だけ保存します。更新確認は起動時とユーザーによる再確認時だけで、release metadata は最大 1 MiB、checksum は最大 16 KiB、installer は最大 100 MiB として stream 処理します。
+CPU サンプリングは 2 秒ごと、静止に近い時のアニメーションは 5 FPS（200 ms）です。CPU 使用率により速度が変わったときだけ timer を再設定し、設定はユーザー操作または正常終了時だけ保存します。更新確認は起動時とユーザーによる再確認時だけで、release metadata は最大 1 MiB、checksum は最大 16 KiB、installer は最大 100 MiB として stream 処理します。Claude Code / Codex の利用料は CLI を起動せず、メタデータでサイズが増えた jsonl だけを 1 tick あたり最大 3 ファイル・96 KiB 読み、Claude のリミット取得は 5 分に 1 回・短命 worker に限定します。
 
 2026-08-15 に、公開済みの pre-release [v0.1.0 asset](https://github.com/systemexe-research-and-development/run-dog/releases/tag/v0.1.0) の `RunDog-Setup-x64.exe`（SHA-256 `8331cb50602e74170956147d488362868678c45149a3503a7f64cfce70d0798e`）を実インストールし、常駐が落ち着いたアイドル状態を測定しました。対象環境は Windows 11 Pro 10.0.26200（Intel N150、4 logical processors）、既定の 20 FPS 上限です。60 秒以上のウォームアップ後、[scripts/measure.ps1](scripts/measure.ps1) を `-DurationSeconds 60 -IntervalMilliseconds 1000` で実行し、60 標本の P95 は nearest-rank で算出しました。CPU は 1 コアではなくマシン全体に占める割合です。
 

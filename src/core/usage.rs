@@ -1,0 +1,350 @@
+/// Local Claude Code / Codex CLI usage shown on the hover flyout.
+///
+/// Amounts are API-equivalent estimates. Subscription rate-limit windows are
+/// separate from those dollar figures.
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TokenUsage {
+    pub input: u64,
+    pub cached_input: u64,
+    pub cache_read: u64,
+    pub cache_write_5m: u64,
+    pub cache_write_1h: u64,
+    pub output: u64,
+}
+
+/// One 5-hour or weekly rate-limit window.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct LimitWindow {
+    /// Tenths of a percent, 0–1000 for 0.0%–100.0%.
+    pub used_tenths: u16,
+    /// Unix epoch milliseconds. Zero means unknown.
+    pub resets_at_ms: u64,
+    pub window_minutes: u16,
+}
+
+impl LimitWindow {
+    #[must_use]
+    pub fn used_percent(self) -> f32 {
+        f32::from(self.used_tenths) / 10.0
+    }
+
+    /// A window whose reset has already passed is treated as unused.
+    #[must_use]
+    pub fn effective(self, now_ms: u64) -> Self {
+        if self.resets_at_ms != 0 && self.resets_at_ms <= now_ms {
+            Self {
+                used_tenths: 0,
+                resets_at_ms: 0,
+                window_minutes: self.window_minutes,
+            }
+        } else {
+            self
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ProviderUsage {
+    pub today_cents: u32,
+    pub month_cents: u32,
+    pub plan: [u8; 16],
+    pub plan_len: u8,
+    pub primary: Option<LimitWindow>,
+    pub secondary: Option<LimitWindow>,
+}
+
+impl ProviderUsage {
+    #[must_use]
+    pub fn plan_label(self) -> Option<String> {
+        if self.plan_len == 0 {
+            return None;
+        }
+        let bytes = self.plan.get(..self.plan_len as usize)?;
+        core::str::from_utf8(bytes).ok().map(str::to_owned)
+    }
+
+    pub fn set_plan(&mut self, label: &str) {
+        let formatted = format_plan_label(label);
+        let bytes = formatted.as_bytes();
+        let len = bytes.len().min(self.plan.len());
+        self.plan[..len].copy_from_slice(&bytes[..len]);
+        self.plan_len = len as u8;
+    }
+
+    #[must_use]
+    pub fn session_window(self) -> Option<LimitWindow> {
+        self.window_matching(|minutes| minutes > 0 && minutes < 1_440)
+    }
+
+    #[must_use]
+    pub fn weekly_window(self) -> Option<LimitWindow> {
+        self.window_matching(|minutes| minutes >= 1_440)
+    }
+
+    fn window_matching(self, pred: impl Fn(u16) -> bool) -> Option<LimitWindow> {
+        [self.primary, self.secondary]
+            .into_iter()
+            .flatten()
+            .find(|window| pred(window.window_minutes))
+    }
+}
+
+/// `default_claude_max_20x` / `pro` → `Max 20x` / `Pro 20x`.
+#[must_use]
+pub fn format_plan_label(raw: &str) -> String {
+    let lower = raw.to_ascii_lowercase();
+    let name = if lower.contains("enterprise") {
+        "Enterprise"
+    } else if lower.contains("business") {
+        "Business"
+    } else if lower.contains("team") {
+        "Team"
+    } else if lower.contains("plus") {
+        "Plus"
+    } else if lower.contains("max") {
+        "Max"
+    } else if lower.contains("pro") {
+        "Pro"
+    } else {
+        raw.trim()
+    };
+    let multiplier = extract_multiplier(&lower).or_else(|| {
+        if name.eq_ignore_ascii_case("pro") {
+            Some("20x")
+        } else {
+            None
+        }
+    });
+    match multiplier {
+        Some(multiplier) if !name.is_empty() => format!("{name} {multiplier}"),
+        _ if !name.is_empty() => name.to_owned(),
+        _ => raw.to_owned(),
+    }
+}
+
+fn extract_multiplier(lower: &str) -> Option<&'static str> {
+    ["20x", "5x", "2x"]
+        .into_iter()
+        .find(|candidate| lower.contains(candidate))
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct UsageSnapshot {
+    pub claude: ProviderUsage,
+    pub codex: ProviderUsage,
+}
+
+/// USD cents from a per-million-token price table.
+#[must_use]
+pub fn cost_cents(model: &str, usage: TokenUsage) -> Option<u32> {
+    let pricing = resolve_pricing(model)?;
+    let usd = (usage.input as f64).mul_add(
+        pricing.input,
+        (usage.cached_input as f64).mul_add(
+            pricing.cached_input,
+            (usage.cache_read as f64).mul_add(
+                pricing.cache_read,
+                (usage.cache_write_5m as f64).mul_add(
+                    pricing.cache_write_5m,
+                    (usage.cache_write_1h as f64)
+                        .mul_add(pricing.cache_write_1h, usage.output as f64 * pricing.output),
+                ),
+            ),
+        ),
+    ) / 1_000_000.0;
+    if usd.is_finite() && usd >= 0.0 {
+        Some((usd * 100.0).round() as u32)
+    } else {
+        None
+    }
+}
+
+struct ModelPricing {
+    key: &'static str,
+    input: f64,
+    output: f64,
+    cached_input: f64,
+    cache_read: f64,
+    cache_write_5m: f64,
+    cache_write_1h: f64,
+}
+
+fn entry(key: &'static str, input: f64, output: f64) -> ModelPricing {
+    ModelPricing {
+        key,
+        input,
+        output,
+        cached_input: input * 0.1,
+        cache_read: input * 0.1,
+        cache_write_5m: input * 1.25,
+        cache_write_1h: input * 2.0,
+    }
+}
+
+fn entry_cached(key: &'static str, input: f64, cached: f64, output: f64) -> ModelPricing {
+    let mut pricing = entry(key, input, output);
+    pricing.cached_input = cached;
+    pricing
+}
+
+fn pricing_table() -> [ModelPricing; 28] {
+    [
+        entry("claude-opus-5-fast", 10.0, 50.0),
+        entry("claude-opus-5", 5.0, 25.0),
+        entry("claude-opus-4-8-fast", 10.0, 50.0),
+        entry("claude-opus-4-8", 5.0, 25.0),
+        entry("claude-opus-4-6", 5.0, 25.0),
+        entry("claude-opus-4-5", 5.0, 25.0),
+        entry("claude-opus-4-1", 15.0, 75.0),
+        entry("claude-opus-4", 15.0, 75.0),
+        entry("claude-sonnet-5", 3.0, 15.0),
+        entry("claude-sonnet-4-6", 3.0, 15.0),
+        entry("claude-sonnet-4-5", 3.0, 15.0),
+        entry("claude-sonnet-4", 3.0, 15.0),
+        entry("claude-haiku-4-5", 1.0, 5.0),
+        entry("claude-3-7-sonnet", 3.0, 15.0),
+        entry("claude-3-5-sonnet", 3.0, 15.0),
+        entry("claude-3-5-haiku", 0.8, 4.0),
+        entry_cached("gpt-5.6", 5.0, 0.5, 30.0),
+        entry_cached("gpt-5.5", 5.0, 0.5, 30.0),
+        entry_cached("gpt-5.4-mini", 0.75, 0.075, 4.5),
+        entry_cached("gpt-5.4", 2.5, 0.25, 15.0),
+        entry_cached("gpt-5.3-codex", 1.75, 0.175, 14.0),
+        entry_cached("gpt-5.2-codex", 1.75, 0.175, 14.0),
+        entry_cached("gpt-5.1-codex-mini", 0.25, 0.025, 2.0),
+        entry_cached("gpt-5.1-codex", 1.25, 0.125, 10.0),
+        entry_cached("gpt-5.1", 1.25, 0.125, 10.0),
+        entry_cached("gpt-5-codex", 1.25, 0.125, 10.0),
+        entry_cached("gpt-5-mini", 0.25, 0.025, 2.0),
+        entry_cached("gpt-5", 1.25, 0.125, 10.0),
+    ]
+}
+
+fn resolve_pricing(model: &str) -> Option<ModelPricing> {
+    let table = pricing_table();
+    if let Some(exact) = table.iter().find(|entry| entry.key == model) {
+        return Some(copy_pricing(exact));
+    }
+    table
+        .iter()
+        .filter(|entry| model_matches(model, entry.key))
+        .max_by_key(|entry| entry.key.len())
+        .map(copy_pricing)
+}
+
+fn copy_pricing(entry: &ModelPricing) -> ModelPricing {
+    ModelPricing {
+        key: entry.key,
+        input: entry.input,
+        output: entry.output,
+        cached_input: entry.cached_input,
+        cache_read: entry.cache_read,
+        cache_write_5m: entry.cache_write_5m,
+        cache_write_1h: entry.cache_write_1h,
+    }
+}
+
+fn model_matches(model: &str, key: &str) -> bool {
+    if model.starts_with(key) {
+        return true;
+    }
+    const FAST: &str = "-fast";
+    key.ends_with(FAST)
+        && model.ends_with(FAST)
+        && model[..model.len() - FAST.len()].starts_with(&key[..key.len() - FAST.len()])
+}
+
+/// Civil date from Unix milliseconds shifted by a timezone bias in minutes.
+/// Windows `TIME_ZONE_INFORMATION.Bias` is UTC = local + Bias.
+#[must_use]
+pub fn local_ymd(unix_ms: u64, bias_minutes: i32) -> (i32, u8, u8) {
+    let local_ms = unix_ms as i64 - i64::from(bias_minutes) * 60_000;
+    let days = local_ms.div_euclid(86_400_000);
+    days_to_ymd(days)
+}
+
+#[must_use]
+pub fn ymd_key(year: i32, month: u8, day: u8) -> u32 {
+    (year as u32) * 10_000 + u32::from(month) * 100 + u32::from(day)
+}
+
+#[must_use]
+pub fn local_hms(unix_ms: u64, bias_minutes: i32) -> (u8, u8) {
+    let local_ms = unix_ms as i64 - i64::from(bias_minutes) * 60_000;
+    let seconds = local_ms.div_euclid(1_000).rem_euclid(86_400);
+    ((seconds / 3_600) as u8, ((seconds % 3_600) / 60) as u8)
+}
+
+/// Howard Hinnant's civil-from-days. `days` is the count since 1970-01-01.
+#[must_use]
+pub fn days_to_ymd(days: i64) -> (i32, u8, u8) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i32 + era as i32 * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u8;
+    let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u8;
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        cost_cents, days_to_ymd, format_plan_label, local_ymd, ymd_key, LimitWindow, TokenUsage,
+    };
+
+    #[test]
+    fn component_opus_standard_request_matches_published_rates() {
+        let usage = TokenUsage {
+            input: 1_000_000,
+            output: 1_000_000,
+            ..TokenUsage::default()
+        };
+        assert_eq!(cost_cents("claude-opus-5", usage), Some(3_000));
+        assert_eq!(cost_cents("claude-opus-5-fast", usage), Some(6_000));
+        assert_eq!(
+            cost_cents("claude-opus-5-20260120-fast", usage),
+            Some(6_000)
+        );
+        assert_eq!(cost_cents("gpt-5.6-sol", usage), Some(3_500));
+        assert_eq!(cost_cents("gpt-5.6-terra", usage), Some(3_500));
+    }
+
+    #[test]
+    fn component_unknown_model_has_no_api_equivalent_cost() {
+        assert_eq!(cost_cents("mystery-model", TokenUsage::default()), None);
+    }
+
+    #[test]
+    fn component_expired_limit_window_reads_as_unused() {
+        let window = LimitWindow {
+            used_tenths: 280,
+            resets_at_ms: 1_000,
+            window_minutes: 300,
+        };
+        assert_eq!(window.effective(999).used_tenths, 280);
+        assert_eq!(window.effective(1_000).used_tenths, 0);
+    }
+
+    #[test]
+    fn component_civil_dates_cover_epoch_leap_and_timezone_bias() {
+        assert_eq!(days_to_ymd(0), (1970, 1, 1));
+        assert_eq!(days_to_ymd(19_782), (2024, 2, 29));
+        assert_eq!(local_ymd(0, -540), (1970, 1, 1));
+        assert_eq!(local_ymd(0, 0), (1970, 1, 1));
+        assert_eq!(ymd_key(2026, 8, 16), 20_260_816);
+    }
+
+    #[test]
+    fn component_plan_labels_capitalise_and_keep_rate_multipliers() {
+        assert_eq!(format_plan_label("default_claude_max_20x"), "Max 20x");
+        assert_eq!(format_plan_label("max"), "Max");
+        assert_eq!(format_plan_label("pro"), "Pro 20x");
+        assert_eq!(format_plan_label("plus"), "Plus");
+    }
+}

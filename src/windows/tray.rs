@@ -4,12 +4,13 @@ use windows_sys::Win32::{
     Foundation::{HWND, POINT},
     UI::{
         Shell::{
-            Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE,
-            NIM_MODIFY, NIM_SETVERSION, NIN_SELECT, NOTIFYICONDATAW, NOTIFYICON_VERSION_4,
+            Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
+            NIM_SETVERSION, NIN_POPUPCLOSE, NIN_POPUPOPEN, NIN_SELECT, NOTIFYICONDATAW,
+            NOTIFYICON_VERSION_4,
         },
         WindowsAndMessaging::{
-            AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, PostMessageW,
-            SetForegroundWindow, TrackPopupMenu, HMENU, MF_CHECKED, MF_GRAYED, MF_POPUP,
+            AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, KillTimer, PostMessageW,
+            SetForegroundWindow, SetTimer, TrackPopupMenu, HMENU, MF_CHECKED, MF_GRAYED, MF_POPUP,
             MF_SEPARATOR, MF_STRING, MF_UNCHECKED, TPM_RIGHTBUTTON, WM_CONTEXTMENU,
             WM_LBUTTONDBLCLK, WM_NULL, WM_RBUTTONUP,
         },
@@ -21,9 +22,13 @@ use crate::{
     core::{FpsLimit, ThemePreference},
 };
 
-use super::{icons::IconFrames, update::UpdateMenuState};
+use super::{flyout::HoverFlyout, icons::IconFrames, update::UpdateMenuState};
 
 pub const TRAY_CALLBACK_MESSAGE: u32 = 0x8000 + 1;
+/// One-shot retries while Explorer populates `NotifyIconSettings`.
+pub const PROMOTE_TIMER_ID: usize = 3;
+const PROMOTE_RETRY_MS: u32 = 500;
+const PROMOTE_MAX_ATTEMPTS: u8 = 10;
 
 pub const COMMAND_THEME_SYSTEM: u32 = 1_001;
 pub const COMMAND_THEME_LIGHT: u32 = 1_002;
@@ -63,6 +68,9 @@ pub struct TrayAdapter {
     fps_limit: FpsLimit,
     startup_enabled: bool,
     added: bool,
+    promote_attempts: u8,
+    flyout: HoverFlyout,
+    last_icon: Option<TrayIcon>,
 }
 
 impl TrayAdapter {
@@ -80,6 +88,9 @@ impl TrayAdapter {
             fps_limit,
             startup_enabled: startup,
             added: false,
+            promote_attempts: 0,
+            flyout: HoverFlyout::new(),
+            last_icon: None,
         }
     }
 
@@ -89,9 +100,17 @@ impl TrayAdapter {
 
     pub fn apply(&mut self, effect: &Effect) {
         match effect {
-            Effect::AddTray(icon) => self.add(icon),
+            Effect::AddTray(icon) => {
+                self.add(icon);
+                self.begin_promote();
+            }
             Effect::ModifyTray(icon) => self.modify(icon),
-            Effect::RemoveTray => self.remove(),
+            Effect::RemoveTray => {
+                self.stop_promote();
+                self.flyout.destroy();
+                self.last_icon = None;
+                self.remove();
+            }
             Effect::SetThemeMenu(theme) => self.theme = *theme,
             Effect::SetFpsMenu(limit) => self.fps_limit = *limit,
             Effect::SetStartupMenu(enabled) => self.startup_enabled = *enabled,
@@ -106,7 +125,8 @@ impl TrayAdapter {
     }
 
     /// Opens the right-click menu. Menu handles exist only for this invocation.
-    pub fn show_menu(&self, update_state: &UpdateMenuState) {
+    pub fn show_menu(&mut self, update_state: &UpdateMenuState) {
+        self.flyout.hide();
         let root = unsafe { CreatePopupMenu() };
         let theme_menu = unsafe { CreatePopupMenu() };
         let speed_menu = unsafe { CreatePopupMenu() };
@@ -172,7 +192,7 @@ impl TrayAdapter {
         append_checked(
             root,
             COMMAND_TOGGLE_STARTUP,
-            "Launch at sign-in",
+            "Launch at startup",
             self.startup_enabled,
         );
         let _ = unsafe { AppendMenuW(root, MF_SEPARATOR, 0, ptr::null()) };
@@ -223,7 +243,68 @@ impl TrayAdapter {
         notification == WM_LBUTTONDBLCLK || notification == NIN_SELECT || notification == 1_025
     }
 
+    #[must_use]
+    pub const fn is_popup_open_notification(notification: u32) -> bool {
+        notification == NIN_POPUPOPEN
+    }
+
+    #[must_use]
+    pub const fn is_popup_close_notification(notification: u32) -> bool {
+        notification == NIN_POPUPCLOSE
+    }
+
+    pub fn handle_hover(&mut self, notification: u32) {
+        if Self::is_popup_close_notification(notification) {
+            self.flyout.hide();
+            return;
+        }
+        if Self::is_popup_open_notification(notification) && self.last_icon.is_some() {
+            self.flyout.show_near_icon(self.hwnd);
+        }
+    }
+
+    /// Explorer may create the per-icon settings subkey after `NIM_ADD`.
+    pub fn on_promote_timer(&mut self) {
+        self.promote_once();
+    }
+
+    fn begin_promote(&mut self) {
+        self.promote_attempts = PROMOTE_MAX_ATTEMPTS;
+        self.promote_once();
+    }
+
+    fn promote_once(&mut self) {
+        if self.promote_attempts == 0 || !self.added {
+            self.stop_promote();
+            return;
+        }
+        self.promote_attempts -= 1;
+        match super::notify_icon::try_promote_current_executable() {
+            super::notify_icon::PromoteAttempt::Done => self.stop_promote(),
+            super::notify_icon::PromoteAttempt::Retry if self.promote_attempts > 0 => {
+                self.arm_promote_timer();
+            }
+            super::notify_icon::PromoteAttempt::Retry => self.stop_promote(),
+        }
+    }
+
+    fn arm_promote_timer(&mut self) {
+        if self.hwnd.is_null() {
+            self.stop_promote();
+            return;
+        }
+        let _ = unsafe { SetTimer(self.hwnd, PROMOTE_TIMER_ID, PROMOTE_RETRY_MS, None) };
+    }
+
+    fn stop_promote(&mut self) {
+        self.promote_attempts = 0;
+        if !self.hwnd.is_null() {
+            let _ = unsafe { KillTimer(self.hwnd, PROMOTE_TIMER_ID) };
+        }
+    }
+
     fn add(&mut self, icon: &TrayIcon) {
+        self.remember(icon);
         let data = self.notification_data(icon);
         if unsafe { Shell_NotifyIconW(NIM_ADD, &data) } == 0 {
             self.added = false;
@@ -236,6 +317,7 @@ impl TrayAdapter {
     }
 
     fn modify(&mut self, icon: &TrayIcon) {
+        self.remember(icon);
         if !self.added {
             self.add(icon);
             return;
@@ -254,6 +336,12 @@ impl TrayAdapter {
             theme: crate::core::ResolvedTheme::Dark,
             frame: 0,
             tooltip: String::new(),
+            cpu_sparkline: crate::core::Sparkline::new(),
+            memory_sparkline: crate::core::Sparkline::new(),
+            cpu_breakdown: None,
+            memory: None,
+            storage: None,
+            usage: crate::core::UsageSnapshot::default(),
         });
         let _ = unsafe { Shell_NotifyIconW(NIM_DELETE, &data) };
         self.added = false;
@@ -264,7 +352,7 @@ impl TrayAdapter {
             cbSize: size_of::<NOTIFYICONDATAW>() as u32,
             hWnd: self.hwnd,
             uID: 1,
-            uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP,
+            uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP,
             uCallbackMessage: TRAY_CALLBACK_MESSAGE,
             hIcon: self.icons.icon(icon.theme, icon.frame),
             ..NOTIFYICONDATAW::default()
@@ -279,6 +367,23 @@ impl TrayAdapter {
             *slot = utf16;
         }
         data
+    }
+
+    fn remember(&mut self, icon: &TrayIcon) {
+        let display_changed = self.last_icon.as_ref().is_none_or(|previous| {
+            previous.theme != icon.theme
+                || previous.tooltip != icon.tooltip
+                || previous.cpu_sparkline != icon.cpu_sparkline
+                || previous.memory_sparkline != icon.memory_sparkline
+                || previous.cpu_breakdown != icon.cpu_breakdown
+                || previous.memory != icon.memory
+                || previous.storage != icon.storage
+                || previous.usage != icon.usage
+        });
+        self.last_icon = Some(icon.clone());
+        if display_changed {
+            self.flyout.set_state(icon);
+        }
     }
 }
 
@@ -391,5 +496,8 @@ mod tests {
         assert!(TrayAdapter::is_activation_notification(1024));
         assert!(TrayAdapter::is_activation_notification(1025));
         assert!(!TrayAdapter::is_activation_notification(0));
+        assert!(TrayAdapter::is_popup_open_notification(0x0406));
+        assert!(TrayAdapter::is_popup_close_notification(0x0407));
+        assert!(!TrayAdapter::is_popup_open_notification(0x0400));
     }
 }
