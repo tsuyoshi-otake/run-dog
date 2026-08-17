@@ -39,8 +39,8 @@ use windows_sys::{
 use crate::{
     application::TrayIcon,
     core::{
-        local_hms, local_ymd, LimitWindow, MemoryStatus, ProviderUsage, ResolvedTheme, Sparkline,
-        StorageStatus, SPARKLINE_CAPACITY,
+        local_hms, local_ymd, LimitWindow, MemoryStatus, ProcessStatus, ProviderUsage,
+        ResolvedTheme, Sparkline, StorageStatus, SPARKLINE_CAPACITY,
     },
 };
 
@@ -49,7 +49,7 @@ const ICON_ID: u32 = 1;
 const MA_NOACTIVATE: LRESULT = 3;
 const CARD_WIDTH: i32 = 320;
 const CARD_HEIGHT: i32 = 272;
-const CARD_USAGE_HEIGHT: i32 = 188;
+const CARD_USAGE_HEIGHT: i32 = 220;
 
 static REGISTER_CLASS: Once = Once::new();
 
@@ -486,6 +486,21 @@ fn paint(hwnd: HWND) {
         title_font,
         detail_font,
     );
+    top = codex_bottom + px(8, dpi);
+    draw_separator(hdc, content_left, content_right, top, palette.separator);
+    top += px(8, dpi);
+    paint_self_row(
+        hdc,
+        RECT {
+            left: content_left,
+            top,
+            right: content_right,
+            bottom: top + layout.detail_h,
+        },
+        state.process,
+        &palette,
+        detail_font,
+    );
 
     if !previous_font.is_null() {
         let _ = unsafe { SelectObject(hdc, previous_font) };
@@ -760,8 +775,8 @@ fn paint_usage_row(
         bottom: row.top + px(2, layout.dpi) + layout.icon,
     };
     match mark {
-        UsageMark::Claude => draw_claude_icon(hdc, icon, palette.text, layout.dpi),
-        UsageMark::Codex => draw_codex_icon(hdc, icon, palette.text, layout.dpi),
+        UsageMark::Claude => super::brand::draw_claude(hdc, icon, palette.text),
+        UsageMark::Codex => super::brand::draw_openai(hdc, icon, palette.text),
     }
 
     let heading = match usage.plan_label() {
@@ -845,6 +860,30 @@ fn paint_usage_row(
     );
 }
 
+fn paint_self_row(
+    hdc: windows_sys::Win32::Graphics::Gdi::HDC,
+    row: RECT,
+    process: Option<ProcessStatus>,
+    palette: &Palette,
+    detail_font: windows_sys::Win32::Graphics::Gdi::HFONT,
+) {
+    select_font(hdc, detail_font);
+    let _ = unsafe { SetTextColor(hdc, palette.muted) };
+    draw_text(hdc, row, "RunDog", 0);
+    draw_text(hdc, row, &format_self_usage(process), DT_RIGHT);
+}
+
+fn format_self_usage(process: Option<ProcessStatus>) -> String {
+    match process {
+        Some(status) => format!(
+            "{} · {}",
+            format_percent(status.cpu.map(crate::core::CpuLoad::value)),
+            format_bytes(status.private_bytes, 1)
+        ),
+        None => "--.-% · --".to_owned(),
+    }
+}
+
 fn usage_block_height(layout: &Layout) -> i32 {
     let metric = layout.detail_h + layout.bar_h + px(3, layout.dpi);
     layout.title_h + metric * 2 + layout.detail_h + px(2, layout.dpi)
@@ -917,77 +956,6 @@ fn format_usd(cents: u32, empty: bool) -> String {
     } else {
         format!("${}.{:02}", cents / 100, cents % 100)
     }
-}
-
-fn draw_claude_icon(
-    hdc: windows_sys::Win32::Graphics::Gdi::HDC,
-    rect: RECT,
-    color: COLORREF,
-    dpi: i32,
-) {
-    let cx = (rect.left + rect.right) as f32 / 2.0;
-    let cy = (rect.top + rect.bottom) as f32 / 2.0;
-    let arm = px(6, dpi) as f32;
-    let width = px(2, dpi).max(1);
-    for index in 0..3 {
-        let angle = index as f32 * std::f32::consts::PI / 3.0;
-        let dx = arm * angle.cos();
-        let dy = arm * angle.sin();
-        stroke_line(
-            hdc,
-            (cx - dx).round() as i32,
-            (cy - dy).round() as i32,
-            (cx + dx).round() as i32,
-            (cy + dy).round() as i32,
-            color,
-            width,
-        );
-    }
-}
-
-fn draw_codex_icon(
-    hdc: windows_sys::Win32::Graphics::Gdi::HDC,
-    rect: RECT,
-    color: COLORREF,
-    dpi: i32,
-) {
-    let cx = (rect.left + rect.right) as f32 / 2.0;
-    let cy = (rect.top + rect.bottom) as f32 / 2.0;
-    let radius = px(7, dpi) as f32;
-    let mut points = [POINT { x: 0, y: 0 }; 6];
-    for (index, point) in points.iter_mut().enumerate() {
-        let angle = std::f32::consts::FRAC_PI_6 + index as f32 * std::f32::consts::FRAC_PI_3;
-        *point = POINT {
-            x: (cx + radius * angle.cos()).round() as i32,
-            y: (cy + radius * angle.sin()).round() as i32,
-        };
-    }
-    stroke_polygon(hdc, &points, color, px(2, dpi).max(1));
-}
-
-fn stroke_polygon(
-    hdc: windows_sys::Win32::Graphics::Gdi::HDC,
-    points: &[POINT],
-    color: COLORREF,
-    width: i32,
-) {
-    if points.len() < 3 {
-        return;
-    }
-    let pen = unsafe { CreatePen(PS_SOLID, width, color) };
-    if pen.is_null() {
-        return;
-    }
-    let previous_pen = unsafe { SelectObject(hdc, pen) };
-    let previous_brush = unsafe { SelectObject(hdc, GetStockObject(NULL_BRUSH)) };
-    let _ = unsafe { Polygon(hdc, points.as_ptr(), points.len() as i32) };
-    if !previous_pen.is_null() {
-        let _ = unsafe { SelectObject(hdc, previous_pen) };
-    }
-    if !previous_brush.is_null() {
-        let _ = unsafe { SelectObject(hdc, previous_brush) };
-    }
-    let _ = unsafe { DeleteObject(pen) };
 }
 
 fn cpu_total(state: &TrayIcon) -> Option<f32> {
@@ -1372,7 +1340,8 @@ fn wide(value: &str) -> Vec<u16> {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_bytes, format_percent};
+    use super::{format_bytes, format_percent, format_self_usage};
+    use crate::core::{CpuLoad, ProcessStatus};
 
     #[test]
     fn component_flyout_formatters_cover_unknown_and_scaled_values() {
@@ -1380,5 +1349,17 @@ mod tests {
         assert_eq!(format_percent(Some(12.34)), "12.3%");
         assert_eq!(format_bytes(1536, 1), "1.5 KB");
         assert_eq!(format_bytes(3_221_225_472, 2), "3.00 GB");
+        assert_eq!(format_self_usage(None), "--.-% · --");
+        assert_eq!(
+            format_self_usage(Some(ProcessStatus::new(5 * 1024 * 1024, None))),
+            "--.-% · 5.0 MB"
+        );
+        assert_eq!(
+            format_self_usage(Some(ProcessStatus::new(
+                5 * 1024 * 1024,
+                Some(CpuLoad::percent(0.4))
+            ))),
+            "0.4% · 5.0 MB"
+        );
     }
 }

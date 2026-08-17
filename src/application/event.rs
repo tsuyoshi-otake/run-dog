@@ -1,5 +1,5 @@
 use crate::core::{
-    AppSettings, FpsLimit, MemoryStatus, ResolvedTheme, StorageStatus, SystemTimes,
+    AppSettings, FpsLimit, MemoryStatus, ProcessStatus, ResolvedTheme, StorageStatus, SystemTimes,
     ThemePreference, UsageSnapshot,
 };
 
@@ -12,6 +12,7 @@ pub enum Event {
         times: SystemTimes,
         memory: Option<MemoryStatus>,
         storage: Option<StorageStatus>,
+        process: Option<ProcessStatus>,
     },
     AnimationTimerElapsed,
     SystemThemeChanged(ResolvedTheme),
@@ -37,6 +38,7 @@ impl Event {
             times,
             memory: None,
             storage: None,
+            process: None,
         }
     }
 }

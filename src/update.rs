@@ -6,7 +6,7 @@
 
 use std::{cmp::Ordering, fmt};
 
-pub const DEFAULT_REPOSITORY: &str = "systemexe-research-and-development/run-dog";
+pub const DEFAULT_REPOSITORY: &str = "tsuyoshi-otake/run-dog";
 pub const INSTALLER_ASSET_NAME: &str = "RunDog-Setup-x64.exe";
 pub const CHECKSUM_ASSET_NAME: &str = "RunDog-Setup-x64.exe.sha256";
 

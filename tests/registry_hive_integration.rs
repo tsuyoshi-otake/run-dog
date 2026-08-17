@@ -165,3 +165,102 @@ fn live_hive_crash_recovery_finishes_pending_run_sync() {
     assert_eq!(recovered.status, CommitStatus::Applied);
     assert!(guard.store.load_pending().is_none());
 }
+
+#[test]
+fn live_hive_startup_run_entry_round_trips_on_and_off() {
+    let mut guard = HiveGuard::new("startup-roundtrip");
+    let off = AppSettings::default();
+    let on = AppSettings {
+        launch_at_startup: true,
+        ..off
+    };
+
+    let enabled = guard.store.execute_commit(CommitRequest {
+        operation_id: 1,
+        expected_generation: 0,
+        settings: on,
+        previous: off,
+        sync_run_entry: true,
+        deadline_millis: 5_000,
+    });
+    assert_eq!(enabled.status, CommitStatus::Applied);
+    assert!(guard.store.load_record().settings.launch_at_startup);
+
+    let disabled = guard.store.execute_commit(CommitRequest {
+        operation_id: 2,
+        expected_generation: 1,
+        settings: off,
+        previous: on,
+        sync_run_entry: true,
+        deadline_millis: 5_000,
+    });
+    assert_eq!(disabled.status, CommitStatus::Applied);
+    assert!(!guard.store.load_record().settings.launch_at_startup);
+
+    let enabled_again = guard.store.execute_commit(CommitRequest {
+        operation_id: 3,
+        expected_generation: 2,
+        settings: on,
+        previous: off,
+        sync_run_entry: true,
+        deadline_millis: 5_000,
+    });
+    assert_eq!(enabled_again.status, CommitStatus::Applied);
+    assert!(guard.store.load_record().settings.launch_at_startup);
+}
+
+#[test]
+fn live_hive_clear_tombstone_allows_startup_commit_again() {
+    let mut guard = HiveGuard::new("startup-tombstone");
+    let on = AppSettings {
+        launch_at_startup: true,
+        ..AppSettings::default()
+    };
+    assert_eq!(
+        guard
+            .store
+            .execute_commit(CommitRequest {
+                operation_id: 1,
+                expected_generation: 0,
+                settings: on,
+                previous: AppSettings::default(),
+                sync_run_entry: true,
+                deadline_millis: 5_000,
+            })
+            .status,
+        CommitStatus::Applied
+    );
+    assert!(guard.store.tombstone());
+    assert_eq!(
+        guard
+            .store
+            .execute_commit(CommitRequest {
+                operation_id: 2,
+                expected_generation: 1,
+                settings: AppSettings::default(),
+                previous: on,
+                sync_run_entry: true,
+                deadline_millis: 5_000,
+            })
+            .status,
+        CommitStatus::Tombstoned
+    );
+
+    assert!(guard.store.clear_tombstone());
+    let restored = guard.store.execute_commit(CommitRequest {
+        operation_id: 1,
+        expected_generation: 0,
+        settings: on,
+        previous: AppSettings::default(),
+        sync_run_entry: true,
+        deadline_millis: 5_000,
+    });
+    assert_eq!(restored.status, CommitStatus::Applied);
+    assert!(guard.store.load_record().settings.launch_at_startup);
+}
+
+#[test]
+fn production_settings_key_cannot_be_tombstoned() {
+    let mut store = RegistryStore::production();
+    assert!(!store.tombstone());
+}

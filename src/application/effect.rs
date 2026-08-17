@@ -1,6 +1,6 @@
 use crate::core::{
-    AppSettings, CpuBreakdown, FpsLimit, MemoryStatus, ResolvedTheme, Sparkline, StorageStatus,
-    ThemePreference, UsageSnapshot,
+    AppSettings, CpuBreakdown, FpsLimit, MemoryStatus, ProcessStatus, ResolvedTheme, Sparkline,
+    StorageStatus, ThemePreference, UsageSnapshot,
 };
 
 /// Timer identities are stable values, so the Windows adapter never needs to
@@ -23,6 +23,7 @@ pub struct TrayIcon {
     pub memory: Option<MemoryStatus>,
     pub storage: Option<StorageStatus>,
     pub usage: UsageSnapshot,
+    pub process: Option<ProcessStatus>,
 }
 
 /// Default wall-clock budget for one settings/Run commit saga.

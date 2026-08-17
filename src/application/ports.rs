@@ -54,6 +54,7 @@ pub fn dispatch_cpu_tick<P: EffectPort, S: CpuSource>(app: &mut App, source: &mu
                 times,
                 memory,
                 storage: source.read_storage(),
+                process: None,
             },
         );
     }

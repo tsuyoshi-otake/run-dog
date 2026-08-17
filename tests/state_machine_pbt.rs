@@ -115,6 +115,7 @@ fn event_from_code(code: u8, times: &mut SystemTimes) -> Event {
                 times: *times,
                 memory: None,
                 storage: None,
+                process: None,
             }
         }
         1 => Event::AnimationTimerElapsed,
