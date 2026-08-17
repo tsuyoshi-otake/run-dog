@@ -108,6 +108,7 @@ pub struct UsageCollector {
     restat_skip: usize,
     catch_up: bool,
     deferred: VecDeque<PathBuf>,
+    read_buf: Vec<u8>,
     codex_from_remote: bool,
     remote_fetch: RemoteLimitsFetch,
 }
@@ -156,6 +157,7 @@ impl UsageCollector {
             restat_skip: 0,
             catch_up: true,
             deferred: VecDeque::new(),
+            read_buf: Vec::new(),
             codex_from_remote: false,
             remote_fetch: RemoteLimitsFetch {
                 in_flight: Arc::new(AtomicBool::new(false)),
@@ -240,6 +242,7 @@ impl UsageCollector {
         }
 
         if self.discover.is_empty() && !unread_remaining && opens < self.file_budget() {
+            self.release_scratch();
             UsageTick::Idle
         } else {
             UsageTick::MoreWork
@@ -344,22 +347,22 @@ impl UsageCollector {
             return 0;
         };
         let max_bytes = self.byte_budget();
-        let Some(cursor) = self.files.get_mut(path) else {
-            return 0;
+        let (kind, offset, previous_model) = {
+            let Some(cursor) = self.files.get_mut(path) else {
+                return 0;
+            };
+            cursor.last_stat_ms = now_ms;
+            if size < cursor.offset {
+                cursor.offset = 0;
+                cursor.last_model = None;
+            }
+            if size == cursor.offset {
+                cursor.size = size;
+                cursor.mtime_ms = mtime_ms;
+                return 0;
+            }
+            (cursor.kind, cursor.offset, cursor.last_model.clone())
         };
-        cursor.last_stat_ms = now_ms;
-        if size < cursor.offset {
-            cursor.offset = 0;
-            cursor.last_model = None;
-        }
-        if size == cursor.offset {
-            cursor.size = size;
-            cursor.mtime_ms = mtime_ms;
-            return 0;
-        }
-        let kind = cursor.kind;
-        let offset = cursor.offset;
-        let previous_model = cursor.last_model.clone();
         let chunk = read_appended(
             path,
             offset,
@@ -367,7 +370,11 @@ impl UsageCollector {
             kind,
             previous_model.as_deref(),
             max_bytes,
+            &mut self.read_buf,
         );
+        let Some(cursor) = self.files.get_mut(path) else {
+            return chunk.consumed;
+        };
         cursor.offset = chunk.new_offset;
         cursor.size = size;
         cursor.mtime_ms = mtime_ms;
@@ -512,6 +519,11 @@ impl UsageCollector {
         self.pending.extend(self.deferred.drain(..));
     }
 
+    fn release_scratch(&mut self) {
+        self.read_buf.clear();
+        self.read_buf.shrink_to(0);
+    }
+
     fn file_budget(&self) -> usize {
         if self.catch_up {
             CATCH_UP_FILES_PER_TICK
@@ -635,6 +647,7 @@ fn read_appended(
     kind: SourceKind,
     last_model: Option<&str>,
     max_bytes: u64,
+    buf: &mut Vec<u8>,
 ) -> AppendedChunk {
     let empty = AppendedChunk {
         new_offset: offset,
@@ -651,8 +664,9 @@ fn read_appended(
     if file.seek(SeekFrom::Start(offset)).is_err() {
         return empty;
     }
-    let mut buf = vec![0_u8; budget as usize];
-    let Ok(read) = file.read(&mut buf) else {
+    buf.clear();
+    buf.resize(budget as usize, 0);
+    let Ok(read) = file.read(buf) else {
         return empty;
     };
     buf.truncate(read);

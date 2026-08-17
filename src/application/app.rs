@@ -1,7 +1,7 @@
 use crate::core::{
     AnimationController, AppSettings, CpuBreakdown, CpuSampler, FpsLimit, FrameCursor,
-    MemoryStatus, ResolvedTheme, Sparkline, StorageStatus, SystemTimes, ThemePreference,
-    UsageSnapshot,
+    MemoryStatus, ProcessStatus, ResolvedTheme, Sparkline, StorageStatus, SystemTimes,
+    ThemePreference, UsageSnapshot,
 };
 
 use super::{
@@ -37,6 +37,7 @@ pub struct App {
     cpu_sparkline: Sparkline,
     memory_sparkline: Sparkline,
     usage: UsageSnapshot,
+    process: Option<ProcessStatus>,
     tooltip: String,
     running: bool,
     pending_commit: Option<PendingCommit>,
@@ -59,6 +60,7 @@ pub struct AppSnapshot {
     pub cpu_breakdown: Option<CpuBreakdown>,
     pub storage: Option<StorageStatus>,
     pub usage: UsageSnapshot,
+    pub process: Option<ProcessStatus>,
     pub running: bool,
     pub pending_commit: Option<AppSettings>,
 }
@@ -102,6 +104,7 @@ impl App {
             cpu_sparkline: Sparkline::new(),
             memory_sparkline: Sparkline::new(),
             usage: UsageSnapshot::default(),
+            process: None,
             tooltip: format_tooltip(None, None),
             running: false,
             pending_commit: None,
@@ -129,6 +132,7 @@ impl App {
             cpu_breakdown: self.sampler.latest_breakdown(),
             storage: self.storage,
             usage: self.usage,
+            process: self.process,
             running: self.running,
             pending_commit: self.pending_commit.map(|pending| pending.settings),
         }
@@ -170,7 +174,8 @@ impl App {
                 times,
                 memory,
                 storage,
-            } => self.handle_cpu_sample(times, memory, storage),
+                process,
+            } => self.handle_cpu_sample(times, memory, storage, process),
             Event::AnimationTimerElapsed => {
                 self.frames.advance();
                 vec![Effect::ModifyTray(self.tray_icon())]
@@ -209,6 +214,7 @@ impl App {
         sample: SystemTimes,
         memory: Option<MemoryStatus>,
         storage: Option<StorageStatus>,
+        process: Option<ProcessStatus>,
     ) -> Vec<Effect> {
         let cpu_load = self.sampler.push(sample);
         if memory.is_some_and(|status| status.usage_percent().is_some()) {
@@ -216,6 +222,10 @@ impl App {
         }
         if storage.is_some_and(|status| status.used_percent().is_some()) {
             self.storage = storage;
+        }
+        let process_changed = process.is_some_and(|status| self.process != Some(status));
+        if let Some(status) = process {
+            self.process = Some(status);
         }
 
         if let Some(_load) = cpu_load {
@@ -236,7 +246,7 @@ impl App {
         self.tooltip = next_tooltip;
 
         let mut effects = Vec::with_capacity(2);
-        if tooltip_changed || cpu_load.is_some() {
+        if tooltip_changed || cpu_load.is_some() || process_changed {
             effects.push(Effect::ModifyTray(self.tray_icon()));
         }
         if let Some(load) = cpu_load {
@@ -287,7 +297,9 @@ impl App {
         let previous = self.settings;
         let mut settings = self.settings;
         settings.launch_at_startup = !settings.launch_at_startup;
-        self.begin_commit(settings, previous, true)
+        let mut effects = self.begin_commit(settings, previous, true);
+        effects.insert(0, Effect::SetStartupMenu(settings.launch_at_startup));
+        effects
     }
 
     fn begin_commit(
@@ -407,6 +419,7 @@ impl App {
             memory: self.memory,
             storage: self.storage,
             usage: self.usage,
+            process: self.process,
         }
     }
 }
@@ -520,6 +533,7 @@ mod tests {
             times: SystemTimes::new(0, 0, 0),
             memory: Some(MemoryStatus::new(16_u64 << 30, 8_u64 << 30)),
             storage: None,
+            process: None,
         });
         assert!(effects.contains(&Effect::ModifyTray(app.tray_icon())));
         assert_eq!(app.snapshot().tooltip, "CPU: --.-%\nMemory: 50.0%");
@@ -529,6 +543,10 @@ mod tests {
             times: SystemTimes::new(0, 100, 0),
             memory: Some(MemoryStatus::new(16_u64 << 30, 4_u64 << 30)),
             storage: Some(crate::core::StorageStatus::new(100, 25)),
+            process: Some(crate::core::ProcessStatus::new(
+                5 * 1024 * 1024,
+                Some(crate::core::CpuLoad::percent(0.4)),
+            )),
         });
         assert_eq!(app.snapshot().tooltip, "CPU: 100.0%\nMemory: 75.0%");
         assert_eq!(app.snapshot().cpu_sparkline.len(), 1);
@@ -546,10 +564,16 @@ mod tests {
             Some(75.0)
         );
 
+        assert_eq!(
+            app.snapshot().process.map(|status| status.private_bytes),
+            Some(5 * 1024 * 1024)
+        );
+
         let effects = app.dispatch(Event::CpuSample {
             times: SystemTimes::new(0, 200, 0),
             memory: Some(MemoryStatus::new(0, 0)),
             storage: Some(crate::core::StorageStatus::new(0, 0)),
+            process: None,
         });
         assert_eq!(app.snapshot().tooltip, "CPU: 100.0%\nMemory: 75.0%");
         assert_eq!(app.snapshot().cpu_sparkline.len(), 2);

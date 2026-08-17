@@ -1,11 +1,13 @@
 //! Win32 adapter. Platform calls stay in this module so component and
 //! integration tests can exercise the rest of the crate without live OS state.
 
+mod brand;
 mod cpu;
 mod flyout;
 mod icons;
 mod memory;
 mod notify_icon;
+mod process;
 pub mod registry;
 mod storage;
 mod tray;
@@ -48,7 +50,7 @@ use self::{
         event_for_command, TrayAdapter, COMMAND_CHECK_FOR_UPDATES, COMMAND_INSTALL_UPDATE,
         PROMOTE_TIMER_ID, TRAY_CALLBACK_MESSAGE,
     },
-    update::{UpdateController, UPDATE_REQUEST_EXIT_MESSAGE},
+    update::{UpdateController, UPDATE_CHECK_DONE_MESSAGE, UPDATE_REQUEST_EXIT_MESSAGE},
     usage::{
         UsageCollector, UsageTick, USAGE_CONTINUE_INTERVAL_MS, USAGE_FIRST_INTERVAL_MS,
         USAGE_IDLE_INTERVAL_MS, USAGE_READY_MESSAGE, USAGE_TIMER_ID,
@@ -68,6 +70,7 @@ pub fn run() -> Result<(), String> {
     };
 
     let mut store = registry::RegistryStore::production();
+    let _ = store.clear_tombstone();
     let recovered = store.recover();
     registry::reconcile_launch_at_startup(recovered.settings);
     let settings = recovered.settings;
@@ -159,6 +162,7 @@ fn message_loop(_hwnd: HWND) -> Result<(), String> {
 struct WindowContext {
     app: App,
     cpu: WindowsCpuSource,
+    process: self::process::WindowsProcessSource,
     platform: WindowsPlatform,
     updater: UpdateController,
     usage: UsageCollector,
@@ -182,6 +186,7 @@ impl WindowContext {
                 system_theme,
             ),
             cpu: WindowsCpuSource,
+            process: self::process::WindowsProcessSource::default(),
             platform: WindowsPlatform::new(icons, settings, store),
             updater: UpdateController::new(),
             usage: UsageCollector::new(),
@@ -193,9 +198,8 @@ impl WindowContext {
         for effect in self.app.start() {
             self.platform.apply(&effect);
         }
-        // Notify only: the tray menu offers Install after a newer stable release
-        // is found. Download and launch require an explicit user command.
-        self.updater.check_for_updates();
+        // A newer stable release posts a balloon. Download still requires Install.
+        self.updater.check_for_updates(self.platform.hwnd, false);
         self.arm_usage_timer(USAGE_FIRST_INTERVAL_MS);
     }
 
@@ -210,7 +214,10 @@ impl WindowContext {
         self.dispatch(Event::UsageSample(self.usage.snapshot()));
         let interval = match more {
             UsageTick::MoreWork => USAGE_CONTINUE_INTERVAL_MS,
-            UsageTick::Idle => USAGE_IDLE_INTERVAL_MS,
+            UsageTick::Idle => {
+                self::process::trim_working_set();
+                USAGE_IDLE_INTERVAL_MS
+            }
         };
         self.arm_usage_timer(interval);
     }
@@ -333,10 +340,12 @@ unsafe extern "system" fn window_proc(
                 if let Some(times) =
                     crate::application::CpuSource::read_system_times(&mut context.cpu)
                 {
+                    let process = context.process.sample(times);
                     context.dispatch(Event::CpuSample {
                         times,
                         memory: self::memory::read_memory_status(),
                         storage: self::storage::read_storage_status(),
+                        process,
                     });
                 }
             }
@@ -373,6 +382,14 @@ unsafe extern "system" fn window_proc(
         return 0;
     }
 
+    if message == UPDATE_CHECK_DONE_MESSAGE {
+        context
+            .platform
+            .tray
+            .notify_update_result(&context.updater.menu_state(), wparam != 0);
+        return 0;
+    }
+
     if message == UPDATE_REQUEST_EXIT_MESSAGE {
         context.dispatch(Event::ExitRequested);
         return 0;
@@ -381,7 +398,7 @@ unsafe extern "system" fn window_proc(
     if message == WM_COMMAND {
         let command = (wparam & 0xFFFF) as u32;
         if command == COMMAND_CHECK_FOR_UPDATES {
-            context.updater.check_for_updates();
+            context.updater.check_for_updates(hwnd, true);
         } else if command == COMMAND_INSTALL_UPDATE {
             context.updater.install_available(hwnd);
         } else if let Some(event) = event_for_command(command) {

@@ -37,6 +37,24 @@ function parseBmp32(buf) {
   return { width, height, pixels };
 }
 
+function whiteDogOnBlack(src) {
+  const pixels = Buffer.from(src.pixels);
+  for (let i = 0; i < pixels.length; i += 4) {
+    const alpha = pixels[i + 3];
+    if (alpha !== 0) {
+      pixels[i] = 255 - pixels[i];
+      pixels[i + 1] = 255 - pixels[i + 1];
+      pixels[i + 2] = 255 - pixels[i + 2];
+    }
+    const coverage = alpha / 255;
+    pixels[i] = Math.round(pixels[i] * coverage);
+    pixels[i + 1] = Math.round(pixels[i + 1] * coverage);
+    pixels[i + 2] = Math.round(pixels[i + 2] * coverage);
+    pixels[i + 3] = 255;
+  }
+  return { width: src.width, height: src.height, pixels };
+}
+
 function scaleNearest(src, size) {
   const out = Buffer.alloc(size * size * 4);
   for (let y = 0; y < size; y += 1) {
@@ -47,6 +65,28 @@ function scaleNearest(src, size) {
     }
   }
   return { width: size, height: size, pixels: out };
+}
+
+function roundCorners(src) {
+  const radius = src.width * 0.22;
+  const half = src.width / 2;
+  const pixels = Buffer.from(src.pixels);
+  for (let y = 0; y < src.height; y += 1) {
+    for (let x = 0; x < src.width; x += 1) {
+      const dx = Math.abs(x + 0.5 - half) - (half - radius);
+      const dy = Math.abs(y + 0.5 - half) - (half - radius);
+      const ox = Math.max(dx, 0);
+      const oy = Math.max(dy, 0);
+      const dist = Math.sqrt(ox * ox + oy * oy) + Math.min(Math.max(dx, dy), 0) - radius;
+      const coverage = Math.max(0, Math.min(1, 0.5 - dist));
+      const i = (y * src.width + x) * 4;
+      pixels[i] = Math.round(pixels[i] * coverage);
+      pixels[i + 1] = Math.round(pixels[i + 1] * coverage);
+      pixels[i + 2] = Math.round(pixels[i + 2] * coverage);
+      pixels[i + 3] = Math.round(pixels[i + 3] * coverage);
+    }
+  }
+  return { width: src.width, height: src.height, pixels };
 }
 
 function crc32(buf) {
@@ -113,6 +153,14 @@ function encodeBmpIcon(image) {
   }
   const andStride = Math.ceil(image.width / 32) * 4;
   const andMask = Buffer.alloc(andStride * image.height);
+  for (let y = 0; y < image.height; y += 1) {
+    const srcY = image.height - 1 - y;
+    for (let x = 0; x < image.width; x += 1) {
+      if (image.pixels[(srcY * image.width + x) * 4 + 3] === 0) {
+        andMask[y * andStride + (x >> 3)] |= 0x80 >> (x & 7);
+      }
+    }
+  }
   return Buffer.concat([header, xor, andMask]);
 }
 
@@ -126,7 +174,7 @@ function buildIco(images) {
   const blobs = [];
   let offset = 6 + 16 * count;
   for (const image of images) {
-    const blob = image.size >= 256 ? encodePng(image) : encodeBmpIcon(image);
+    const blob = image.width >= 256 ? encodePng(image) : encodeBmpIcon(image);
     const entry = Buffer.alloc(16);
     entry[0] = image.width >= 256 ? 0 : image.width;
     entry[1] = image.height >= 256 ? 0 : image.height;
@@ -141,9 +189,11 @@ function buildIco(images) {
   return Buffer.concat([header, ...entries, ...blobs]);
 }
 
-const source = parseBmp32(fs.readFileSync(sourcePath));
+const source = whiteDogOnBlack(parseBmp32(fs.readFileSync(sourcePath)));
 const sizes = [16, 24, 32, 48, 256];
-const images = sizes.map((size) => (size === 32 ? source : scaleNearest(source, size)));
+const images = sizes.map((size) =>
+  roundCorners(size === source.width ? source : scaleNearest(source, size)),
+);
 fs.mkdirSync(path.dirname(outPath), { recursive: true });
 fs.writeFileSync(outPath, buildIco(images));
 console.log(`wrote ${outPath} (${fs.statSync(outPath).size} bytes)`);
