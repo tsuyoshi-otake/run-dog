@@ -169,6 +169,15 @@ impl RegistryStore {
     pub fn tombstone(&mut self) -> bool {
         tombstone_settings_key_at(self.key())
     }
+
+    /// Clears an uninstall leftover so a running install can persist again.
+    ///
+    /// Tombstone is a protocol guard for isolated test hives. If that flag is
+    /// left on the production key, every commit fails and Launch at startup
+    /// can only roll back to Off.
+    pub fn clear_tombstone(&mut self) -> bool {
+        clear_tombstone_at(self.key())
+    }
 }
 
 /// Reads one durable settings generation. Legacy layouts migrate to generation 0.
@@ -277,6 +286,23 @@ fn lifecycle_is_tombstoned_at(settings_key: &str) -> bool {
     value.as_deref() == Some(LIFECYCLE_TOMBSTONED)
 }
 
+fn is_production_settings_key(path: &str) -> bool {
+    path.eq_ignore_ascii_case(DEFAULT_SETTINGS_KEY)
+}
+
+fn clear_tombstone_at(settings_key: &str) -> bool {
+    let Some(key) = open_key(settings_key, KEY_READ | KEY_WRITE) else {
+        return true;
+    };
+    let cleared = if read_string(key, LIFECYCLE_VALUE).as_deref() == Some(LIFECYCLE_TOMBSTONED) {
+        delete_value(key, LIFECYCLE_VALUE)
+    } else {
+        true
+    };
+    close_key(key);
+    cleared
+}
+
 /// Marks the settings key deleted for protocol purposes. Subsequent writes
 /// refuse to recreate durable settings state.
 pub fn tombstone_settings_key() -> bool {
@@ -284,6 +310,9 @@ pub fn tombstone_settings_key() -> bool {
 }
 
 fn tombstone_settings_key_at(settings_key: &str) -> bool {
+    if is_production_settings_key(settings_key) {
+        return false;
+    }
     let Some(key) = open_writable_settings_key_at(settings_key) else {
         return false;
     };

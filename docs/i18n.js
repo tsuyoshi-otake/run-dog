@@ -15,7 +15,7 @@ export const I18N = {
     description:
       "通知領域で犬を飼ってみませんか？走る速さで Windows の CPU 負荷がわかります。",
     tagline: "通知領域で犬を飼ってみませんか？",
-    lead: "犬の走る速さで Windows の CPU 負荷がわかります。タスクバーをちらっと見るだけで十分です。",
+    lead: "犬の走る速さで Windows の CPU 負荷がわかります。Rust で最適化しているので、常駐してもほとんど負荷をかけません。",
     download: "Windows 向けにダウンロード",
     requirement: "Windows 10 / 11（64-bit）",
     viewGithub: "GitHub で見る",
@@ -23,6 +23,10 @@ export const I18N = {
     altFlyout: "ホバー時の RunDog カード",
     featuresTitle: "特長",
     features: [
+      {
+        title: "ほぼ無負荷",
+        body: "Rust と Win32 だけ。GUI フレームワークも余計なスレッドもありません。リリースは LTO で最適化し、CPU とメモリを最小にしています。",
+      },
       {
         title: "ひと目で負荷がわかる",
         body: "CPU が忙しくなるほど犬は速く走り、落ち着いているときはゆっくり歩きます。数字を読む必要はありません。",
@@ -44,6 +48,7 @@ export const I18N = {
       "ストレージ使用量",
       "Claude Code の 5 時間・7 日上限",
       "Codex CLI の上限と API 相当の利用料",
+      "RunDog 自身の CPU とメモリ",
     ],
     usageTitle: "Claude Code と Codex",
     usageBody:
@@ -57,6 +62,10 @@ export const I18N = {
       {
         q: "RunCat と同じものですか？",
         a: "いいえ。RunDog は Windows 向けに新しく書いた独立したアプリです。RunCat の置き換えではなく、走るペットで負荷を伝えるという発想へのオマージュです。",
+      },
+      {
+        q: "重いですか？",
+        a: "いいえ。Rust で Win32 を直接叩いており、GUI フレームワークも余計なスレッドもありません。リリースは LTO で最適化しているので、アイドル時の CPU はマシン全体で 0.1% を下回ることが多く、プライベートメモリは数 MiB です。",
       },
       {
         q: "外部にデータを送りますか？",
@@ -86,7 +95,7 @@ export const I18N = {
     description:
       "A dog in the notification area. How fast it runs tells you the CPU load on Windows.",
     tagline: "A dog living in the notification area.",
-    lead: "The dog tells you Windows CPU usage by how fast it runs — one glance at the taskbar is all it takes.",
+    lead: "The dog tells you Windows CPU usage by how fast it runs. Written in Rust and optimized so it barely uses CPU or memory while it lives in the tray.",
     download: "Download for Windows",
     requirement: "Windows 10 / 11 (64-bit)",
     viewGithub: "View on GitHub",
@@ -94,6 +103,10 @@ export const I18N = {
     altFlyout: "RunDog hover card",
     featuresTitle: "Features",
     features: [
+      {
+        title: "Almost no overhead",
+        body: "Rust on Win32 — no GUI framework, no extra threads. Release builds use LTO so idle CPU and memory stay as small as we can make them.",
+      },
       {
         title: "Load at a glance",
         body: "The dog speeds up as your CPU gets busier and slows to a stroll when things are calm. No numbers to read — just watch it run.",
@@ -115,6 +128,7 @@ export const I18N = {
       "Storage use",
       "Claude Code 5-hour and 7-day limits",
       "Codex CLI limits and API-equivalent cost",
+      "RunDog's own CPU and memory",
     ],
     usageTitle: "Claude Code and Codex",
     usageBody:
@@ -128,6 +142,10 @@ export const I18N = {
       {
         q: "Is this the same as RunCat?",
         a: "No. RunDog is a new Windows app. It is not a replacement for RunCat — it is an homage to the idea of a running pet that shows load.",
+      },
+      {
+        q: "Does it use much CPU or memory?",
+        a: "No. It is Rust talking to Win32 directly — no GUI framework, no extra threads. Release builds are LTO-optimized, so idle CPU is often under 0.1% of the machine and private memory is a few MiB.",
       },
       {
         q: "Does it send data off the machine?",
@@ -156,7 +174,7 @@ export const I18N = {
     title: "RunDog",
     description: "要不要在通知区域养一只小狗？跑得越快，说明 Windows 的 CPU 越忙。",
     tagline: "要不要在通知区域养一只小狗？",
-    lead: "小狗跑得越快，说明 Windows 的 CPU 越忙。看一眼任务栏就够了。",
+    lead: "小狗跑得越快，说明 Windows 的 CPU 越忙。用 Rust 优化，常驻时几乎不占用 CPU 和内存。",
     download: "下载 Windows 版",
     requirement: "Windows 10 / 11（64 位）",
     viewGithub: "在 GitHub 上查看",
@@ -164,6 +182,10 @@ export const I18N = {
     altFlyout: "悬停时的 RunDog 卡片",
     featuresTitle: "特点",
     features: [
+      {
+        title: "几乎无负担",
+        body: "Rust 直接调用 Win32，没有 GUI 框架，也没有多余线程。发布版用 LTO 优化，把空闲时的 CPU 和内存压到最小。",
+      },
       {
         title: "一眼看出负载",
         body: "CPU 越忙，狗跑得越快；空闲时就慢慢走。不用读数字，看它跑就行。",
@@ -185,6 +207,7 @@ export const I18N = {
       "存储用量",
       "Claude Code 的 5 小时和 7 天限额",
       "Codex CLI 的限额和相当于 API 的费用",
+      "RunDog 自身的 CPU 和内存",
     ],
     usageTitle: "Claude Code 与 Codex",
     usageBody:
@@ -198,6 +221,10 @@ export const I18N = {
       {
         q: "和 RunCat 是同一个软件吗？",
         a: "不是。RunDog 是为 Windows 新写的独立应用，不是 RunCat 的替代品，只是向“用奔跑的宠物表示负载”这一想法致敬。",
+      },
+      {
+        q: "会很占资源吗？",
+        a: "不会。用 Rust 直接调用 Win32，没有 GUI 框架，也没有多余线程。发布版经过 LTO 优化，空闲时整机 CPU 往往低于 0.1%，私有内存只有几 MiB。",
       },
       {
         q: "会把数据发送到外部吗？",
@@ -226,7 +253,7 @@ export const I18N = {
     title: "RunDog",
     description: "알림 영역에서 강아지를 키워 보시겠어요? 뛰는 속도로 Windows CPU 부하를 알 수 있습니다.",
     tagline: "알림 영역에서 강아지를 키워 보시겠어요?",
-    lead: "강아지가 뛰는 속도로 Windows CPU 사용량을 알 수 있습니다. 작업 표시줄만 힐끗 보면 됩니다.",
+    lead: "강아지가 뛰는 속도로 Windows CPU 사용량을 알 수 있습니다. Rust로 최적화해서 상주해도 CPU와 메모리를 거의 쓰지 않습니다.",
     download: "Windows용 다운로드",
     requirement: "Windows 10 / 11 (64비트)",
     viewGithub: "GitHub에서 보기",
@@ -234,6 +261,10 @@ export const I18N = {
     altFlyout: "호버 시 RunDog 카드",
     featuresTitle: "특징",
     features: [
+      {
+        title: "거의 부하가 없습니다",
+        body: "Rust와 Win32만 사용합니다. GUI 프레임워크도 여분 스레드도 없습니다. 릴리스는 LTO로 최적화해 유휴 CPU와 메모리를 최소로 유지합니다.",
+      },
       {
         title: "한눈에 부하를 알 수 있습니다",
         body: "CPU가 바빠질수록 강아지는 빨리 달리고, 한가할 때는 천천히 걷습니다. 숫자를 읽을 필요는 없습니다.",
@@ -255,6 +286,7 @@ export const I18N = {
       "저장소 사용량",
       "Claude Code 5시간·7일 한도",
       "Codex CLI 한도와 API에 해당하는 비용",
+      "RunDog 자체의 CPU와 메모리",
     ],
     usageTitle: "Claude Code와 Codex",
     usageBody:
@@ -268,6 +300,10 @@ export const I18N = {
       {
         q: "RunCat과 같은 앱인가요?",
         a: "아닙니다. RunDog는 Windows용으로 새로 작성한 독립 앱입니다. RunCat을 대체하는 것이 아니라, 달리는 반려동물로 부하를 전한다는 발상에 대한 오마주입니다.",
+      },
+      {
+        q: "무겁지 않나요?",
+        a: "아닙니다. Rust로 Win32를 직접 호출하며 GUI 프레임워크와 여분 스레드가 없습니다. 릴리스는 LTO로 최적화되어, 유휴 시 전체 머신 CPU는 대개 0.1% 미만이고 프라이빗 메모리는 수 MiB입니다.",
       },
       {
         q: "데이터를 외부로 보내나요?",
@@ -297,7 +333,7 @@ export const I18N = {
     description:
       "Nuôi một chú chó trên khay hệ thống. Tốc độ chạy cho biết CPU của Windows.",
     tagline: "Nuôi một chú chó trên khay hệ thống nhé?",
-    lead: "Tốc độ chạy của chú chó cho biết CPU của Windows — chỉ cần liếc nhìn khay hệ thống.",
+    lead: "Tốc độ chạy của chú chó cho biết CPU của Windows. Viết bằng Rust và tối ưu để khi chạy nền gần như không tốn CPU hay bộ nhớ.",
     download: "Tải cho Windows",
     requirement: "Windows 10 / 11 (64-bit)",
     viewGithub: "Xem trên GitHub",
@@ -305,6 +341,10 @@ export const I18N = {
     altFlyout: "Thẻ RunDog khi di chuột",
     featuresTitle: "Điểm nổi bật",
     features: [
+      {
+        title: "Gần như không tốn tài nguyên",
+        body: "Rust gọi Win32 trực tiếp — không framework GUI, không luồng thừa. Bản phát hành tối ưu LTO để CPU và bộ nhớ lúc nghỉ nhỏ nhất có thể.",
+      },
       {
         title: "Nhìn một cái là biết tải",
         body: "CPU càng bận chó chạy càng nhanh, lúc rảnh thì đi chậm. Không cần đọc số — cứ nhìn nó chạy.",
@@ -326,6 +366,7 @@ export const I18N = {
       "Lưu trữ",
       "Hạn mức 5 giờ và 7 ngày của Claude Code",
       "Hạn mức Codex CLI và chi phí tương đương API",
+      "CPU và bộ nhớ của chính RunDog",
     ],
     usageTitle: "Claude Code và Codex",
     usageBody:
@@ -339,6 +380,10 @@ export const I18N = {
       {
         q: "Có phải RunCat không?",
         a: "Không. RunDog là ứng dụng Windows viết mới, độc lập. Không phải bản thay RunCat — chỉ tôn vinh ý tưởng thú cưng chạy để báo tải.",
+      },
+      {
+        q: "Có nặng máy không?",
+        a: "Không. Rust gọi Win32 trực tiếp, không framework GUI, không luồng thừa. Bản phát hành tối ưu LTO nên lúc nghỉ CPU cả máy thường dưới 0,1% và bộ nhớ riêng chỉ vài MiB.",
       },
       {
         q: "Có gửi dữ liệu ra ngoài không?",
@@ -368,7 +413,7 @@ export const I18N = {
     description:
       "Un chien dans la zone de notification. Sa vitesse indique la charge CPU de Windows.",
     tagline: "Et si vous adoptiez un chien dans la zone de notification ?",
-    lead: "La vitesse du chien indique la charge CPU de Windows. Un coup d'œil à la barre des tâches suffit.",
+    lead: "La vitesse du chien indique la charge CPU de Windows. Écrit en Rust et optimisé pour n'utiliser presque ni CPU ni mémoire en résidence.",
     download: "Télécharger pour Windows",
     requirement: "Windows 10 / 11 (64 bits)",
     viewGithub: "Voir sur GitHub",
@@ -376,6 +421,10 @@ export const I18N = {
     altFlyout: "Carte RunDog au survol",
     featuresTitle: "Points forts",
     features: [
+      {
+        title: "Presque aucune charge",
+        body: "Rust sur Win32 : pas de framework GUI, pas de threads superflus. Les builds de release utilisent LTO pour garder CPU et mémoire au minimum.",
+      },
       {
         title: "La charge d'un coup d'œil",
         body: "Plus le CPU est occupé, plus le chien court vite. Au calme, il se promène. Pas besoin de lire des chiffres.",
@@ -397,6 +446,7 @@ export const I18N = {
       "Stockage",
       "Plafonds 5 h et 7 j de Claude Code",
       "Plafonds Codex CLI et coût équivalent API",
+      "CPU et mémoire de RunDog lui-même",
     ],
     usageTitle: "Claude Code et Codex",
     usageBody:
@@ -410,6 +460,10 @@ export const I18N = {
       {
         q: "Est-ce le même logiciel que RunCat ?",
         a: "Non. RunDog est une application Windows écrite à neuf. Ce n'est pas un remplacement de RunCat, mais un hommage à l'idée d'un animal qui court pour indiquer la charge.",
+      },
+      {
+        q: "Est-ce lourd ?",
+        a: "Non. Rust parle à Win32 directement, sans framework GUI ni threads superflus. Les builds LTO font que le CPU idle est souvent sous 0,1 % de la machine, et la mémoire privée quelques MiB.",
       },
       {
         q: "Envoie-t-il des données à l'extérieur ?",
@@ -439,7 +493,7 @@ export const I18N = {
     description:
       "Ein Hund im Infobereich. Wie schnell er läuft, zeigt die CPU-Last von Windows.",
     tagline: "Möchten Sie einen Hund im Infobereich halten?",
-    lead: "Wie schnell der Hund läuft, zeigt die CPU-Last von Windows. Ein Blick auf die Taskleiste reicht.",
+    lead: "Wie schnell der Hund läuft, zeigt die CPU-Last von Windows. In Rust optimiert, damit es im Infobereich kaum CPU oder Speicher braucht.",
     download: "Für Windows herunterladen",
     requirement: "Windows 10 / 11 (64-Bit)",
     viewGithub: "Auf GitHub ansehen",
@@ -447,6 +501,10 @@ export const I18N = {
     altFlyout: "RunDog-Karte beim Zeigen",
     featuresTitle: "Merkmale",
     features: [
+      {
+        title: "Kaum Overhead",
+        body: "Rust auf Win32 — kein GUI-Framework, keine Extra-Threads. Release-Builds nutzen LTO, damit Idle-CPU und Speicher so klein wie möglich bleiben.",
+      },
       {
         title: "Last auf einen Blick",
         body: "Je beschäftigter die CPU, desto schneller läuft der Hund. In Ruhe geht er spazieren. Keine Zahlen lesen — einfach zusehen.",
@@ -468,6 +526,7 @@ export const I18N = {
       "Datenträger",
       "5-Stunden- und 7-Tage-Limits von Claude Code",
       "Codex-CLI-Limits und API-äquivalente Kosten",
+      "CPU und Arbeitsspeicher von RunDog selbst",
     ],
     usageTitle: "Claude Code und Codex",
     usageBody:
@@ -481,6 +540,10 @@ export const I18N = {
       {
         q: "Ist das dasselbe wie RunCat?",
         a: "Nein. RunDog ist eine neue, eigenständige Windows-App. Kein Ersatz für RunCat, sondern eine Hommage an das laufende Haustier als Lastanzeige.",
+      },
+      {
+        q: "Ist es schwer?",
+        a: "Nein. Rust spricht direkt mit Win32 — kein GUI-Framework, keine Extra-Threads. LTO-optimierte Releases liegen im Idle oft unter 0,1 % der Maschinen-CPU, der private Speicher bei wenigen MiB.",
       },
       {
         q: "Werden Daten nach außen gesendet?",
@@ -510,7 +573,7 @@ export const I18N = {
     description:
       "Un perro en el área de notificación. Su velocidad indica la carga de CPU de Windows.",
     tagline: "¿Y si crías un perro en el área de notificación?",
-    lead: "La velocidad del perro indica la carga de CPU de Windows. Basta una mirada a la barra de tareas.",
+    lead: "La velocidad del perro indica la carga de CPU de Windows. Escrito en Rust y optimizado para usar casi nada de CPU ni memoria mientras vive en la bandeja.",
     download: "Descargar para Windows",
     requirement: "Windows 10 / 11 (64 bits)",
     viewGithub: "Ver en GitHub",
@@ -518,6 +581,10 @@ export const I18N = {
     altFlyout: "Tarjeta de RunDog al pasar el puntero",
     featuresTitle: "Características",
     features: [
+      {
+        title: "Casi sin carga",
+        body: "Rust sobre Win32: sin framework GUI ni hilos extra. Las compilaciones de release usan LTO para dejar la CPU y la memoria en reposo lo más bajas posible.",
+      },
       {
         title: "La carga de un vistazo",
         body: "Cuanto más ocupada está la CPU, más rápido corre el perro. En calma, pasea. No hace falta leer números.",
@@ -539,6 +606,7 @@ export const I18N = {
       "Almacenamiento",
       "Límites de 5 h y 7 d de Claude Code",
       "Límites de Codex CLI y coste equivalente a la API",
+      "CPU y memoria del propio RunDog",
     ],
     usageTitle: "Claude Code y Codex",
     usageBody:
@@ -552,6 +620,10 @@ export const I18N = {
       {
         q: "¿Es lo mismo que RunCat?",
         a: "No. RunDog es una aplicación de Windows escrita de nuevo. No sustituye a RunCat: es un homenaje a la idea de una mascota que corre para mostrar la carga.",
+      },
+      {
+        q: "¿Es pesado?",
+        a: "No. Habla con Win32 en Rust, sin framework GUI ni hilos extra. Con LTO, en reposo la CPU de la máquina suele estar por debajo del 0,1 % y la memoria privada en unos pocos MiB.",
       },
       {
         q: "¿Envía datos al exterior?",

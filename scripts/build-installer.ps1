@@ -28,7 +28,7 @@ if ($releaseVersion -ne $manifestVersion) {
 
 $updateRepository = $env:RUN_DOG_UPDATE_REPOSITORY
 if ([string]::IsNullOrWhiteSpace($updateRepository)) {
-    $updateRepository = 'systemexe-research-and-development/run-dog'
+    $updateRepository = 'tsuyoshi-otake/run-dog'
 }
 if ($updateRepository -notmatch '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$') {
     throw 'RUN_DOG_UPDATE_REPOSITORY must be a GitHub owner/repository slug.'

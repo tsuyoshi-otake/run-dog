@@ -4,9 +4,9 @@ use windows_sys::Win32::{
     Foundation::{HWND, POINT},
     UI::{
         Shell::{
-            Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
-            NIM_SETVERSION, NIN_POPUPCLOSE, NIN_POPUPOPEN, NIN_SELECT, NOTIFYICONDATAW,
-            NOTIFYICON_VERSION_4,
+            Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_INFO, NIIF_NOSOUND,
+            NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NIN_POPUPCLOSE, NIN_POPUPOPEN,
+            NIN_SELECT, NOTIFYICONDATAW, NOTIFYICON_VERSION_4,
         },
         WindowsAndMessaging::{
             AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, KillTimer, PostMessageW,
@@ -113,7 +113,20 @@ impl TrayAdapter {
             }
             Effect::SetThemeMenu(theme) => self.theme = *theme,
             Effect::SetFpsMenu(limit) => self.fps_limit = *limit,
-            Effect::SetStartupMenu(enabled) => self.startup_enabled = *enabled,
+            Effect::SetStartupMenu(enabled) => {
+                let changed = self.startup_enabled != *enabled;
+                self.startup_enabled = *enabled;
+                if changed {
+                    self.show_balloon(
+                        "RunDog",
+                        if *enabled {
+                            "Launch at startup is on."
+                        } else {
+                            "Launch at startup is off."
+                        },
+                    );
+                }
+            }
             Effect::SetTimer { .. }
             | Effect::KillTimer(TimerKind::CpuSampling | TimerKind::Animation)
             | Effect::SaveSettings(_)
@@ -127,6 +140,7 @@ impl TrayAdapter {
     /// Opens the right-click menu. Menu handles exist only for this invocation.
     pub fn show_menu(&mut self, update_state: &UpdateMenuState) {
         self.flyout.hide();
+        super::process::trim_working_set();
         let root = unsafe { CreatePopupMenu() };
         let theme_menu = unsafe { CreatePopupMenu() };
         let speed_menu = unsafe { CreatePopupMenu() };
@@ -192,7 +206,7 @@ impl TrayAdapter {
         append_checked(
             root,
             COMMAND_TOGGLE_STARTUP,
-            "Launch at startup",
+            startup_menu_label(self.startup_enabled),
             self.startup_enabled,
         );
         let _ = unsafe { AppendMenuW(root, MF_SEPARATOR, 0, ptr::null()) };
@@ -256,6 +270,7 @@ impl TrayAdapter {
     pub fn handle_hover(&mut self, notification: u32) {
         if Self::is_popup_close_notification(notification) {
             self.flyout.hide();
+            super::process::trim_working_set();
             return;
         }
         if Self::is_popup_open_notification(notification) && self.last_icon.is_some() {
@@ -342,6 +357,7 @@ impl TrayAdapter {
             memory: None,
             storage: None,
             usage: crate::core::UsageSnapshot::default(),
+            process: None,
         });
         let _ = unsafe { Shell_NotifyIconW(NIM_DELETE, &data) };
         self.added = false;
@@ -369,6 +385,27 @@ impl TrayAdapter {
         data
     }
 
+    pub fn notify_update_result(&mut self, state: &UpdateMenuState, notify_always: bool) {
+        if let Some(body) = update_balloon_text(state, notify_always) {
+            self.show_balloon("RunDog", &body);
+        }
+    }
+
+    fn show_balloon(&self, title: &str, body: &str) {
+        if !self.added {
+            return;
+        }
+        let Some(icon) = self.last_icon.as_ref() else {
+            return;
+        };
+        let mut data = self.notification_data(icon);
+        data.uFlags |= NIF_INFO;
+        data.dwInfoFlags = NIIF_INFO | NIIF_NOSOUND;
+        copy_utf16(title, &mut data.szInfoTitle);
+        copy_utf16(body, &mut data.szInfo);
+        let _ = unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) };
+    }
+
     fn remember(&mut self, icon: &TrayIcon) {
         let display_changed = self.last_icon.as_ref().is_none_or(|previous| {
             previous.theme != icon.theme
@@ -379,6 +416,7 @@ impl TrayAdapter {
                 || previous.memory != icon.memory
                 || previous.storage != icon.storage
                 || previous.usage != icon.usage
+                || previous.process != icon.process
         });
         self.last_icon = Some(icon.clone());
         if display_changed {
@@ -449,6 +487,36 @@ fn append_disabled(menu: HMENU, label: &str) {
 }
 
 #[must_use]
+fn startup_menu_label(enabled: bool) -> &'static str {
+    if enabled {
+        "Launch at startup: On"
+    } else {
+        "Launch at startup: Off"
+    }
+}
+
+#[must_use]
+fn update_balloon_text(state: &UpdateMenuState, notify_always: bool) -> Option<String> {
+    match state {
+        UpdateMenuState::Current if notify_always => Some("RunDog is up to date.".to_owned()),
+        UpdateMenuState::Available { version } => Some(format!("RunDog v{version} is available.")),
+        UpdateMenuState::Failed if notify_always => Some("Could not check for updates.".to_owned()),
+        _ => None,
+    }
+}
+
+fn copy_utf16(value: &str, dest: &mut [u16]) {
+    if dest.is_empty() {
+        return;
+    }
+    dest.fill(0);
+    let limit = dest.len() - 1;
+    for (slot, utf16) in dest.iter_mut().take(limit).zip(value.encode_utf16()) {
+        *slot = utf16;
+    }
+}
+
+#[must_use]
 fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(Some(0)).collect()
 }
@@ -456,8 +524,9 @@ fn wide(value: &str) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::{
-        event_for_command, TrayAdapter, COMMAND_CHECK_FOR_UPDATES, COMMAND_EXIT, COMMAND_FPS_40,
-        COMMAND_THEME_DARK, COMMAND_TOGGLE_STARTUP,
+        event_for_command, startup_menu_label, update_balloon_text, TrayAdapter, UpdateMenuState,
+        COMMAND_CHECK_FOR_UPDATES, COMMAND_EXIT, COMMAND_FPS_40, COMMAND_THEME_DARK,
+        COMMAND_TOGGLE_STARTUP,
     };
     use crate::{
         application::Event,
@@ -499,5 +568,31 @@ mod tests {
         assert!(TrayAdapter::is_popup_open_notification(0x0406));
         assert!(TrayAdapter::is_popup_close_notification(0x0407));
         assert!(!TrayAdapter::is_popup_open_notification(0x0400));
+    }
+
+    #[test]
+    fn component_startup_label_and_update_balloons_cover_user_visible_states() {
+        assert_eq!(startup_menu_label(true), "Launch at startup: On");
+        assert_eq!(startup_menu_label(false), "Launch at startup: Off");
+        assert_eq!(
+            update_balloon_text(&UpdateMenuState::Current, true).as_deref(),
+            Some("RunDog is up to date.")
+        );
+        assert_eq!(update_balloon_text(&UpdateMenuState::Current, false), None);
+        assert_eq!(
+            update_balloon_text(
+                &UpdateMenuState::Available {
+                    version: "1.1.1".to_owned()
+                },
+                false
+            )
+            .as_deref(),
+            Some("RunDog v1.1.1 is available.")
+        );
+        assert_eq!(
+            update_balloon_text(&UpdateMenuState::Failed, true).as_deref(),
+            Some("Could not check for updates.")
+        );
+        assert_eq!(update_balloon_text(&UpdateMenuState::Idle, true), None);
     }
 }

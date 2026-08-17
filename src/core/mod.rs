@@ -10,7 +10,10 @@ mod theme;
 mod usage;
 
 pub use animation::{AnimationController, AnimationRateChange, FpsLimit, FrameCursor};
-pub use cpu::{breakdown_between, usage_between, CpuBreakdown, CpuLoad, CpuSampler, SystemTimes};
+pub use cpu::{
+    breakdown_between, process_share, usage_between, CpuBreakdown, CpuLoad, CpuSampler,
+    ProcessStatus, ProcessTimes, SystemTimes,
+};
 pub use memory::MemoryStatus;
 pub use settings::{AppSettings, PendingJournal, SettingsRecord};
 pub use sparkline::{Sparkline, SPARKLINE_CAPACITY};

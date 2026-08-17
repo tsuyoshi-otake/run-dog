@@ -43,6 +43,8 @@ use crate::update::{
 /// handed to ShellExecute. The main thread then removes the tray icon before
 /// Inno Setup replaces the executable.
 pub const UPDATE_REQUEST_EXIT_MESSAGE: u32 = 0x8000 + 2;
+/// Posted when an update check worker reaches a terminal menu state.
+pub const UPDATE_CHECK_DONE_MESSAGE: u32 = 0x8000 + 4;
 
 const API_HOST: &str = "api.github.com";
 const RELEASE_HOST: &str = "github.com";
@@ -130,7 +132,10 @@ impl UpdateController {
     }
 
     /// Starts an asynchronous check if no check or install is already active.
-    pub fn check_for_updates(&self) {
+    ///
+    /// `notify_always` is true for a user-initiated Check. Startup checks only
+    /// surface a balloon when a newer release is actually available.
+    pub fn check_for_updates(&self, hwnd: HWND, notify_always: bool) {
         if !begin_check(&self.state) {
             return;
         }
@@ -139,6 +144,8 @@ impl UpdateController {
         let repository = self.repository.clone();
         let current_version = self.current_version.clone();
         let cancelled = Arc::clone(&self.cancelled);
+        let hwnd_bits = hwnd as usize;
+        let notify = usize::from(notify_always);
         let worker = thread::Builder::new()
             .name("run-dog-update-check".to_owned())
             .spawn(move || {
@@ -154,11 +161,17 @@ impl UpdateController {
 
                 if !cancelled.load(Ordering::Acquire) {
                     *lock_state(&state) = next_state;
+                    let _ = unsafe {
+                        PostMessageW(hwnd_bits as HWND, UPDATE_CHECK_DONE_MESSAGE, notify, 0)
+                    };
                 }
             });
 
         if worker.is_err() {
             *lock_state(&self.state) = UpdateState::Failed;
+            if notify_always && !hwnd.is_null() {
+                let _ = unsafe { PostMessageW(hwnd, UPDATE_CHECK_DONE_MESSAGE, 1, 0) };
+            }
         }
     }
 

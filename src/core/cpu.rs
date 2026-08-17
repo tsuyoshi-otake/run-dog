@@ -85,6 +85,51 @@ pub fn breakdown_between(previous: SystemTimes, current: SystemTimes) -> Option<
     })
 }
 
+/// Cumulative kernel and user FILETIME ticks for one process.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ProcessTimes {
+    pub kernel: u64,
+    pub user: u64,
+}
+
+impl ProcessTimes {
+    #[must_use]
+    pub const fn new(kernel: u64, user: u64) -> Self {
+        Self { kernel, user }
+    }
+}
+
+/// RunDog's own share of the machine and its private commit.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ProcessStatus {
+    pub cpu: Option<CpuLoad>,
+    pub private_bytes: u64,
+}
+
+impl ProcessStatus {
+    #[must_use]
+    pub const fn new(private_bytes: u64, cpu: Option<CpuLoad>) -> Self {
+        Self { cpu, private_bytes }
+    }
+}
+
+/// Process busy ticks as a percentage of the same whole-machine interval.
+#[must_use]
+pub fn process_share(
+    previous_system: SystemTimes,
+    current_system: SystemTimes,
+    previous_process: ProcessTimes,
+    current_process: ProcessTimes,
+) -> Option<CpuLoad> {
+    let (_, _, _, total) = interval_ticks(previous_system, current_system)?;
+    let kernel = current_process
+        .kernel
+        .checked_sub(previous_process.kernel)?;
+    let user = current_process.user.checked_sub(previous_process.user)?;
+    let busy = kernel.checked_add(user)?;
+    Some(ratio(busy.min(total), total))
+}
+
 /// Stateful sampler that retains only the preceding snapshot and performs a
 /// light exponential moving average. No allocation occurs while sampling.
 #[derive(Clone, Debug)]
@@ -142,7 +187,9 @@ impl CpuSampler {
 
 #[cfg(test)]
 mod tests {
-    use super::{breakdown_between, usage_between, CpuSampler, SystemTimes};
+    use super::{
+        breakdown_between, process_share, usage_between, CpuSampler, ProcessTimes, SystemTimes,
+    };
     use proptest::prelude::*;
 
     #[test]
@@ -208,6 +255,33 @@ mod tests {
                 .push(SystemTimes::new(100, 101, 1))
                 .map(|value| value.value()),
             Some(100.0)
+        );
+    }
+
+    #[test]
+    fn component_process_share_is_the_process_fraction_of_the_machine_interval() {
+        let previous_system = SystemTimes::new(0, 0, 0);
+        let current_system = SystemTimes::new(50, 80, 20);
+        let previous_process = ProcessTimes::new(0, 0);
+        let current_process = ProcessTimes::new(2, 3);
+        assert_eq!(
+            process_share(
+                previous_system,
+                current_system,
+                previous_process,
+                current_process
+            )
+            .map(|load| load.value()),
+            Some(5.0)
+        );
+        assert_eq!(
+            process_share(
+                previous_system,
+                current_system,
+                ProcessTimes::new(10, 0),
+                ProcessTimes::new(1, 0)
+            ),
+            None
         );
     }
 
