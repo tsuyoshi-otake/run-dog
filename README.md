@@ -63,7 +63,7 @@ Authenticode の証明書・署名は使用しません。そのため Windows S
 
 ローカルで unsigned installer を作るには Inno Setup 6 を導入してから次を実行します。
 
-    .\scripts\build-installer.ps1 -Version 1.1.2
+    .\scripts\build-installer.ps1 -Version 1.1.3
 
 作成物は `dist\RunDog-Setup-x64.exe` と
 `dist\RunDog-Setup-x64.exe.sha256` です。タグ `vX.Y.Z` を push すると

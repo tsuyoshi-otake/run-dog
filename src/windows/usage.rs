@@ -2,7 +2,9 @@
 //!
 //! Designed so antivirus realtime scanners barely see it:
 //! - never spawns `claude` / `codex` / Node
-//! - never writes into those home directories
+//! - never spawns `claude` / `codex` / Node
+//! - OAuth refresh rewrites `.credentials.json` only via `ReplaceFileW` after a
+//!   reparse-point-safe open; it never follows credential symlinks
 //! - `GetFileAttributesEx`-style metadata first; open a file only when size grew
 //! - read only newly appended JSONL bytes, incomplete trailing lines left unread
 //! - directory listings cached until the directory mtime moves
@@ -13,8 +15,8 @@ use std::{
     fs::{self, File},
     hash::{Hash, Hasher},
     io::{Read, Seek, SeekFrom},
-    os::windows::fs::MetadataExt,
     path::{Path, PathBuf},
+    ptr,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -25,7 +27,14 @@ use std::{
 
 use serde::Deserialize;
 use windows_sys::Win32::{
-    Foundation::HWND,
+    Foundation::{CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, HWND, INVALID_HANDLE_VALUE},
+    Storage::FileSystem::{
+        CreateFileW, FlushFileBuffers, GetFileInformationByHandle, ReadFile, ReplaceFileW,
+        WriteFile, BY_HANDLE_FILE_INFORMATION, CREATE_NEW, FILE_ATTRIBUTE_DIRECTORY,
+        FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+        REPLACEFILE_WRITE_THROUGH,
+    },
     System::Time::{GetTimeZoneInformation, TIME_ZONE_INFORMATION},
     UI::WindowsAndMessaging::PostMessageW,
 };
@@ -58,9 +67,9 @@ const CODEX_LIMITS_PERIOD_MS: u64 = 60 * 1_000;
 const STAT_COOLDOWN_MS: u64 = 30 * 1_000;
 const HOT_AGE_MS: u64 = 48 * 60 * 60 * 1_000;
 const REDISCOVER_MS: u64 = 30 * 60 * 1_000;
-const CLAUDE_OAUTH_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
-const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 const MAX_HEADER_VALUE_BYTES: usize = 8 * 1_024;
+const MAX_CREDENTIAL_FILE_BYTES: usize = 256 * 1_024;
+const CLAUDE_OAUTH_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UsageTick {
@@ -646,10 +655,248 @@ fn bearer_headers(token: &str, extra_lines: &str) -> Option<String> {
     is_safe_header_value(token).then(|| format!("Authorization: Bearer {token}\r\n{extra_lines}"))
 }
 
-fn is_regular_file(path: &Path) -> bool {
-    fs::metadata(path).is_ok_and(|meta| {
-        meta.is_file() && meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
-    })
+struct OwnedHandle(HANDLE);
+
+impl Drop for OwnedHandle {
+    fn drop(&mut self) {
+        if !self.0.is_null() && self.0 != INVALID_HANDLE_VALUE {
+            let _ = unsafe { CloseHandle(self.0) };
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FileId {
+    volume: u32,
+    index_high: u32,
+    index_low: u32,
+}
+
+impl FileId {
+    fn from_info(info: &BY_HANDLE_FILE_INFORMATION) -> Self {
+        Self {
+            volume: info.dwVolumeSerialNumber,
+            index_high: info.nFileIndexHigh,
+            index_low: info.nFileIndexLow,
+        }
+    }
+}
+
+fn read_regular_file(path: &Path) -> Option<String> {
+    String::from_utf8(read_regular_file_bytes(path, MAX_CREDENTIAL_FILE_BYTES)?.0).ok()
+}
+
+fn read_regular_file_bytes(path: &Path, maximum_bytes: usize) -> Option<(Vec<u8>, FileId)> {
+    let owned = OwnedHandle(open_existing_without_following_reparse(path)?);
+    let id = regular_file_id(owned.0)?;
+    Some((read_handle_bytes(owned.0, maximum_bytes)?, id))
+}
+
+fn regular_file_id(handle: HANDLE) -> Option<FileId> {
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    if unsafe { GetFileInformationByHandle(handle, &mut info) } == 0 {
+        return None;
+    }
+    if info.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY) != 0 {
+        return None;
+    }
+    Some(FileId::from_info(&info))
+}
+
+fn read_handle_bytes(handle: HANDLE, maximum_bytes: usize) -> Option<Vec<u8>> {
+    let mut body = Vec::new();
+    let mut chunk = [0_u8; 8_192];
+    loop {
+        let mut read = 0_u32;
+        if unsafe {
+            ReadFile(
+                handle,
+                chunk.as_mut_ptr(),
+                chunk.len() as u32,
+                &mut read,
+                ptr::null_mut(),
+            )
+        } == 0
+        {
+            return None;
+        }
+        if read == 0 {
+            break;
+        }
+        let read = read as usize;
+        if body.len().saturating_add(read) > maximum_bytes {
+            return None;
+        }
+        body.extend_from_slice(&chunk[..read]);
+    }
+    Some(body)
+}
+
+fn open_existing_without_following_reparse(path: &Path) -> Option<HANDLE> {
+    create_file(
+        path,
+        GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        OPEN_EXISTING,
+        FILE_FLAG_OPEN_REPARSE_POINT,
+    )
+}
+
+fn create_file(
+    path: &Path,
+    access: u32,
+    share: u32,
+    disposition: u32,
+    flags: u32,
+) -> Option<HANDLE> {
+    let path = wide_os_path(path)?;
+    let handle = unsafe {
+        CreateFileW(
+            path.as_ptr(),
+            access,
+            share,
+            ptr::null(),
+            disposition,
+            flags,
+            ptr::null_mut(),
+        )
+    };
+    if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+        None
+    } else {
+        Some(handle)
+    }
+}
+
+fn wide_os_path(path: &Path) -> Option<Vec<u16>> {
+    path.to_str()
+        .map(|value| value.encode_utf16().chain(Some(0)).collect())
+}
+
+fn persist_claude_credentials(claude_dir: &Path, creds: &ClaudeCreds) -> bool {
+    let path = claude_dir.join(".credentials.json");
+    let Some((raw, original_id)) = read_regular_file_bytes(&path, MAX_CREDENTIAL_FILE_BYTES) else {
+        return false;
+    };
+    let Ok(text) = String::from_utf8(raw) else {
+        return false;
+    };
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return false;
+    };
+    let Some(oauth) = value.get_mut("claudeAiOauth") else {
+        return false;
+    };
+    oauth["accessToken"] = serde_json::Value::String(creds.access_token.clone());
+    if let Some(refresh) = &creds.refresh_token {
+        oauth["refreshToken"] = serde_json::Value::String(refresh.clone());
+    }
+    if let Some(expires) = creds.expires_at_ms {
+        oauth["expiresAt"] = serde_json::Value::from(expires);
+    }
+    let Ok(encoded) = serde_json::to_vec(&value) else {
+        return false;
+    };
+
+    let Some(tmp) = create_exclusive_tmp(&path, &encoded) else {
+        return false;
+    };
+    let replaced = replace_regular_file(&path, &tmp, original_id);
+    if !replaced {
+        let _ = fs::remove_file(&tmp);
+    }
+    replaced
+}
+
+fn create_exclusive_tmp(original: &Path, encoded: &[u8]) -> Option<PathBuf> {
+    let directory = original.parent()?;
+    for attempt in 0..8_u32 {
+        let tmp = directory.join(format!(
+            ".credentials.{}.{attempt}.tmp",
+            unix_now_ms().saturating_add(u64::from(attempt))
+        ));
+        let Some(handle) = create_file(
+            &tmp,
+            GENERIC_READ | GENERIC_WRITE,
+            0,
+            CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+        ) else {
+            continue;
+        };
+        let owned = OwnedHandle(handle);
+        if regular_file_id(owned.0).is_none() {
+            drop(owned);
+            let _ = fs::remove_file(&tmp);
+            continue;
+        }
+        if !write_handle_all(owned.0, encoded) {
+            drop(owned);
+            let _ = fs::remove_file(&tmp);
+            return None;
+        }
+        drop(owned);
+        return Some(tmp);
+    }
+    None
+}
+
+fn write_handle_all(handle: HANDLE, encoded: &[u8]) -> bool {
+    let mut written_total = 0_usize;
+    while written_total < encoded.len() {
+        let mut written = 0_u32;
+        let remaining = &encoded[written_total..];
+        if unsafe {
+            WriteFile(
+                handle,
+                remaining.as_ptr(),
+                remaining.len() as u32,
+                &mut written,
+                ptr::null_mut(),
+            )
+        } == 0
+            || written == 0
+        {
+            return false;
+        }
+        written_total += written as usize;
+    }
+    (unsafe { FlushFileBuffers(handle) }) != 0
+}
+
+fn replace_regular_file(original: &Path, tmp: &Path, original_id: FileId) -> bool {
+    let Some(handle) = open_existing_without_following_reparse(original) else {
+        return false;
+    };
+    let owned = OwnedHandle(handle);
+    let Some(current_id) = regular_file_id(owned.0) else {
+        return false;
+    };
+    drop(owned);
+    if current_id != original_id {
+        return false;
+    }
+    let backup = original.with_file_name(format!(".credentials.{}.bak", unix_now_ms()));
+    let original_wide = wide_os_path(original);
+    let tmp_wide = wide_os_path(tmp);
+    let backup_wide = wide_os_path(&backup);
+    let (Some(original_wide), Some(tmp_wide), Some(backup_wide)) =
+        (original_wide, tmp_wide, backup_wide)
+    else {
+        return false;
+    };
+    let replaced = unsafe {
+        ReplaceFileW(
+            original_wide.as_ptr(),
+            tmp_wide.as_ptr(),
+            backup_wide.as_ptr(),
+            REPLACEFILE_WRITE_THROUGH,
+            ptr::null(),
+            ptr::null(),
+        )
+    } != 0;
+    let _ = fs::remove_file(backup);
+    replaced
 }
 
 fn path_is_under(path: &Path, root: &Path) -> bool {
@@ -1033,11 +1280,7 @@ struct ClaudeCreds {
 }
 
 fn read_claude_credentials(claude_dir: &Path) -> Option<ClaudeCreds> {
-    let path = claude_dir.join(".credentials.json");
-    if !is_regular_file(&path) {
-        return None;
-    }
-    let raw = fs::read_to_string(path).ok()?;
+    let raw = read_regular_file(&claude_dir.join(".credentials.json"))?;
     let file: ClaudeCredentialsFile = serde_json::from_str(&raw).ok()?;
     let oauth = file.oauth?;
     let access_token = oauth.access_token.filter(|token| !token.is_empty())?;
@@ -1121,6 +1364,9 @@ fn refresh_claude_credentials(claude_dir: &Path, creds: &mut ClaudeCreds) -> boo
     let Some(refresh_token) = creds.refresh_token.as_deref() else {
         return false;
     };
+    if !is_safe_header_value(refresh_token) {
+        return false;
+    }
     let payload = serde_json::json!({
         "grant_type": "refresh_token",
         "refresh_token": refresh_token,
@@ -1153,8 +1399,14 @@ fn refresh_claude_credentials(claude_dir: &Path, creds: &mut ClaudeCreds) -> boo
         let Some(access) = parsed.access_token.filter(|token| !token.is_empty()) else {
             return false;
         };
+        if !is_safe_header_value(&access) {
+            return false;
+        }
         creds.access_token = access;
         if let Some(next) = parsed.refresh_token.filter(|token| !token.is_empty()) {
+            if !is_safe_header_value(&next) {
+                return false;
+            }
             creds.refresh_token = Some(next);
         }
         creds.expires_at_ms = Some(parsed.expires_at.map_or_else(
@@ -1164,60 +1416,9 @@ fn refresh_claude_credentials(claude_dir: &Path, creds: &mut ClaudeCreds) -> boo
             },
             normalize_expiry_ms,
         ));
-        persist_claude_credentials(claude_dir, creds);
-        return true;
+        return persist_claude_credentials(claude_dir, creds);
     }
     false
-}
-
-fn persist_claude_credentials(claude_dir: &Path, creds: &ClaudeCreds) {
-    let path = claude_dir.join(".credentials.json");
-    if !is_regular_file(&path) {
-        return;
-    }
-    let Ok(meta) = fs::metadata(&path) else {
-        return;
-    };
-    let Ok(mtime) = meta.modified() else {
-        return;
-    };
-    let Ok(raw) = fs::read_to_string(&path) else {
-        return;
-    };
-    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&raw) else {
-        return;
-    };
-    let Some(oauth) = value.get_mut("claudeAiOauth") else {
-        return;
-    };
-    oauth["accessToken"] = serde_json::Value::String(creds.access_token.clone());
-    if let Some(refresh) = &creds.refresh_token {
-        oauth["refreshToken"] = serde_json::Value::String(refresh.clone());
-    }
-    if let Some(expires) = creds.expires_at_ms {
-        oauth["expiresAt"] = serde_json::Value::from(expires);
-    }
-    let Ok(encoded) = serde_json::to_vec(&value) else {
-        return;
-    };
-    if fs::metadata(&path)
-        .ok()
-        .and_then(|meta| meta.modified().ok())
-        != Some(mtime)
-    {
-        return;
-    }
-    if !is_regular_file(&path) {
-        return;
-    }
-    let tmp = path.with_file_name(".credentials.json.tmp");
-    if fs::write(&tmp, encoded).is_err() {
-        let _ = fs::remove_file(&tmp);
-        return;
-    }
-    if fs::rename(&tmp, path).is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
 }
 
 #[derive(Deserialize)]
@@ -1251,11 +1452,7 @@ struct WhamWindow {
 }
 
 fn fetch_codex_wham_limits(codex_home: &Path) -> Option<ProviderUsage> {
-    let path = codex_home.join("auth.json");
-    if !is_regular_file(&path) {
-        return None;
-    }
-    let raw = fs::read_to_string(path).ok()?;
+    let raw = read_regular_file(&codex_home.join("auth.json"))?;
     let file: CodexAuthFile = serde_json::from_str(&raw).ok()?;
     let tokens = file.tokens?;
     let access = tokens.access_token.filter(|token| !token.is_empty())?;
@@ -1469,7 +1666,8 @@ mod tests {
     use super::{
         is_current_month, is_safe_header_value, is_subscription_limits, parse_claude_line,
         parse_claude_usage_response, parse_codex_limits_line, parse_codex_model,
-        parse_codex_usage_line, parse_wham_usage_response, unix_now_ms, UsageCollector, UsageTick,
+        parse_codex_usage_line, parse_wham_usage_response, persist_claude_credentials,
+        read_claude_credentials, read_regular_file, unix_now_ms, UsageCollector, UsageTick,
     };
     use crate::core::{local_hms, local_ymd};
     use std::{fs, ptr};
@@ -1491,6 +1689,87 @@ mod tests {
         assert!(!is_safe_header_value("abc\r\nX-Injected: 1"));
         assert!(!is_safe_header_value("abc\n"));
         assert!(!is_safe_header_value("token with space"));
+    }
+
+    fn sample_claude_credentials() -> String {
+        r#"{"claudeAiOauth":{"accessToken":"sk-ant-test","expiresAt":4102444800000,"subscriptionType":"pro"}}"#.to_owned()
+    }
+
+    #[test]
+    fn component_regular_credentials_file_is_read_from_the_opened_handle() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-creds-regular-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        fs::create_dir_all(&root).expect("temp dir");
+        fs::write(root.join(".credentials.json"), sample_claude_credentials())
+            .expect("credentials");
+        let creds = read_claude_credentials(&root);
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(
+            creds.map(|value| value.access_token),
+            Some("sk-ant-test".to_owned())
+        );
+    }
+
+    #[test]
+    fn component_symlink_credentials_are_not_followed() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-creds-link-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        fs::create_dir_all(&root).expect("temp dir");
+        let target = root.join("elsewhere.json");
+        fs::write(&target, sample_claude_credentials()).expect("target");
+        let link = root.join(".credentials.json");
+        let linked = std::os::windows::fs::symlink_file(&target, &link).is_ok();
+        let creds = read_claude_credentials(&root);
+        let through_link = read_regular_file(&link);
+        let _ = fs::remove_dir_all(&root);
+        if !linked {
+            return;
+        }
+        assert!(creds.is_none());
+        assert!(through_link.is_none());
+    }
+
+    #[test]
+    fn component_credential_replace_updates_regular_file_and_refuses_symlinks() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-creds-replace-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        fs::create_dir_all(&root).expect("temp dir");
+        fs::write(root.join(".credentials.json"), sample_claude_credentials())
+            .expect("credentials");
+        let mut creds = read_claude_credentials(&root).expect("readable");
+        creds.access_token = "sk-ant-refreshed".to_owned();
+        creds.refresh_token = Some("refresh-token".to_owned());
+        creds.expires_at_ms = Some(4102444800000);
+        assert!(persist_claude_credentials(&root, &creds));
+        let stored = read_claude_credentials(&root).expect("replaced");
+        assert_eq!(stored.access_token, "sk-ant-refreshed");
+        assert_eq!(stored.refresh_token.as_deref(), Some("refresh-token"));
+
+        let linked_root = root.join("linked");
+        fs::create_dir_all(&linked_root).expect("linked dir");
+        let target = linked_root.join("elsewhere.json");
+        fs::write(&target, sample_claude_credentials()).expect("target");
+        let link = linked_root.join(".credentials.json");
+        let linked = std::os::windows::fs::symlink_file(&target, &link).is_ok();
+        let persist_link = persist_claude_credentials(&linked_root, &creds);
+        let target_after = fs::read_to_string(&target).ok();
+        let _ = fs::remove_dir_all(&root);
+        if linked {
+            assert!(!persist_link);
+            assert_eq!(
+                target_after.as_deref(),
+                Some(sample_claude_credentials().as_str())
+            );
+        }
     }
 
     #[test]
