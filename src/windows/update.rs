@@ -456,7 +456,7 @@ enum RedirectPolicy {
 }
 
 fn redirect_policy_for_host(host: &str) -> RedirectPolicy {
-    if is_github_family_host(host) {
+    if is_github_download_host(host) {
         RedirectPolicy::GitHubAssets
     } else {
         RedirectPolicy::Deny
@@ -464,12 +464,32 @@ fn redirect_policy_for_host(host: &str) -> RedirectPolicy {
 }
 
 #[must_use]
-pub(super) fn is_github_family_host(host: &str) -> bool {
+pub(super) fn is_github_download_host(host: &str) -> bool {
     let host = host.to_ascii_lowercase();
-    host == "github.com"
-        || host == "api.github.com"
-        || host == "githubusercontent.com"
-        || host.ends_with(".githubusercontent.com")
+    host == "github.com" || host == "api.github.com" || is_github_release_cdn_host(&host)
+}
+
+#[must_use]
+pub(super) fn is_github_release_cdn_host(host: &str) -> bool {
+    matches!(
+        host,
+        "objects.githubusercontent.com"
+            | "release-assets.githubusercontent.com"
+            | "github-releases.githubusercontent.com"
+    )
+}
+
+#[must_use]
+pub(super) fn github_redirect_allowed(from: &str, to: &str) -> bool {
+    let from = from.to_ascii_lowercase();
+    let to = to.to_ascii_lowercase();
+    if from == "api.github.com" {
+        return to == "api.github.com";
+    }
+    if from == "github.com" {
+        return to == "github.com" || is_github_release_cdn_host(&to);
+    }
+    is_github_release_cdn_host(&from) && to == from
 }
 
 #[must_use]
@@ -666,7 +686,7 @@ fn https_request_to_writer(
             let location = response_location(&request)?;
             let (next_host, next_path) = parse_https_location(&location, &host)
                 .ok_or_else(|| "redirect Location is not a valid HTTPS URL".to_owned())?;
-            if !is_github_family_host(&next_host) {
+            if !github_redirect_allowed(&host, &next_host) {
                 return Err("redirect left the GitHub download allowlist".to_owned());
             }
             if !next_host.eq_ignore_ascii_case(&host) {
@@ -882,8 +902,9 @@ mod tests {
     use crate::update::{UpdateCandidate, Version};
 
     use super::{
-        begin_check, is_cancelled, is_github_family_host, latest_release_body_is_available,
-        parse_https_location, sha256_reader, GitHubRelease, UpdateState, INNO_SILENT_PARAMETERS,
+        begin_check, github_redirect_allowed, is_cancelled, is_github_download_host,
+        latest_release_body_is_available, parse_https_location, sha256_reader, GitHubRelease,
+        UpdateState, INNO_SILENT_PARAMETERS,
     };
 
     fn candidate() -> UpdateCandidate {
@@ -1024,10 +1045,32 @@ mod tests {
         assert!(parse_https_location("http://github.com/evil", "github.com").is_none());
         assert!(parse_https_location("https://evil@github.com/asset", "github.com").is_none());
         assert!(parse_https_location("https://example.invalid/asset", "github.com").is_some());
-        assert!(!is_github_family_host("example.invalid"));
-        assert!(is_github_family_host(
+        assert!(github_redirect_allowed(
+            "github.com",
+            "objects.githubusercontent.com"
+        ));
+        assert!(github_redirect_allowed(
+            "github.com",
             "release-assets.githubusercontent.com"
         ));
-        assert!(!is_github_family_host("githubusercontent.com.evil.example"));
+        assert!(!github_redirect_allowed(
+            "github.com",
+            "raw.githubusercontent.com"
+        ));
+        assert!(!github_redirect_allowed(
+            "objects.githubusercontent.com",
+            "github.com"
+        ));
+        assert!(!github_redirect_allowed(
+            "api.github.com",
+            "objects.githubusercontent.com"
+        ));
+        assert!(is_github_download_host(
+            "release-assets.githubusercontent.com"
+        ));
+        assert!(!is_github_download_host("raw.githubusercontent.com"));
+        assert!(!is_github_download_host(
+            "githubusercontent.com.evil.example"
+        ));
     }
 }
