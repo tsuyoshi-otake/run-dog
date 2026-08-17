@@ -13,6 +13,7 @@ use std::{
     fs::{self, File},
     hash::{Hash, Hasher},
     io::{Read, Seek, SeekFrom},
+    os::windows::fs::MetadataExt,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -58,6 +59,8 @@ const STAT_COOLDOWN_MS: u64 = 30 * 1_000;
 const HOT_AGE_MS: u64 = 48 * 60 * 60 * 1_000;
 const REDISCOVER_MS: u64 = 30 * 60 * 1_000;
 const CLAUDE_OAUTH_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+const MAX_HEADER_VALUE_BYTES: usize = 8 * 1_024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UsageTick {
@@ -303,7 +306,10 @@ impl UsageCollector {
                 continue;
             };
             if file_type.is_dir() {
-                dirs.push(path);
+                if path_is_under(&path, &self.claude_dir) || path_is_under(&path, &self.codex_home)
+                {
+                    dirs.push(path);
+                }
             } else if file_type.is_file() && is_jsonl(&path) {
                 files.push(path);
             }
@@ -318,10 +324,12 @@ impl UsageCollector {
             if ymd_key_from_unix(mtime_ms, window.bias_minutes) < previous_month_start(window) {
                 continue;
             }
-            let kind = if path.starts_with(&self.codex_home) {
+            let kind = if path_is_under(path, &self.codex_home) {
                 SourceKind::Codex
-            } else {
+            } else if path_is_under(path, &self.claude_dir) {
                 SourceKind::Claude
+            } else {
+                continue;
             };
             if let std::collections::hash_map::Entry::Vacant(entry) = self.files.entry(path.clone())
             {
@@ -625,6 +633,33 @@ fn is_hot(cursor: &FileCursor, now_ms: u64) -> bool {
 
 fn is_jsonl(path: &Path) -> bool {
     path.extension().is_some_and(|ext| ext == "jsonl")
+}
+
+#[must_use]
+pub(super) fn is_safe_header_value(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_HEADER_VALUE_BYTES
+        && value.bytes().all(|byte| byte.is_ascii_graphic())
+}
+
+fn bearer_headers(token: &str, extra_lines: &str) -> Option<String> {
+    is_safe_header_value(token).then(|| format!("Authorization: Bearer {token}\r\n{extra_lines}"))
+}
+
+fn is_regular_file(path: &Path) -> bool {
+    fs::metadata(path).is_ok_and(|meta| {
+        meta.is_file() && meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
+    })
+}
+
+fn path_is_under(path: &Path, root: &Path) -> bool {
+    let Ok(root) = fs::canonicalize(root) else {
+        return false;
+    };
+    let Ok(path) = fs::canonicalize(path) else {
+        return false;
+    };
+    path.starts_with(root)
 }
 
 fn is_current_month(mtime_ms: u64, window: DayWindow) -> bool {
@@ -998,7 +1033,11 @@ struct ClaudeCreds {
 }
 
 fn read_claude_credentials(claude_dir: &Path) -> Option<ClaudeCreds> {
-    let raw = fs::read_to_string(claude_dir.join(".credentials.json")).ok()?;
+    let path = claude_dir.join(".credentials.json");
+    if !is_regular_file(&path) {
+        return None;
+    }
+    let raw = fs::read_to_string(path).ok()?;
     let file: ClaudeCredentialsFile = serde_json::from_str(&raw).ok()?;
     let oauth = file.oauth?;
     let access_token = oauth.access_token.filter(|token| !token.is_empty())?;
@@ -1063,10 +1102,11 @@ fn fetch_claude_limits(claude_dir: &Path) -> Option<ProviderUsage> {
 }
 
 fn claude_usage_request(token: &str, plan: Option<&str>) -> Option<ProviderUsage> {
+    let headers = bearer_headers(token, "anthropic-beta: oauth-2025-04-20\r\n")?;
     let (status, body) = super::update::https_get(
         "api.anthropic.com",
         "/api/oauth/usage",
-        &format!("Authorization: Bearer {token}\r\nanthropic-beta: oauth-2025-04-20\r\n"),
+        &headers,
         16 * 1_024,
     )
     .ok()?;
@@ -1132,6 +1172,9 @@ fn refresh_claude_credentials(claude_dir: &Path, creds: &mut ClaudeCreds) -> boo
 
 fn persist_claude_credentials(claude_dir: &Path, creds: &ClaudeCreds) {
     let path = claude_dir.join(".credentials.json");
+    if !is_regular_file(&path) {
+        return;
+    }
     let Ok(meta) = fs::metadata(&path) else {
         return;
     };
@@ -1164,7 +1207,17 @@ fn persist_claude_credentials(claude_dir: &Path, creds: &ClaudeCreds) {
     {
         return;
     }
-    let _ = fs::write(path, encoded);
+    if !is_regular_file(&path) {
+        return;
+    }
+    let tmp = path.with_file_name(".credentials.json.tmp");
+    if fs::write(&tmp, encoded).is_err() {
+        let _ = fs::remove_file(&tmp);
+        return;
+    }
+    if fs::rename(&tmp, path).is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
 }
 
 #[derive(Deserialize)]
@@ -1198,11 +1251,18 @@ struct WhamWindow {
 }
 
 fn fetch_codex_wham_limits(codex_home: &Path) -> Option<ProviderUsage> {
-    let raw = fs::read_to_string(codex_home.join("auth.json")).ok()?;
+    let path = codex_home.join("auth.json");
+    if !is_regular_file(&path) {
+        return None;
+    }
+    let raw = fs::read_to_string(path).ok()?;
     let file: CodexAuthFile = serde_json::from_str(&raw).ok()?;
     let tokens = file.tokens?;
     let access = tokens.access_token.filter(|token| !token.is_empty())?;
     let account = tokens.account_id.filter(|id| !id.is_empty())?;
+    if !is_safe_header_value(&access) || !is_safe_header_value(&account) {
+        return None;
+    }
     let (status, body) = super::update::https_get(
         "chatgpt.com",
         "/backend-api/wham/usage",
@@ -1407,9 +1467,9 @@ fn path_size_mtime(path: &Path) -> Option<(u64, u64)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_current_month, is_subscription_limits, parse_claude_line, parse_claude_usage_response,
-        parse_codex_limits_line, parse_codex_model, parse_codex_usage_line,
-        parse_wham_usage_response, unix_now_ms, UsageCollector, UsageTick,
+        is_current_month, is_safe_header_value, is_subscription_limits, parse_claude_line,
+        parse_claude_usage_response, parse_codex_limits_line, parse_codex_model,
+        parse_codex_usage_line, parse_wham_usage_response, unix_now_ms, UsageCollector, UsageTick,
     };
     use crate::core::{local_hms, local_ymd};
     use std::{fs, ptr};
@@ -1422,6 +1482,15 @@ mod tests {
         assert_eq!(event.usage.input, 10);
         assert_eq!(event.usage.output, 4);
         assert_eq!(event.usage.cache_read, 2);
+    }
+
+    #[test]
+    fn c2_header_values_reject_crlf_and_empty_tokens() {
+        assert!(is_safe_header_value("eyJhbGciOiJIUzI1NiJ9.payload.sig"));
+        assert!(!is_safe_header_value(""));
+        assert!(!is_safe_header_value("abc\r\nX-Injected: 1"));
+        assert!(!is_safe_header_value("abc\n"));
+        assert!(!is_safe_header_value("token with space"));
     }
 
     #[test]
