@@ -1,7 +1,9 @@
 # Inno Setup release contract
 
-The installer is intentionally per-user and unsigned. It installs to
-%LOCALAPPDATA%\Programs\RunDog, so updating it does not require elevation.
+The installer is per-user. It installs to %LOCALAPPDATA%\Programs\RunDog, so
+updating it does not require elevation. Authenticode signing via SignPath
+Foundation is pending; see [CODE_SIGNING.md](../CODE_SIGNING.md). Until then
+release assets remain unsigned.
 
 The updater accepts only the latest published stable GitHub Release containing
 these exact assets:

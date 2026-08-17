@@ -73,7 +73,11 @@ export const I18N = {
       },
       {
         q: "SmartScreen の警告が出ますか？",
-        a: "コード署名はないため、警告が出ることがあります。インストーラーには SHA-256 の照合があります。公開元の GitHub リポジトリから導入してください。",
+        a: "SignPath Foundation のコード署名は申請中です。承認までは署名がないため、警告が出ることがあります。インストーラーには SHA-256 の照合があります。公開元の GitHub リポジトリから導入してください。",
+      },
+      {
+        q: "アンインストールできますか？",
+        a: "できます。Windows の「アプリ」から RunDog を削除してください。スタートメニューのショートカットと、スタートアップ登録も一緒に外れます。",
       },
       {
         q: "動作環境は？",
@@ -88,6 +92,7 @@ export const I18N = {
       "起動時に一度だけ、GitHub Releases へ新しい版があるか確認します。ダウンロードと導入は、メニューから明示したときだけです。",
       "Claude Code や Codex CLI を使っている場合、そのホームディレクトリのログと、すでに端末にある認証情報で各社の上限を問い合わせることがあります。トークンを第三者と共有することはありません。",
       "広告、解析、クラッシュ報告の SDK は入れていません。",
+      "This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.",
     ],
   },
   en: {
@@ -153,7 +158,11 @@ export const I18N = {
       },
       {
         q: "Will SmartScreen warn me?",
-        a: "There is no code signature, so Windows may warn. The installer is checked with SHA-256. Install from the project's GitHub repository.",
+        a: "Code signing through SignPath Foundation is pending. Until then there is no Authenticode signature, so Windows may warn. The installer is checked with SHA-256. Install from the project's GitHub repository.",
+      },
+      {
+        q: "How do I uninstall?",
+        a: "Windows Settings → Apps → RunDog. That also removes Start Menu shortcuts and the optional startup entry.",
       },
       {
         q: "What are the requirements?",
@@ -168,6 +177,7 @@ export const I18N = {
       "At startup it checks GitHub Releases once for a newer build. Download and install happen only when you choose them from the menu.",
       "If you use Claude Code or Codex CLI, RunDog may read their local logs and query vendor limit APIs with credentials already on the machine. Tokens are never shared with third parties.",
       "There is no advertising, analytics, or crash-reporting SDK.",
+      "This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.",
     ],
   },
   zh: {
@@ -232,7 +242,11 @@ export const I18N = {
       },
       {
         q: "SmartScreen 会警告吗？",
-        a: "没有代码签名，因此可能会出现警告。安装包带有 SHA-256 校验。请从项目的 GitHub 仓库安装。",
+        a: "正在申请 SignPath Foundation 的代码签名。获批之前没有 Authenticode 签名，因此可能会出现警告。安装包带有 SHA-256 校验。请从项目的 GitHub 仓库安装。",
+      },
+      {
+        q: "如何卸载？",
+        a: "在 Windows「应用」中删除 RunDog。开始菜单快捷方式和可选的开机启动项会一并移除。",
       },
       {
         q: "运行环境是什么？",
@@ -247,6 +261,7 @@ export const I18N = {
       "启动时只会向 GitHub Releases 检查一次是否有新版本。下载和安装仅在你从菜单明确选择时进行。",
       "如果使用 Claude Code 或 Codex CLI，可能会读取其主目录中的日志，并用本机已有的凭据查询厂商限额 API。令牌不会提供给第三方。",
       "不包含广告、分析或崩溃报告 SDK。",
+      "This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.",
     ],
   },
   ko: {
@@ -311,7 +326,11 @@ export const I18N = {
       },
       {
         q: "SmartScreen 경고가 나오나요?",
-        a: "코드 서명이 없어 경고가 나올 수 있습니다. 설치 파일은 SHA-256으로 검증됩니다. 프로젝트 GitHub 저장소에서 설치하세요.",
+        a: "SignPath Foundation 코드 서명을 신청 중입니다. 승인 전에는 Authenticode 서명이 없어 경고가 나올 수 있습니다. 설치 파일은 SHA-256으로 검증됩니다. 프로젝트 GitHub 저장소에서 설치하세요.",
+      },
+      {
+        q: "어떻게 제거하나요?",
+        a: "Windows 설정 → 앱에서 RunDog를 제거하세요. 시작 메뉴 바로 가기와 선택적 시작 프로그램 등록도 함께 삭제됩니다.",
       },
       {
         q: "동작 환경은?",
@@ -326,6 +345,7 @@ export const I18N = {
       "시작할 때 GitHub Releases에서 새 버전이 있는지 한 번만 확인합니다. 다운로드와 설치는 메뉴에서 명시적으로 선택할 때만 진행됩니다.",
       "Claude Code나 Codex CLI를 사용하는 경우 홈 디렉터리 로그와 이미 기기에 있는 자격 증명으로 공급업체 한도 API를 조회할 수 있습니다. 토큰을 제3자와 공유하지 않습니다.",
       "광고, 분석, 충돌 보고 SDK는 포함되어 있지 않습니다.",
+      "This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.",
     ],
   },
   vi: {
@@ -391,7 +411,11 @@ export const I18N = {
       },
       {
         q: "SmartScreen có cảnh báo không?",
-        a: "Không có chữ ký mã nên Windows có thể cảnh báo. Bộ cài được kiểm tra SHA-256. Hãy cài từ kho GitHub của dự án.",
+        a: "Đang xin chữ ký SignPath Foundation. Trước khi được duyệt chưa có chữ ký Authenticode nên Windows có thể cảnh báo. Bộ cài được kiểm tra SHA-256. Hãy cài từ kho GitHub của dự án.",
+      },
+      {
+        q: "Gỡ cài đặt thế nào?",
+        a: "Windows Cài đặt → Ứng dụng → RunDog. Lối tắt menu Start và mục khởi động tùy chọn cũng bị xóa.",
       },
       {
         q: "Yêu cầu hệ thống?",
@@ -406,6 +430,7 @@ export const I18N = {
       "Khi khởi động chỉ kiểm tra GitHub Releases một lần xem có bản mới không. Tải và cài chỉ khi bạn chọn rõ từ menu.",
       "Nếu dùng Claude Code hoặc Codex CLI, có thể đọc nhật ký cục bộ và gọi API hạn mức của nhà cung cấp với thông tin xác thực đã có trên máy. Token không chia sẻ với bên thứ ba.",
       "Không có SDK quảng cáo, phân tích hay báo cáo sự cố.",
+      "This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.",
     ],
   },
   fr: {
@@ -471,7 +496,11 @@ export const I18N = {
       },
       {
         q: "SmartScreen va-t-il m'avertir ?",
-        a: "Sans signature de code, Windows peut afficher un avertissement. L'installateur est vérifié par SHA-256. Installez depuis le dépôt GitHub du projet.",
+        a: "La signature SignPath Foundation est en cours de demande. En attendant, il n'y a pas de signature Authenticode, donc Windows peut avertir. L'installateur est vérifié par SHA-256. Installez depuis le dépôt GitHub du projet.",
+      },
+      {
+        q: "Comment désinstaller ?",
+        a: "Paramètres Windows → Applications → RunDog. Les raccourcis du menu Démarrer et l'entrée de démarrage facultative sont aussi retirés.",
       },
       {
         q: "Quelle configuration ?",
@@ -486,6 +515,7 @@ export const I18N = {
       "Au démarrage, il vérifie une fois GitHub Releases. Le téléchargement et l'installation n'ont lieu que si vous les choisissez dans le menu.",
       "Si vous utilisez Claude Code ou Codex CLI, RunDog peut lire leurs journaux locaux et interroger les API de plafond avec des identifiants déjà sur la machine. Les jetons ne sont pas partagés avec des tiers.",
       "Aucun SDK de publicité, d'analyse ou de rapport de plantage.",
+      "This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.",
     ],
   },
   de: {
@@ -551,7 +581,11 @@ export const I18N = {
       },
       {
         q: "Warnt SmartScreen?",
-        a: "Ohne Codesignatur kann Windows warnen. Der Installer wird per SHA-256 geprüft. Installieren Sie aus dem GitHub-Repository des Projekts.",
+        a: "Die SignPath-Foundation-Signatur ist beantragt. Bis zur Freigabe gibt es keine Authenticode-Signatur, daher kann Windows warnen. Der Installer wird per SHA-256 geprüft. Installieren Sie aus dem GitHub-Repository des Projekts.",
+      },
+      {
+        q: "Wie deinstalliere ich?",
+        a: "Windows-Einstellungen → Apps → RunDog. Startmenü-Verknüpfungen und der optionale Autostart-Eintrag werden mit entfernt.",
       },
       {
         q: "Welche Voraussetzungen?",
@@ -566,6 +600,7 @@ export const I18N = {
       "Beim Start prüft es einmal GitHub Releases auf eine neuere Version. Download und Installation nur, wenn Sie sie im Menü wählen.",
       "Wenn Sie Claude Code oder Codex CLI nutzen, kann RunDog lokale Protokolle lesen und Limit-APIs der Anbieter mit bereits vorhandenen Anmeldedaten abfragen. Tokens werden nicht an Dritte weitergegeben.",
       "Kein SDK für Werbung, Analyse oder Absturzberichte.",
+      "This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.",
     ],
   },
   es: {
@@ -631,7 +666,11 @@ export const I18N = {
       },
       {
         q: "¿Avisará SmartScreen?",
-        a: "No hay firma de código, así que Windows puede avisar. El instalador se comprueba con SHA-256. Instálalo desde el repositorio GitHub del proyecto.",
+        a: "La firma de SignPath Foundation está en trámite. Hasta entonces no hay firma Authenticode, así que Windows puede avisar. El instalador se comprueba con SHA-256. Instálalo desde el repositorio GitHub del proyecto.",
+      },
+      {
+        q: "¿Cómo se desinstala?",
+        a: "Configuración de Windows → Aplicaciones → RunDog. También se quitan los accesos del menú Inicio y el inicio opcional.",
       },
       {
         q: "¿Qué se necesita?",
@@ -646,6 +685,7 @@ export const I18N = {
       "Al arrancar comprueba GitHub Releases una sola vez. La descarga e instalación solo ocurren si las eliges en el menú.",
       "Si usas Claude Code o Codex CLI, puede leer sus registros locales y consultar las API de límites con credenciales ya en el equipo. Los tokens no se comparten con terceros.",
       "No incluye SDK de publicidad, analítica ni informes de fallos.",
+      "This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.",
     ],
   },
 };

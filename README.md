@@ -55,11 +55,15 @@ stream して照合します。照合に成功すると Inno Setup を
 から取得できません。Release binary には CI で `RUN_DOG_UPDATE_REPOSITORY` として
 実際の `owner/repository` を埋め込みます。
 
-Authenticode の証明書・署名は使用しません。そのため Windows SmartScreen 等の警告が
-出る可能性があります。SHA-256 sidecar は転送破損・取り違えを fail-closed にする
-検査であり、コード署名の代替や、GitHub repository 自体が侵害された場合の真正性保証
-ではありません。stable release の公開権限を保護し、利用者はこの制約を理解した上で
-導入してください。
+[Code signing policy](CODE_SIGNING.md): Free code signing provided by SignPath.io,
+certificate by SignPath Foundation. SignPath Foundation への申請中のため、現在の
+GitHub Release インストーラーはまだ Authenticode 署名されていません。そのため
+Windows SmartScreen 等の警告が出る可能性があります。SHA-256 sidecar は転送破損・
+取り違えを fail-closed にする検査であり、コード署名の代替や、GitHub repository
+自体が侵害された場合の真正性保証ではありません。stable release の公開権限を保護し、
+利用者はこの制約を理解した上で導入してください。
+
+アンインストールは Windows の「アプリ」から RunDog を削除します。
 
 ローカルで unsigned installer を作るには Inno Setup 6 を導入してから次を実行します。
 
