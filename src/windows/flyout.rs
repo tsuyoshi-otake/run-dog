@@ -40,7 +40,7 @@ use crate::{
     application::TrayIcon,
     core::{
         local_hms, local_ymd, LimitWindow, MemoryStatus, ProcessStatus, ProviderUsage,
-        ResolvedTheme, Sparkline, StorageStatus, SPARKLINE_CAPACITY,
+        ResolvedTheme, Sparkline, StorageStatus, UsageSnapshot, SPARKLINE_CAPACITY,
     },
 };
 
@@ -49,12 +49,13 @@ const ICON_ID: u32 = 1;
 const MA_NOACTIVATE: LRESULT = 3;
 const CARD_WIDTH: i32 = 320;
 const CARD_HEIGHT: i32 = 272;
-const CARD_USAGE_HEIGHT: i32 = 220;
+const CARD_USAGE_BLOCK_HEIGHT: i32 = 110;
 
 static REGISTER_CLASS: Once = Once::new();
 
 pub struct HoverFlyout {
     hwnd: HWND,
+    owner: HWND,
     state: Option<TrayIcon>,
 }
 
@@ -63,6 +64,7 @@ impl HoverFlyout {
     pub const fn new() -> Self {
         Self {
             hwnd: ptr::null_mut(),
+            owner: ptr::null_mut(),
             state: None,
         }
     }
@@ -70,21 +72,32 @@ impl HoverFlyout {
     pub fn set_state(&mut self, icon: &TrayIcon) {
         self.state = Some(icon.clone());
         if self.is_visible() {
-            let _ = unsafe { InvalidateRect(self.hwnd, ptr::null(), 1) };
+            self.place_near_icon();
         }
     }
 
     pub fn show_near_icon(&mut self, owner: HWND) {
         register_class();
+        self.owner = owner;
         if self.hwnd.is_null() {
             self.hwnd = create_flyout_window(owner, self);
             if self.hwnd.is_null() {
                 return;
             }
         }
+        self.place_near_icon();
+        let _ = unsafe { ShowWindow(self.hwnd, SW_SHOWNOACTIVATE) };
+        let _ = unsafe { InvalidateRect(self.hwnd, ptr::null(), 1) };
+    }
+
+    fn place_near_icon(&mut self) {
+        if self.hwnd.is_null() {
+            return;
+        }
         let dpi = window_dpi(self.hwnd);
-        let (width, height) = window_size(dpi);
-        let (x, y) = position_near_icon(owner, width, height);
+        let usage = self.state.as_ref().map(|state| state.usage);
+        let (width, height) = window_size(dpi, usage);
+        let (x, y) = position_near_icon(self.owner, width, height);
         let _ = unsafe {
             SetWindowPos(
                 self.hwnd,
@@ -97,7 +110,6 @@ impl HoverFlyout {
             )
         };
         apply_rounded_chrome(self.hwnd, width, height, dpi);
-        let _ = unsafe { ShowWindow(self.hwnd, SW_SHOWNOACTIVATE) };
         let _ = unsafe { InvalidateRect(self.hwnd, ptr::null(), 1) };
     }
 
@@ -113,6 +125,7 @@ impl HoverFlyout {
             let _ = unsafe { DestroyWindow(self.hwnd) };
         }
         self.hwnd = ptr::null_mut();
+        self.owner = ptr::null_mut();
         self.state = None;
     }
 
@@ -233,11 +246,16 @@ fn position_near_icon(owner: HWND, width: i32, height: i32) -> (i32, i32) {
     (x.max(0), y.max(0))
 }
 
-fn window_size(dpi: i32) -> (i32, i32) {
+fn window_size(dpi: i32, usage: Option<UsageSnapshot>) -> (i32, i32) {
+    let blocks = usage.map(visible_usage_count).unwrap_or(0) as i32;
     (
         px(CARD_WIDTH, dpi),
-        px(CARD_HEIGHT + CARD_USAGE_HEIGHT, dpi),
+        px(CARD_HEIGHT + CARD_USAGE_BLOCK_HEIGHT * blocks, dpi),
     )
+}
+
+fn visible_usage_count(usage: UsageSnapshot) -> usize {
+    usize::from(usage.claude.has_month_activity()) + usize::from(usage.codex.has_month_activity())
 }
 
 fn window_dpi(hwnd: HWND) -> i32 {
@@ -446,49 +464,36 @@ fn paint(hwnd: HWND) {
     draw_separator(hdc, content_left, content_right, top, palette.separator);
     top += px(9, dpi);
 
-    let claude_bottom = top + usage_block_height(&layout);
-    paint_usage_row(
-        hdc,
-        RECT {
-            left: client.left + layout.pad,
-            top,
-            right: content_right,
-            bottom: claude_bottom,
-        },
-        content_left,
-        "Claude",
-        state.usage.claude,
-        UsageMark::Claude,
-        &palette,
-        &layout,
-        title_font,
-        detail_font,
-    );
-    top = claude_bottom + px(8, dpi);
-    draw_separator(hdc, content_left, content_right, top, palette.separator);
-    top += px(9, dpi);
+    let usage_rows = visible_usage_rows(state.usage);
+    let last = usage_rows.len().saturating_sub(1);
+    for (index, row) in usage_rows.iter().enumerate() {
+        let block_bottom = top + usage_block_height(&layout);
+        paint_usage_row(
+            hdc,
+            RECT {
+                left: client.left + layout.pad,
+                top,
+                right: content_right,
+                bottom: block_bottom,
+            },
+            content_left,
+            row.title,
+            row.usage,
+            row.mark,
+            &palette,
+            &layout,
+            title_font,
+            detail_font,
+        );
+        top = block_bottom + px(8, dpi);
+        draw_separator(hdc, content_left, content_right, top, palette.separator);
+        top += if index == last {
+            px(8, dpi)
+        } else {
+            px(9, dpi)
+        };
+    }
 
-    let codex_bottom = top + usage_block_height(&layout);
-    paint_usage_row(
-        hdc,
-        RECT {
-            left: client.left + layout.pad,
-            top,
-            right: content_right,
-            bottom: codex_bottom,
-        },
-        content_left,
-        "Codex",
-        state.usage.codex,
-        UsageMark::Codex,
-        &palette,
-        &layout,
-        title_font,
-        detail_font,
-    );
-    top = codex_bottom + px(8, dpi);
-    draw_separator(hdc, content_left, content_right, top, palette.separator);
-    top += px(8, dpi);
     paint_self_row(
         hdc,
         RECT {
@@ -753,6 +758,31 @@ fn paint_storage_row(
 enum UsageMark {
     Claude,
     Codex,
+}
+
+struct VisibleUsageRow {
+    title: &'static str,
+    usage: ProviderUsage,
+    mark: UsageMark,
+}
+
+fn visible_usage_rows(usage: UsageSnapshot) -> Vec<VisibleUsageRow> {
+    let mut rows = Vec::with_capacity(2);
+    if usage.claude.has_month_activity() {
+        rows.push(VisibleUsageRow {
+            title: "Claude",
+            usage: usage.claude,
+            mark: UsageMark::Claude,
+        });
+    }
+    if usage.codex.has_month_activity() {
+        rows.push(VisibleUsageRow {
+            title: "Codex",
+            usage: usage.codex,
+            mark: UsageMark::Codex,
+        });
+    }
+    rows
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1340,8 +1370,11 @@ fn wide(value: &str) -> Vec<u16> {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_bytes, format_percent, format_self_usage};
-    use crate::core::{CpuLoad, ProcessStatus};
+    use super::{
+        format_bytes, format_percent, format_self_usage, visible_usage_count, window_size,
+        CARD_HEIGHT, CARD_USAGE_BLOCK_HEIGHT, CARD_WIDTH,
+    };
+    use crate::core::{CpuLoad, ProcessStatus, ProviderUsage, UsageSnapshot};
 
     #[test]
     fn component_flyout_formatters_cover_unknown_and_scaled_values() {
@@ -1360,6 +1393,44 @@ mod tests {
                 Some(CpuLoad::percent(0.4))
             ))),
             "0.4% · 5.0 MB"
+        );
+    }
+
+    #[test]
+    fn component_flyout_hides_providers_without_month_activity() {
+        assert_eq!(visible_usage_count(UsageSnapshot::default()), 0);
+        assert_eq!(
+            window_size(96, Some(UsageSnapshot::default())),
+            (CARD_WIDTH, CARD_HEIGHT)
+        );
+
+        let usage = UsageSnapshot {
+            codex: ProviderUsage {
+                month_cents: 125,
+                ..ProviderUsage::default()
+            },
+            ..UsageSnapshot::default()
+        };
+        assert_eq!(visible_usage_count(usage), 1);
+        assert_eq!(
+            window_size(96, Some(usage)),
+            (CARD_WIDTH, CARD_HEIGHT + CARD_USAGE_BLOCK_HEIGHT)
+        );
+
+        let usage = UsageSnapshot {
+            claude: ProviderUsage {
+                today_cents: 1,
+                ..ProviderUsage::default()
+            },
+            codex: ProviderUsage {
+                month_cents: 125,
+                ..ProviderUsage::default()
+            },
+        };
+        assert_eq!(visible_usage_count(usage), 2);
+        assert_eq!(
+            window_size(96, Some(usage)),
+            (CARD_WIDTH, CARD_HEIGHT + CARD_USAGE_BLOCK_HEIGHT * 2)
         );
     }
 }

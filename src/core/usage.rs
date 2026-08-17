@@ -72,6 +72,15 @@ impl ProviderUsage {
         self.plan_len = len as u8;
     }
 
+    /// True when this month's jsonl produced an API-equivalent cost.
+    ///
+    /// Limit windows alone do not count: leftover credentials can still
+    /// return 5h/7d bars without any use this month.
+    #[must_use]
+    pub const fn has_month_activity(self) -> bool {
+        self.month_cents > 0 || self.today_cents > 0
+    }
+
     #[must_use]
     pub fn session_window(self) -> Option<LimitWindow> {
         self.window_matching(|minutes| minutes > 0 && minutes < 1_440)
@@ -295,7 +304,8 @@ pub fn days_to_ymd(days: i64) -> (i32, u8, u8) {
 #[cfg(test)]
 mod tests {
     use super::{
-        cost_cents, days_to_ymd, format_plan_label, local_ymd, ymd_key, LimitWindow, TokenUsage,
+        cost_cents, days_to_ymd, format_plan_label, local_ymd, ymd_key, LimitWindow, ProviderUsage,
+        TokenUsage,
     };
 
     #[test]
@@ -346,5 +356,29 @@ mod tests {
         assert_eq!(format_plan_label("max"), "Max");
         assert_eq!(format_plan_label("pro"), "Pro 20x");
         assert_eq!(format_plan_label("plus"), "Plus");
+    }
+
+    #[test]
+    fn component_month_activity_requires_this_month_cost() {
+        assert!(!ProviderUsage::default().has_month_activity());
+        assert!(ProviderUsage {
+            month_cents: 1,
+            ..ProviderUsage::default()
+        }
+        .has_month_activity());
+        assert!(ProviderUsage {
+            today_cents: 1,
+            ..ProviderUsage::default()
+        }
+        .has_month_activity());
+        assert!(!ProviderUsage {
+            primary: Some(LimitWindow {
+                used_tenths: 250,
+                resets_at_ms: 0,
+                window_minutes: 300,
+            }),
+            ..ProviderUsage::default()
+        }
+        .has_month_activity());
     }
 }
