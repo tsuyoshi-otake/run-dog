@@ -14,7 +14,13 @@ mod tray;
 mod update;
 mod usage;
 
-use std::ptr;
+use std::{
+    ffi::OsString,
+    mem::size_of,
+    os::windows::ffi::OsStringExt,
+    path::{Path, PathBuf},
+    ptr,
+};
 
 use windows_sys::Win32::{
     Foundation::{
@@ -22,16 +28,17 @@ use windows_sys::Win32::{
     },
     System::{
         LibraryLoader::GetModuleHandleW,
-        Threading::{CreateMutexW, ReleaseMutex},
-    },
-    UI::{
-        Shell::ShellExecuteW,
-        WindowsAndMessaging::{
-            CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
-            GetWindowLongPtrW, KillTimer, PostQuitMessage, RegisterClassW, RegisterWindowMessageW,
-            SetTimer, SetWindowLongPtrW, TranslateMessage, GWLP_USERDATA, MSG, SW_SHOWNORMAL,
-            WM_COMMAND, WM_DESTROY, WM_SETTINGCHANGE, WM_THEMECHANGED, WM_TIMER, WNDCLASSW,
+        SystemInformation::GetSystemDirectoryW,
+        Threading::{
+            CreateMutexW, CreateProcessW, ReleaseMutex, PROCESS_INFORMATION, STARTF_USESHOWWINDOW,
+            STARTUPINFOW,
         },
+    },
+    UI::WindowsAndMessaging::{
+        CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
+        GetWindowLongPtrW, KillTimer, PostQuitMessage, RegisterClassW, RegisterWindowMessageW,
+        SetTimer, SetWindowLongPtrW, TranslateMessage, GWLP_USERDATA, MSG, SW_SHOWNORMAL,
+        WM_COMMAND, WM_DESTROY, WM_SETTINGCHANGE, WM_THEMECHANGED, WM_TIMER, WNDCLASSW,
     },
 };
 
@@ -304,18 +311,99 @@ fn timer_id(kind: TimerKind) -> usize {
 }
 
 fn launch_task_manager() {
-    let verb = wide("open");
-    let executable = wide("taskmgr.exe");
-    let _ = unsafe {
-        ShellExecuteW(
-            ptr::null_mut(),
-            verb.as_ptr(),
-            executable.as_ptr(),
-            ptr::null(),
-            ptr::null(),
-            SW_SHOWNORMAL,
+    if let Some(path) = system32_executable("taskmgr.exe") {
+        let _ = launch_detached(&path, "");
+    }
+}
+
+pub(super) fn launch_detached(executable: &Path, arguments: &str) -> Result<(), String> {
+    if !executable.is_file() {
+        return Err("executable is missing".to_owned());
+    }
+    let application = wide_path(executable)?;
+    let mut command_line = wide(
+        &create_process_command_line(
+            executable
+                .to_str()
+                .ok_or_else(|| "executable path is not valid UTF-16 input".to_owned())?,
+            arguments,
         )
+        .ok_or_else(|| "executable path or arguments are not safe to launch".to_owned())?,
+    );
+    let directory = executable.parent().map(wide_path).transpose()?;
+    let startup = STARTUPINFOW {
+        cb: size_of::<STARTUPINFOW>() as u32,
+        dwFlags: STARTF_USESHOWWINDOW,
+        wShowWindow: SW_SHOWNORMAL as u16,
+        ..STARTUPINFOW::default()
     };
+    let mut process = PROCESS_INFORMATION::default();
+    let directory_ptr = directory.as_ref().map_or(ptr::null(), Vec::as_ptr);
+    let succeeded = unsafe {
+        CreateProcessW(
+            application.as_ptr(),
+            command_line.as_mut_ptr(),
+            ptr::null(),
+            ptr::null(),
+            0,
+            0,
+            ptr::null(),
+            directory_ptr,
+            &startup,
+            &mut process,
+        )
+    } != 0;
+    if !process.hProcess.is_null() {
+        let _ = unsafe { CloseHandle(process.hProcess) };
+    }
+    if !process.hThread.is_null() {
+        let _ = unsafe { CloseHandle(process.hThread) };
+    }
+    if succeeded {
+        Ok(())
+    } else {
+        Err(last_error("CreateProcessW"))
+    }
+}
+
+fn wide_path(path: &Path) -> Result<Vec<u16>, String> {
+    path.to_str()
+        .ok_or_else(|| "path is not valid UTF-16 input".to_owned())
+        .map(wide)
+}
+
+fn system32_executable(name: &str) -> Option<PathBuf> {
+    if name.is_empty()
+        || name.contains(['\\', '/', '\0', ':'])
+        || Path::new(name).components().count() != 1
+    {
+        return None;
+    }
+    let mut buffer = vec![0_u16; 260];
+    loop {
+        let length = unsafe { GetSystemDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) };
+        if length == 0 {
+            return None;
+        }
+        if length as usize >= buffer.len() {
+            buffer.resize(length as usize + 1, 0);
+            continue;
+        }
+        let directory = OsString::from_wide(&buffer[..length as usize]);
+        return Some(PathBuf::from(directory).join(name));
+    }
+}
+
+#[must_use]
+fn create_process_command_line(executable: &str, arguments: &str) -> Option<String> {
+    if executable.is_empty() || executable.contains(['"', '\0']) || arguments.contains('\0') {
+        return None;
+    }
+    if arguments.is_empty() {
+        Some(format!("\"{executable}\""))
+    } else {
+        Some(format!("\"{executable}\" {arguments}"))
+    }
 }
 
 unsafe extern "system" fn window_proc(
@@ -456,4 +544,34 @@ fn wide(value: &str) -> Vec<u16> {
 fn last_error(operation: &str) -> String {
     let code = unsafe { GetLastError() };
     format!("{operation} failed with Win32 error {code}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::create_process_command_line;
+
+    #[test]
+    fn c2_create_process_command_line_quotes_the_image_and_rejects_injection() {
+        assert_eq!(
+            create_process_command_line(r"C:\Apps\RunDog.exe", ""),
+            Some(r#""C:\Apps\RunDog.exe""#.to_owned())
+        );
+        assert_eq!(
+            create_process_command_line(
+                r"C:\Users\a\updates\RunDog-Setup-1.2.4.exe",
+                "/VERYSILENT /NORESTART"
+            ),
+            Some(
+                r#""C:\Users\a\updates\RunDog-Setup-1.2.4.exe" /VERYSILENT /NORESTART"#.to_owned()
+            )
+        );
+        assert_eq!(
+            create_process_command_line(r"C:\Apps\RunDog.exe", "ok\0hidden"),
+            None
+        );
+        assert_eq!(
+            create_process_command_line(r#"C:\Apps\evil".exe"#, ""),
+            None
+        );
+    }
 }

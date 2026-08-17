@@ -25,13 +25,13 @@ use windows_sys::Win32::{
     Networking::WinHttp::{
         WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest,
         WinHttpQueryDataAvailable, WinHttpQueryHeaders, WinHttpReadData, WinHttpReceiveResponse,
-        WinHttpSendRequest, WinHttpSetTimeouts, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-        WINHTTP_FLAG_SECURE, WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE,
+        WinHttpSendRequest, WinHttpSetOption, WinHttpSetTimeouts,
+        WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_DISABLE_REDIRECTS, WINHTTP_FLAG_SECURE,
+        WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2, WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3,
+        WINHTTP_OPTION_DISABLE_FEATURE, WINHTTP_OPTION_SECURE_PROTOCOLS, WINHTTP_QUERY_FLAG_NUMBER,
+        WINHTTP_QUERY_LOCATION, WINHTTP_QUERY_STATUS_CODE,
     },
-    UI::{
-        Shell::ShellExecuteW,
-        WindowsAndMessaging::{PostMessageW, SW_SHOWNORMAL},
-    },
+    UI::WindowsAndMessaging::PostMessageW,
 };
 
 use crate::update::{
@@ -58,6 +58,9 @@ const NETWORK_RECEIVE_TIMEOUT_MS: i32 = 30_000;
 const NETWORK_BUFFER_BYTES: usize = 16 * 1_024;
 const HASH_BUFFER_BYTES: usize = 32 * 1_024;
 const INNO_SILENT_PARAMETERS: &str = "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS";
+const MAX_REDIRECTS: u8 = 5;
+const TLS_PROTOCOLS: u32 =
+    WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2 | WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3;
 
 /// Values displayed by the tray menu. This type contains no Win32 handles and
 /// can be copied without retaining a network worker.
@@ -437,31 +440,84 @@ fn sha256_reader(reader: &mut impl Read) -> Result<String, String> {
 }
 
 fn launch_installer(path: &Path) -> Result<(), String> {
-    let path = path
-        .to_str()
-        .ok_or_else(|| "installer path is not valid UTF-16 input".to_owned())?;
-    let operation = wide("open");
-    let installer = wide(path);
-    let parameters = wide(INNO_SILENT_PARAMETERS);
-    let result = unsafe {
-        ShellExecuteW(
-            ptr::null_mut(),
-            operation.as_ptr(),
-            installer.as_ptr(),
-            parameters.as_ptr(),
-            ptr::null(),
-            SW_SHOWNORMAL,
-        )
-    };
-
-    if result as isize <= 32 {
-        return Err(format!(
-            "ShellExecuteW failed with code {}",
-            result as isize
-        ));
+    let updates = update_directory()?;
+    let canonical = fs::canonicalize(path).map_err(|error| error.to_string())?;
+    let root = fs::canonicalize(&updates).map_err(|error| error.to_string())?;
+    if !canonical.starts_with(root) {
+        return Err("installer path escaped the update directory".to_owned());
     }
+    super::launch_detached(&canonical, INNO_SILENT_PARAMETERS)
+}
 
-    Ok(())
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RedirectPolicy {
+    Deny,
+    GitHubAssets,
+}
+
+fn redirect_policy_for_host(host: &str) -> RedirectPolicy {
+    if is_github_family_host(host) {
+        RedirectPolicy::GitHubAssets
+    } else {
+        RedirectPolicy::Deny
+    }
+}
+
+#[must_use]
+pub(super) fn is_github_family_host(host: &str) -> bool {
+    let host = host.to_ascii_lowercase();
+    host == "github.com"
+        || host == "api.github.com"
+        || host == "githubusercontent.com"
+        || host.ends_with(".githubusercontent.com")
+}
+
+#[must_use]
+fn is_redirect_status(status: u32) -> bool {
+    matches!(status, 301 | 302 | 303 | 307 | 308)
+}
+
+/// Parses `Location` as HTTPS only. Relative `/path` stays on the current host.
+#[must_use]
+pub(super) fn parse_https_location(location: &str, current_host: &str) -> Option<(String, String)> {
+    let location = location.trim();
+    if let Some(hash) = location.find('#') {
+        return parse_https_location(&location[..hash], current_host);
+    }
+    if location.starts_with('/') {
+        if location
+            .as_bytes()
+            .iter()
+            .any(|byte| matches!(byte, b'\\' | 0))
+        {
+            return None;
+        }
+        return Some((current_host.to_ascii_lowercase(), location.to_owned()));
+    }
+    let rest = location.strip_prefix("https://")?;
+    if rest.contains('\\') || rest.contains('@') || rest.contains('\0') {
+        return None;
+    }
+    let (host_port, path) = rest.split_once('/').unwrap_or((rest, ""));
+    let host = if let Some((host, port)) = host_port.split_once(':') {
+        if port != "443" {
+            return None;
+        }
+        host
+    } else {
+        host_port
+    };
+    if host.is_empty()
+        || host.starts_with('.')
+        || host.ends_with('.')
+        || host.contains("..")
+        || !host
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
+    {
+        return None;
+    }
+    Some((host.to_ascii_lowercase(), format!("/{path}")))
 }
 
 pub(super) fn https_get(
@@ -516,128 +572,231 @@ fn https_request_to_writer(
     writer: &mut impl Write,
     cancelled: Option<&AtomicBool>,
 ) -> Result<u32, String> {
-    if is_cancelled(cancelled) {
-        return Err("update cancelled".to_owned());
-    }
+    let policy = redirect_policy_for_host(host);
+    let mut host = host.to_owned();
+    let mut path = path.to_owned();
+    let mut headers = headers.to_owned();
+    let mut verb = verb.to_owned();
+    let mut payload = payload.map(Vec::from);
 
-    let agent = wide(&format!("RunDog/{}", env!("CARGO_PKG_VERSION")));
-    let session = HttpHandle::new("WinHttpOpen", unsafe {
-        WinHttpOpen(
-            agent.as_ptr(),
-            WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-            ptr::null(),
-            ptr::null(),
-            0,
-        )
-    })?;
-    if unsafe {
-        WinHttpSetTimeouts(
-            session.0,
-            NETWORK_TIMEOUT_MS,
-            NETWORK_TIMEOUT_MS,
-            NETWORK_TIMEOUT_MS,
-            NETWORK_RECEIVE_TIMEOUT_MS,
-        )
-    } == 0
-    {
-        return Err(last_error("WinHttpSetTimeouts"));
-    }
-
-    let host_wide = wide(host);
-    let connection = HttpHandle::new("WinHttpConnect", unsafe {
-        WinHttpConnect(session.0, host_wide.as_ptr(), 443, 0)
-    })?;
-    let verb_wide = wide(verb);
-    let path_wide = wide(path);
-    let request = HttpHandle::new("WinHttpOpenRequest", unsafe {
-        WinHttpOpenRequest(
-            connection.0,
-            verb_wide.as_ptr(),
-            path_wide.as_ptr(),
-            ptr::null(),
-            ptr::null(),
-            ptr::null(),
-            WINHTTP_FLAG_SECURE,
-        )
-    })?;
-    let headers_wide = wide(headers);
-    let (headers_pointer, headers_length) = if headers.is_empty() {
-        (ptr::null(), 0)
-    } else {
-        (headers_wide.as_ptr(), (headers_wide.len() - 1) as u32)
-    };
-    let (optional, optional_len, total_len) = match payload {
-        Some(bytes) if !bytes.is_empty() => (
-            bytes.as_ptr().cast::<c_void>(),
-            bytes.len() as u32,
-            bytes.len() as u32,
-        ),
-        _ => (ptr::null(), 0, 0),
-    };
-    if unsafe {
-        WinHttpSendRequest(
-            request.0,
-            headers_pointer,
-            headers_length,
-            optional.cast_mut(),
-            optional_len,
-            total_len,
-            0,
-        )
-    } == 0
-    {
-        return Err(last_error("WinHttpSendRequest"));
-    }
-    if unsafe { WinHttpReceiveResponse(request.0, ptr::null_mut()) } == 0 {
-        return Err(last_error("WinHttpReceiveResponse"));
-    }
-
-    let status = http_status(&request)?;
-    if status != 200 {
-        return Ok(status);
-    }
-
-    let mut bytes_written = 0_usize;
-    let mut buffer = [0_u8; NETWORK_BUFFER_BYTES];
-    loop {
+    for _ in 0..=MAX_REDIRECTS {
         if is_cancelled(cancelled) {
             return Err("update cancelled".to_owned());
         }
-        let mut available = 0_u32;
-        if unsafe { WinHttpQueryDataAvailable(request.0, &mut available) } == 0 {
-            return Err(last_error("WinHttpQueryDataAvailable"));
-        }
-        if available == 0 {
-            break;
-        }
 
-        let requested = available.min(NETWORK_BUFFER_BYTES as u32);
-        let mut bytes_read = 0_u32;
+        let agent = wide(&format!("RunDog/{}", env!("CARGO_PKG_VERSION")));
+        let session = HttpHandle::new("WinHttpOpen", unsafe {
+            WinHttpOpen(
+                agent.as_ptr(),
+                WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                ptr::null(),
+                ptr::null(),
+                0,
+            )
+        })?;
         if unsafe {
-            WinHttpReadData(
-                request.0,
-                buffer.as_mut_ptr().cast::<c_void>(),
-                requested,
-                &mut bytes_read,
+            WinHttpSetTimeouts(
+                session.0,
+                NETWORK_TIMEOUT_MS,
+                NETWORK_TIMEOUT_MS,
+                NETWORK_TIMEOUT_MS,
+                NETWORK_RECEIVE_TIMEOUT_MS,
             )
         } == 0
         {
-            return Err(last_error("WinHttpReadData"));
+            return Err(last_error("WinHttpSetTimeouts"));
         }
-        if bytes_read == 0 {
-            return Err("WinHttpReadData returned an empty non-terminal chunk".to_owned());
+        apply_tls12_plus(&session)?;
+
+        let host_wide = wide(&host);
+        let connection = HttpHandle::new("WinHttpConnect", unsafe {
+            WinHttpConnect(session.0, host_wide.as_ptr(), 443, 0)
+        })?;
+        let verb_wide = wide(&verb);
+        let path_wide = wide(&path);
+        let request = HttpHandle::new("WinHttpOpenRequest", unsafe {
+            WinHttpOpenRequest(
+                connection.0,
+                verb_wide.as_ptr(),
+                path_wide.as_ptr(),
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                WINHTTP_FLAG_SECURE,
+            )
+        })?;
+        disable_automatic_redirects(&request)?;
+        let headers_wide = wide(&headers);
+        let (headers_pointer, headers_length) = if headers.is_empty() {
+            (ptr::null(), 0)
+        } else {
+            (headers_wide.as_ptr(), (headers_wide.len() - 1) as u32)
+        };
+        let (optional, optional_len, total_len) = match payload.as_deref() {
+            Some(bytes) if !bytes.is_empty() => (
+                bytes.as_ptr().cast::<c_void>(),
+                bytes.len() as u32,
+                bytes.len() as u32,
+            ),
+            _ => (ptr::null(), 0, 0),
+        };
+        if unsafe {
+            WinHttpSendRequest(
+                request.0,
+                headers_pointer,
+                headers_length,
+                optional.cast_mut(),
+                optional_len,
+                total_len,
+                0,
+            )
+        } == 0
+        {
+            return Err(last_error("WinHttpSendRequest"));
         }
-        let bytes_read = bytes_read as usize;
-        if bytes_read > maximum_bytes.saturating_sub(bytes_written) {
-            return Err("HTTP response exceeded its size limit".to_owned());
+        if unsafe { WinHttpReceiveResponse(request.0, ptr::null_mut()) } == 0 {
+            return Err(last_error("WinHttpReceiveResponse"));
         }
-        writer
-            .write_all(&buffer[..bytes_read])
-            .map_err(|error| error.to_string())?;
-        bytes_written += bytes_read;
+
+        let status = http_status(&request)?;
+        if is_redirect_status(status) {
+            if policy != RedirectPolicy::GitHubAssets {
+                return Err("HTTPS redirect refused for this host".to_owned());
+            }
+            let location = response_location(&request)?;
+            let (next_host, next_path) = parse_https_location(&location, &host)
+                .ok_or_else(|| "redirect Location is not a valid HTTPS URL".to_owned())?;
+            if !is_github_family_host(&next_host) {
+                return Err("redirect left the GitHub download allowlist".to_owned());
+            }
+            if !next_host.eq_ignore_ascii_case(&host) {
+                headers.clear();
+            }
+            if status == 303 {
+                verb = "GET".to_owned();
+                payload = None;
+            }
+            host = next_host;
+            path = next_path;
+            continue;
+        }
+        if status != 200 {
+            return Ok(status);
+        }
+
+        let mut bytes_written = 0_usize;
+        let mut buffer = [0_u8; NETWORK_BUFFER_BYTES];
+        loop {
+            if is_cancelled(cancelled) {
+                return Err("update cancelled".to_owned());
+            }
+            let mut available = 0_u32;
+            if unsafe { WinHttpQueryDataAvailable(request.0, &mut available) } == 0 {
+                return Err(last_error("WinHttpQueryDataAvailable"));
+            }
+            if available == 0 {
+                break;
+            }
+
+            let requested = available.min(NETWORK_BUFFER_BYTES as u32);
+            let mut bytes_read = 0_u32;
+            if unsafe {
+                WinHttpReadData(
+                    request.0,
+                    buffer.as_mut_ptr().cast::<c_void>(),
+                    requested,
+                    &mut bytes_read,
+                )
+            } == 0
+            {
+                return Err(last_error("WinHttpReadData"));
+            }
+            if bytes_read == 0 {
+                return Err("WinHttpReadData returned an empty non-terminal chunk".to_owned());
+            }
+            let bytes_read = bytes_read as usize;
+            if bytes_read > maximum_bytes.saturating_sub(bytes_written) {
+                return Err("HTTP response exceeded its size limit".to_owned());
+            }
+            writer
+                .write_all(&buffer[..bytes_read])
+                .map_err(|error| error.to_string())?;
+            bytes_written += bytes_read;
+        }
+
+        return Ok(status);
     }
 
-    Ok(status)
+    Err("HTTPS redirect limit exceeded".to_owned())
+}
+
+fn apply_tls12_plus(session: &HttpHandle) -> Result<(), String> {
+    let mut protocols = TLS_PROTOCOLS;
+    if unsafe {
+        WinHttpSetOption(
+            session.0,
+            WINHTTP_OPTION_SECURE_PROTOCOLS,
+            (&raw mut protocols).cast::<c_void>(),
+            std::mem::size_of_val(&protocols) as u32,
+        )
+    } == 0
+    {
+        protocols = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2;
+        if unsafe {
+            WinHttpSetOption(
+                session.0,
+                WINHTTP_OPTION_SECURE_PROTOCOLS,
+                (&raw mut protocols).cast::<c_void>(),
+                std::mem::size_of_val(&protocols) as u32,
+            )
+        } == 0
+        {
+            return Err(last_error("WinHttpSetOption(SECURE_PROTOCOLS)"));
+        }
+    }
+    Ok(())
+}
+
+fn disable_automatic_redirects(request: &HttpHandle) -> Result<(), String> {
+    let mut disable = WINHTTP_DISABLE_REDIRECTS;
+    if unsafe {
+        WinHttpSetOption(
+            request.0,
+            WINHTTP_OPTION_DISABLE_FEATURE,
+            (&raw mut disable).cast::<c_void>(),
+            std::mem::size_of_val(&disable) as u32,
+        )
+    } == 0
+    {
+        return Err(last_error("WinHttpSetOption(DISABLE_REDIRECTS)"));
+    }
+    Ok(())
+}
+
+fn response_location(request: &HttpHandle) -> Result<String, String> {
+    let mut buffer = [0_u16; 2_048];
+    let mut size = (buffer.len() * 2) as u32;
+    let mut index = 0_u32;
+    if unsafe {
+        WinHttpQueryHeaders(
+            request.0,
+            WINHTTP_QUERY_LOCATION,
+            ptr::null(),
+            buffer.as_mut_ptr().cast::<c_void>(),
+            &mut size,
+            &mut index,
+        )
+    } == 0
+    {
+        return Err(last_error("WinHttpQueryHeaders(LOCATION)"));
+    }
+    let units = (size as usize) / 2;
+    let terminator = buffer[..units.min(buffer.len())]
+        .iter()
+        .position(|unit| *unit == 0)
+        .unwrap_or(units.min(buffer.len()));
+    String::from_utf16(&buffer[..terminator])
+        .map_err(|_| "Location header is not UTF-16".to_owned())
 }
 
 fn is_cancelled(cancelled: Option<&AtomicBool>) -> bool {
@@ -723,8 +882,8 @@ mod tests {
     use crate::update::{UpdateCandidate, Version};
 
     use super::{
-        begin_check, is_cancelled, latest_release_body_is_available, sha256_reader, GitHubRelease,
-        UpdateState, INNO_SILENT_PARAMETERS,
+        begin_check, is_cancelled, is_github_family_host, latest_release_body_is_available,
+        parse_https_location, sha256_reader, GitHubRelease, UpdateState, INNO_SILENT_PARAMETERS,
     };
 
     fn candidate() -> UpdateCandidate {
@@ -838,5 +997,37 @@ mod tests {
         assert_eq!(latest_release_body_is_available(404), Ok(false));
         assert_eq!(latest_release_body_is_available(401), Err(()));
         assert_eq!(latest_release_body_is_available(500), Err(()));
+    }
+
+    #[test]
+    fn c2_github_redirect_parser_accepts_https_cdn_and_rejects_http_or_credentials() {
+        assert_eq!(
+            parse_https_location(
+                "https://objects.githubusercontent.com/github-production-release-asset/RunDog-Setup-x64.exe",
+                "github.com",
+            ),
+            Some((
+                "objects.githubusercontent.com".to_owned(),
+                "/github-production-release-asset/RunDog-Setup-x64.exe".to_owned()
+            ))
+        );
+        assert_eq!(
+            parse_https_location(
+                "/releases/download/v1.2.4/RunDog-Setup-x64.exe",
+                "github.com"
+            ),
+            Some((
+                "github.com".to_owned(),
+                "/releases/download/v1.2.4/RunDog-Setup-x64.exe".to_owned()
+            ))
+        );
+        assert!(parse_https_location("http://github.com/evil", "github.com").is_none());
+        assert!(parse_https_location("https://evil@github.com/asset", "github.com").is_none());
+        assert!(parse_https_location("https://example.invalid/asset", "github.com").is_some());
+        assert!(!is_github_family_host("example.invalid"));
+        assert!(is_github_family_host(
+            "release-assets.githubusercontent.com"
+        ));
+        assert!(!is_github_family_host("githubusercontent.com.evil.example"));
     }
 }

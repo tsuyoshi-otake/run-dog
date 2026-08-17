@@ -46,6 +46,6 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; Flags: unchecked
 
 [Run]
 ; Always start the resident application after installation, including a silent
-; in-app upgrade. The updater tells the existing instance to close only after
-; ShellExecute has successfully started Setup.
+; in-app upgrade. The updater starts Setup with CreateProcess after SHA-256
+; verification, then asks the existing instance to close.
 Filename: "{app}\{#AppExeName}"; Flags: nowait
