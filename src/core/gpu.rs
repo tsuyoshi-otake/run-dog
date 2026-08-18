@@ -59,6 +59,32 @@ impl GpuStatus {
     pub const fn has_shared(self) -> bool {
         self.shared_budget_bytes > 0
     }
+
+    #[must_use]
+    pub const fn in_use_bytes(self) -> u64 {
+        self.dedicated_usage_bytes
+            .saturating_add(self.shared_usage_bytes)
+    }
+
+    #[must_use]
+    pub const fn available_bytes(self) -> Option<u64> {
+        let dedicated = remaining(self.dedicated_usage_bytes, self.dedicated_budget_bytes);
+        let shared = remaining(self.shared_usage_bytes, self.shared_budget_bytes);
+        match (dedicated, shared) {
+            (None, None) => None,
+            (Some(dedicated), Some(shared)) => Some(dedicated.saturating_add(shared)),
+            (Some(value), None) | (None, Some(value)) => Some(value),
+        }
+    }
+}
+
+#[must_use]
+const fn remaining(used: u64, budget: u64) -> Option<u64> {
+    if budget == 0 {
+        None
+    } else {
+        Some(budget.saturating_sub(used))
+    }
 }
 
 #[must_use]
@@ -81,6 +107,8 @@ mod tests {
         assert_eq!(empty.dedicated_percent(), None);
         assert_eq!(empty.shared_percent(), None);
         assert_eq!(empty.utilization_percent(), None);
+        assert_eq!(empty.available_bytes(), None);
+        assert_eq!(empty.in_use_bytes(), 0);
         assert!(!empty.has_dedicated());
         assert!(!empty.has_shared());
 
@@ -92,7 +120,12 @@ mod tests {
 
         let shared = GpuStatus::new(0, 0, 16, 4);
         assert_eq!(shared.shared_percent(), Some(25.0));
+        assert_eq!(shared.available_bytes(), Some(12));
+        assert_eq!(shared.in_use_bytes(), 4);
         assert!(shared.has_shared());
+
+        let both = GpuStatus::new(8, 2, 16, 4);
+        assert_eq!(both.available_bytes(), Some(18));
 
         assert_eq!(GpuStatus::new(8, 9, 0, 0).dedicated_percent(), Some(100.0));
         assert_eq!(

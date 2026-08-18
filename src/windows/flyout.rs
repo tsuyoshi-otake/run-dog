@@ -48,7 +48,8 @@ const CLASS_NAME: &str = "SystemExe.RunDog.HoverFlyout";
 const ICON_ID: u32 = 1;
 const MA_NOACTIVATE: LRESULT = 3;
 const CARD_WIDTH: i32 = 320;
-const CARD_HEIGHT: i32 = 344;
+const CARD_HEIGHT: i32 = 273;
+const CARD_GPU_BLOCK_HEIGHT: i32 = 86;
 const CARD_USAGE_BLOCK_HEIGHT: i32 = 110;
 
 static REGISTER_CLASS: Once = Once::new();
@@ -96,7 +97,8 @@ impl HoverFlyout {
         }
         let dpi = window_dpi(self.hwnd);
         let usage = self.state.as_ref().map(|state| state.usage);
-        let (width, height) = window_size(dpi, usage);
+        let show_gpu = self.state.as_ref().is_some_and(|state| state.gpu.is_some());
+        let (width, height) = window_size(dpi, usage, show_gpu);
         let (x, y) = position_near_icon(self.owner, width, height);
         let _ = unsafe {
             SetWindowPos(
@@ -246,11 +248,12 @@ fn position_near_icon(owner: HWND, width: i32, height: i32) -> (i32, i32) {
     (x.max(0), y.max(0))
 }
 
-fn window_size(dpi: i32, usage: Option<UsageSnapshot>) -> (i32, i32) {
+fn window_size(dpi: i32, usage: Option<UsageSnapshot>, show_gpu: bool) -> (i32, i32) {
     let blocks = usage.map(visible_usage_count).unwrap_or(0) as i32;
+    let gpu = i32::from(show_gpu) * CARD_GPU_BLOCK_HEIGHT;
     (
         px(CARD_WIDTH, dpi),
-        px(CARD_HEIGHT + CARD_USAGE_BLOCK_HEIGHT * blocks, dpi),
+        px(CARD_HEIGHT + gpu + CARD_USAGE_BLOCK_HEIGHT * blocks, dpi),
     )
 }
 
@@ -444,25 +447,27 @@ fn paint(hwnd: HWND) {
     draw_separator(hdc, content_left, content_right, top, palette.separator);
     top += px(9, dpi);
 
-    let gpu_bottom = top + layout.title_h + layout.detail_h * 2 + px(6, dpi);
-    paint_gpu_row(
-        hdc,
-        RECT {
-            left: client.left + layout.pad,
-            top,
-            right: content_right,
-            bottom: gpu_bottom,
-        },
-        content_left,
-        state,
-        &palette,
-        &layout,
-        title_font,
-        detail_font,
-    );
-    top = gpu_bottom + px(8, dpi);
-    draw_separator(hdc, content_left, content_right, top, palette.separator);
-    top += px(9, dpi);
+    if state.gpu.is_some() {
+        let gpu_bottom = top + layout.title_h + layout.detail_h * 3 + px(6, dpi);
+        paint_gpu_row(
+            hdc,
+            RECT {
+                left: client.left + layout.pad,
+                top,
+                right: content_right,
+                bottom: gpu_bottom,
+            },
+            content_left,
+            state,
+            &palette,
+            &layout,
+            title_font,
+            detail_font,
+        );
+        top = gpu_bottom + px(8, dpi);
+        draw_separator(hdc, content_left, content_right, top, palette.separator);
+        top += px(9, dpi);
+    }
 
     let storage_bottom = top + layout.title_h + layout.detail_h + layout.bar_h + px(10, dpi);
     paint_storage_row(
@@ -1106,10 +1111,14 @@ fn memory_details(memory: Option<MemoryStatus>) -> [String; 3] {
     ]
 }
 
-fn gpu_details(gpu: Option<GpuStatus>) -> [String; 2] {
+fn gpu_details(gpu: Option<GpuStatus>) -> [String; 3] {
     [
         format!("Dedicated: {}", format_gpu_capacity(gpu, true)),
         format!("Shared: {}", format_gpu_capacity(gpu, false)),
+        format!(
+            "Available: {}",
+            format_bytes_or_unknown(gpu.and_then(GpuStatus::available_bytes))
+        ),
     ]
 }
 
@@ -1517,8 +1526,9 @@ fn wide(value: &str) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::{
-        format_bytes, format_gpu_capacity, format_percent, format_self_usage, visible_usage_count,
-        window_size, CARD_HEIGHT, CARD_USAGE_BLOCK_HEIGHT, CARD_WIDTH,
+        format_bytes, format_gpu_capacity, format_percent, format_self_usage, gpu_details,
+        visible_usage_count, window_size, CARD_GPU_BLOCK_HEIGHT, CARD_HEIGHT,
+        CARD_USAGE_BLOCK_HEIGHT, CARD_WIDTH,
     };
     use crate::core::{CpuLoad, ProcessStatus, ProviderUsage, UsageSnapshot};
 
@@ -1562,6 +1572,19 @@ mod tests {
             ),
             "795.4 MB / --"
         );
+        assert_eq!(
+            gpu_details(Some(crate::core::GpuStatus::new(
+                8 << 30,
+                2 << 30,
+                16 << 30,
+                1 << 30
+            ))),
+            [
+                "Dedicated: 2.0 GB / 8.0 GB".to_owned(),
+                "Shared: 1.0 GB / 16.0 GB".to_owned(),
+                "Available: 21.0 GB".to_owned(),
+            ]
+        );
         assert_eq!(format_self_usage(None), "--.-% · --");
         assert_eq!(
             format_self_usage(Some(ProcessStatus::new(5 * 1024 * 1024, None))),
@@ -1580,8 +1603,12 @@ mod tests {
     fn component_flyout_hides_providers_without_month_activity() {
         assert_eq!(visible_usage_count(UsageSnapshot::default()), 0);
         assert_eq!(
-            window_size(96, Some(UsageSnapshot::default())),
+            window_size(96, Some(UsageSnapshot::default()), false),
             (CARD_WIDTH, CARD_HEIGHT)
+        );
+        assert_eq!(
+            window_size(96, Some(UsageSnapshot::default()), true),
+            (CARD_WIDTH, CARD_HEIGHT + CARD_GPU_BLOCK_HEIGHT)
         );
 
         let usage = UsageSnapshot {
@@ -1593,7 +1620,7 @@ mod tests {
         };
         assert_eq!(visible_usage_count(usage), 1);
         assert_eq!(
-            window_size(96, Some(usage)),
+            window_size(96, Some(usage), false),
             (CARD_WIDTH, CARD_HEIGHT + CARD_USAGE_BLOCK_HEIGHT)
         );
 
@@ -1609,7 +1636,7 @@ mod tests {
         };
         assert_eq!(visible_usage_count(usage), 2);
         assert_eq!(
-            window_size(96, Some(usage)),
+            window_size(96, Some(usage), false),
             (CARD_WIDTH, CARD_HEIGHT + CARD_USAGE_BLOCK_HEIGHT * 2)
         );
     }
