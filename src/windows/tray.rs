@@ -353,9 +353,11 @@ impl TrayAdapter {
             tooltip: String::new(),
             cpu_sparkline: crate::core::Sparkline::new(),
             memory_sparkline: crate::core::Sparkline::new(),
+            gpu_sparkline: crate::core::Sparkline::new(),
             cpu_breakdown: None,
             memory: None,
             storage: None,
+            gpu: None,
             usage: crate::core::UsageSnapshot::default(),
             process: None,
         });
@@ -412,9 +414,11 @@ impl TrayAdapter {
                 || previous.tooltip != icon.tooltip
                 || previous.cpu_sparkline != icon.cpu_sparkline
                 || previous.memory_sparkline != icon.memory_sparkline
+                || previous.gpu_sparkline != icon.gpu_sparkline
                 || previous.cpu_breakdown != icon.cpu_breakdown
                 || previous.memory != icon.memory
                 || previous.storage != icon.storage
+                || previous.gpu != icon.gpu
                 || previous.usage != icon.usage
                 || previous.process != icon.process
         });

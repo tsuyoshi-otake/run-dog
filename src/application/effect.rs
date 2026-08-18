@@ -1,6 +1,6 @@
 use crate::core::{
-    AppSettings, CpuBreakdown, FpsLimit, MemoryStatus, ProcessStatus, ResolvedTheme, Sparkline,
-    StorageStatus, ThemePreference, UsageSnapshot,
+    AppSettings, CpuBreakdown, FpsLimit, GpuStatus, MemoryStatus, ProcessStatus, ResolvedTheme,
+    Sparkline, StorageStatus, ThemePreference, UsageSnapshot,
 };
 
 /// Timer identities are stable values, so the Windows adapter never needs to
@@ -19,9 +19,11 @@ pub struct TrayIcon {
     pub tooltip: String,
     pub cpu_sparkline: Sparkline,
     pub memory_sparkline: Sparkline,
+    pub gpu_sparkline: Sparkline,
     pub cpu_breakdown: Option<CpuBreakdown>,
     pub memory: Option<MemoryStatus>,
     pub storage: Option<StorageStatus>,
+    pub gpu: Option<GpuStatus>,
     pub usage: UsageSnapshot,
     pub process: Option<ProcessStatus>,
 }

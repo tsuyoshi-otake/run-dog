@@ -4,6 +4,7 @@
 mod brand;
 mod cpu;
 mod flyout;
+mod gpu;
 mod icons;
 mod memory;
 mod notify_icon;
@@ -169,6 +170,7 @@ fn message_loop(_hwnd: HWND) -> Result<(), String> {
 struct WindowContext {
     app: App,
     cpu: WindowsCpuSource,
+    gpu: self::gpu::GpuSampler,
     process: self::process::WindowsProcessSource,
     platform: WindowsPlatform,
     updater: UpdateController,
@@ -193,6 +195,7 @@ impl WindowContext {
                 system_theme,
             ),
             cpu: WindowsCpuSource,
+            gpu: self::gpu::GpuSampler::new(),
             process: self::process::WindowsProcessSource::default(),
             platform: WindowsPlatform::new(icons, settings, store),
             updater: UpdateController::new(),
@@ -429,10 +432,12 @@ unsafe extern "system" fn window_proc(
                     crate::application::CpuSource::read_system_times(&mut context.cpu)
                 {
                     let process = context.process.sample(times);
+                    let gpu = context.gpu.sample();
                     context.dispatch(Event::CpuSample {
                         times,
                         memory: self::memory::read_memory_status(),
                         storage: self::storage::read_storage_status(),
+                        gpu,
                         process,
                     });
                 }

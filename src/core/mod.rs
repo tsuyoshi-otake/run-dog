@@ -2,6 +2,7 @@
 
 mod animation;
 mod cpu;
+mod gpu;
 mod memory;
 mod settings;
 mod sparkline;
@@ -14,6 +15,7 @@ pub use cpu::{
     breakdown_between, process_share, usage_between, CpuBreakdown, CpuLoad, CpuSampler,
     ProcessStatus, ProcessTimes, SystemTimes,
 };
+pub use gpu::GpuStatus;
 pub use memory::MemoryStatus;
 pub use settings::{AppSettings, PendingJournal, SettingsRecord};
 pub use sparkline::{Sparkline, SPARKLINE_CAPACITY};

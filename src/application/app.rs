@@ -1,5 +1,5 @@
 use crate::core::{
-    AnimationController, AppSettings, CpuBreakdown, CpuSampler, FpsLimit, FrameCursor,
+    AnimationController, AppSettings, CpuBreakdown, CpuSampler, FpsLimit, FrameCursor, GpuStatus,
     MemoryStatus, ProcessStatus, ResolvedTheme, Sparkline, StorageStatus, SystemTimes,
     ThemePreference, UsageSnapshot,
 };
@@ -34,8 +34,10 @@ pub struct App {
     frames: FrameCursor,
     memory: Option<MemoryStatus>,
     storage: Option<StorageStatus>,
+    gpu: Option<GpuStatus>,
     cpu_sparkline: Sparkline,
     memory_sparkline: Sparkline,
+    gpu_sparkline: Sparkline,
     usage: UsageSnapshot,
     process: Option<ProcessStatus>,
     tooltip: String,
@@ -57,8 +59,10 @@ pub struct AppSnapshot {
     pub tooltip: String,
     pub cpu_sparkline: Sparkline,
     pub memory_sparkline: Sparkline,
+    pub gpu_sparkline: Sparkline,
     pub cpu_breakdown: Option<CpuBreakdown>,
     pub storage: Option<StorageStatus>,
+    pub gpu: Option<GpuStatus>,
     pub usage: UsageSnapshot,
     pub process: Option<ProcessStatus>,
     pub running: bool,
@@ -101,11 +105,13 @@ impl App {
                 .expect("RunDog embeds a fixed non-empty frame set"),
             memory: None,
             storage: None,
+            gpu: None,
             cpu_sparkline: Sparkline::new(),
             memory_sparkline: Sparkline::new(),
+            gpu_sparkline: Sparkline::new(),
             usage: UsageSnapshot::default(),
             process: None,
-            tooltip: format_tooltip(None, None),
+            tooltip: format_tooltip(None, None, None),
             running: false,
             pending_commit: None,
             clock_millis: 0,
@@ -129,8 +135,10 @@ impl App {
             tooltip: self.tooltip.clone(),
             cpu_sparkline: self.cpu_sparkline,
             memory_sparkline: self.memory_sparkline,
+            gpu_sparkline: self.gpu_sparkline,
             cpu_breakdown: self.sampler.latest_breakdown(),
             storage: self.storage,
+            gpu: self.gpu,
             usage: self.usage,
             process: self.process,
             running: self.running,
@@ -174,8 +182,9 @@ impl App {
                 times,
                 memory,
                 storage,
+                gpu,
                 process,
-            } => self.handle_cpu_sample(times, memory, storage, process),
+            } => self.handle_cpu_sample(times, memory, storage, gpu, process),
             Event::AnimationTimerElapsed => {
                 self.frames.advance();
                 vec![Effect::ModifyTray(self.tray_icon())]
@@ -214,6 +223,7 @@ impl App {
         sample: SystemTimes,
         memory: Option<MemoryStatus>,
         storage: Option<StorageStatus>,
+        gpu: Option<GpuStatus>,
         process: Option<ProcessStatus>,
     ) -> Vec<Effect> {
         let cpu_load = self.sampler.push(sample);
@@ -222,6 +232,9 @@ impl App {
         }
         if storage.is_some_and(|status| status.used_percent().is_some()) {
             self.storage = storage;
+        }
+        if gpu.is_some() {
+            self.gpu = gpu;
         }
         let process_changed = process.is_some_and(|status| self.process != Some(status));
         if let Some(status) = process {
@@ -238,10 +251,16 @@ impl App {
             if let Some(percent) = self.memory.and_then(MemoryStatus::usage_percent) {
                 self.memory_sparkline.push(percent);
             }
+            if let Some(percent) = self.gpu.and_then(GpuStatus::utilization_percent) {
+                self.gpu_sparkline.push(percent);
+            }
         }
 
-        let next_tooltip =
-            format_tooltip(self.sampler.latest().map(|load| load.value()), self.memory);
+        let next_tooltip = format_tooltip(
+            self.sampler.latest().map(|load| load.value()),
+            self.memory,
+            self.gpu,
+        );
         let tooltip_changed = self.tooltip != next_tooltip;
         self.tooltip = next_tooltip;
 
@@ -415,9 +434,11 @@ impl App {
             tooltip: self.tooltip.clone(),
             cpu_sparkline: self.cpu_sparkline,
             memory_sparkline: self.memory_sparkline,
+            gpu_sparkline: self.gpu_sparkline,
             cpu_breakdown: self.sampler.latest_breakdown(),
             memory: self.memory,
             storage: self.storage,
+            gpu: self.gpu,
             usage: self.usage,
             process: self.process,
         }
@@ -431,11 +452,16 @@ fn format_percent(value: Option<f32>) -> String {
     }
 }
 
-fn format_tooltip(cpu_percent: Option<f32>, memory: Option<MemoryStatus>) -> String {
+fn format_tooltip(
+    cpu_percent: Option<f32>,
+    memory: Option<MemoryStatus>,
+    gpu: Option<GpuStatus>,
+) -> String {
     format!(
-        "CPU: {}\nMemory: {}",
+        "CPU: {}\nMemory: {}\nGPU: {}",
         format_percent(cpu_percent),
-        format_percent(memory.and_then(MemoryStatus::usage_percent))
+        format_percent(memory.and_then(MemoryStatus::usage_percent)),
+        format_percent(gpu.and_then(GpuStatus::utilization_percent))
     )
 }
 
@@ -527,30 +553,48 @@ mod tests {
     #[test]
     fn component_tooltip_shows_memory_percent_independently_of_the_first_cpu_sample() {
         let mut app = started_app();
-        assert_eq!(app.snapshot().tooltip, "CPU: --.-%\nMemory: --.-%");
+        assert_eq!(
+            app.snapshot().tooltip,
+            "CPU: --.-%\nMemory: --.-%\nGPU: --.-%"
+        );
 
         let effects = app.dispatch(Event::CpuSample {
             times: SystemTimes::new(0, 0, 0),
             memory: Some(MemoryStatus::new(16_u64 << 30, 8_u64 << 30)),
             storage: None,
+            gpu: Some(
+                crate::core::GpuStatus::new(8_u64 << 30, 2_u64 << 30, 16_u64 << 30, 1_u64 << 30)
+                    .with_utilization(Some(12.5)),
+            ),
             process: None,
         });
         assert!(effects.contains(&Effect::ModifyTray(app.tray_icon())));
-        assert_eq!(app.snapshot().tooltip, "CPU: --.-%\nMemory: 50.0%");
+        assert_eq!(
+            app.snapshot().tooltip,
+            "CPU: --.-%\nMemory: 50.0%\nGPU: 12.5%"
+        );
         assert_eq!(app.snapshot().cpu_sparkline.len(), 0);
 
         let _ = app.dispatch(Event::CpuSample {
             times: SystemTimes::new(0, 100, 0),
             memory: Some(MemoryStatus::new(16_u64 << 30, 4_u64 << 30)),
             storage: Some(crate::core::StorageStatus::new(100, 25)),
+            gpu: Some(
+                crate::core::GpuStatus::new(8_u64 << 30, 4_u64 << 30, 16_u64 << 30, 2_u64 << 30)
+                    .with_utilization(Some(40.0)),
+            ),
             process: Some(crate::core::ProcessStatus::new(
                 5 * 1024 * 1024,
                 Some(crate::core::CpuLoad::percent(0.4)),
             )),
         });
-        assert_eq!(app.snapshot().tooltip, "CPU: 100.0%\nMemory: 75.0%");
+        assert_eq!(
+            app.snapshot().tooltip,
+            "CPU: 100.0%\nMemory: 75.0%\nGPU: 40.0%"
+        );
         assert_eq!(app.snapshot().cpu_sparkline.len(), 1);
         assert_eq!(app.snapshot().memory_sparkline.len(), 1);
+        assert_eq!(app.snapshot().gpu_sparkline.len(), 1);
         assert_eq!(
             app.snapshot()
                 .cpu_breakdown
@@ -573,11 +617,16 @@ mod tests {
             times: SystemTimes::new(0, 200, 0),
             memory: Some(MemoryStatus::new(0, 0)),
             storage: Some(crate::core::StorageStatus::new(0, 0)),
+            gpu: None,
             process: None,
         });
-        assert_eq!(app.snapshot().tooltip, "CPU: 100.0%\nMemory: 75.0%");
+        assert_eq!(
+            app.snapshot().tooltip,
+            "CPU: 100.0%\nMemory: 75.0%\nGPU: 40.0%"
+        );
         assert_eq!(app.snapshot().cpu_sparkline.len(), 2);
         assert_eq!(app.snapshot().memory_sparkline.len(), 2);
+        assert_eq!(app.snapshot().gpu_sparkline.len(), 2);
         assert!(effects.contains(&Effect::ModifyTray(app.tray_icon())));
     }
 
