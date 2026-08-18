@@ -303,7 +303,7 @@ fn integration_boot_uses_only_fake_ports_and_configures_the_two_timers() {
     assert_eq!(rig.platform.timer_interval(TimerKind::Animation), Some(200));
     assert_eq!(
         rig.platform.tray.as_ref().map(|tray| tray.tooltip.as_str()),
-        Some("CPU: --.-%\nMemory: --.-%")
+        Some("CPU: --.-%\nMemory: --.-%\nGPU: --.-%")
     );
     assert_eq!(rig.app.snapshot().frame, 0);
 }
@@ -335,14 +335,14 @@ fn integration_cpu_sampling_changes_speed_without_rearming_an_unchanged_timer() 
     assert_eq!(rig.clock.now_millis(), 2_000);
     assert_eq!(
         rig.platform.tray.as_ref().map(|tray| tray.tooltip.as_str()),
-        Some("CPU: --.-%\nMemory: 50.0%")
+        Some("CPU: --.-%\nMemory: 50.0%\nGPU: --.-%")
     );
 
     rig.cpu_tick();
     assert_eq!(rig.platform.timer_interval(TimerKind::Animation), Some(50));
     assert_eq!(
         rig.platform.tray.as_ref().map(|tray| tray.tooltip.as_str()),
-        Some("CPU: 100.0%\nMemory: 50.0%")
+        Some("CPU: 100.0%\nMemory: 50.0%\nGPU: --.-%")
     );
     let rearm_count = rig
         .platform

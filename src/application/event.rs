@@ -1,6 +1,6 @@
 use crate::core::{
-    AppSettings, FpsLimit, MemoryStatus, ProcessStatus, ResolvedTheme, StorageStatus, SystemTimes,
-    ThemePreference, UsageSnapshot,
+    AppSettings, FpsLimit, GpuStatus, MemoryStatus, ProcessStatus, ResolvedTheme, StorageStatus,
+    SystemTimes, ThemePreference, UsageSnapshot,
 };
 
 use super::commit_protocol::CommitStatus;
@@ -12,6 +12,7 @@ pub enum Event {
         times: SystemTimes,
         memory: Option<MemoryStatus>,
         storage: Option<StorageStatus>,
+        gpu: Option<GpuStatus>,
         process: Option<ProcessStatus>,
     },
     AnimationTimerElapsed,
@@ -38,6 +39,7 @@ impl Event {
             times,
             memory: None,
             storage: None,
+            gpu: None,
             process: None,
         }
     }

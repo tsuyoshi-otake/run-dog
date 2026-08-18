@@ -39,7 +39,7 @@ use windows_sys::{
 use crate::{
     application::TrayIcon,
     core::{
-        local_hms, local_ymd, LimitWindow, MemoryStatus, ProcessStatus, ProviderUsage,
+        local_hms, local_ymd, GpuStatus, LimitWindow, MemoryStatus, ProcessStatus, ProviderUsage,
         ResolvedTheme, Sparkline, StorageStatus, UsageSnapshot, SPARKLINE_CAPACITY,
     },
 };
@@ -48,7 +48,7 @@ const CLASS_NAME: &str = "SystemExe.RunDog.HoverFlyout";
 const ICON_ID: u32 = 1;
 const MA_NOACTIVATE: LRESULT = 3;
 const CARD_WIDTH: i32 = 320;
-const CARD_HEIGHT: i32 = 272;
+const CARD_HEIGHT: i32 = 344;
 const CARD_USAGE_BLOCK_HEIGHT: i32 = 110;
 
 static REGISTER_CLASS: Once = Once::new();
@@ -444,6 +444,26 @@ fn paint(hwnd: HWND) {
     draw_separator(hdc, content_left, content_right, top, palette.separator);
     top += px(9, dpi);
 
+    let gpu_bottom = top + layout.title_h + layout.detail_h * 2 + px(6, dpi);
+    paint_gpu_row(
+        hdc,
+        RECT {
+            left: client.left + layout.pad,
+            top,
+            right: content_right,
+            bottom: gpu_bottom,
+        },
+        content_left,
+        state,
+        &palette,
+        &layout,
+        title_font,
+        detail_font,
+    );
+    top = gpu_bottom + px(8, dpi);
+    draw_separator(hdc, content_left, content_right, top, palette.separator);
+    top += px(9, dpi);
+
     let storage_bottom = top + layout.title_h + layout.detail_h + layout.bar_h + px(10, dpi);
     paint_storage_row(
         hdc,
@@ -660,6 +680,69 @@ fn paint_memory_row(
     let _ = unsafe { SetTextColor(hdc, palette.muted) };
     let mut detail_top = row.top + layout.title_h + px(2, layout.dpi);
     for line in memory_details(state.memory) {
+        draw_text(
+            hdc,
+            RECT {
+                left: content_left,
+                top: detail_top,
+                right: text_right,
+                bottom: detail_top + layout.detail_h,
+            },
+            &line,
+            0,
+        );
+        detail_top += layout.detail_h;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_gpu_row(
+    hdc: windows_sys::Win32::Graphics::Gdi::HDC,
+    row: RECT,
+    content_left: i32,
+    state: &TrayIcon,
+    palette: &Palette,
+    layout: &Layout,
+    title_font: windows_sys::Win32::Graphics::Gdi::HFONT,
+    detail_font: windows_sys::Win32::Graphics::Gdi::HFONT,
+) {
+    draw_gpu_icon(
+        hdc,
+        RECT {
+            left: row.left,
+            top: row.top + px(2, layout.dpi),
+            right: row.left + layout.icon,
+            bottom: row.top + px(2, layout.dpi) + layout.icon,
+        },
+        palette.text,
+        layout.dpi,
+    );
+
+    let spark = spark_rect(row, layout);
+    draw_area_sparkline(hdc, spark, state.gpu_sparkline, palette, layout.dpi);
+    let text_right = spark.left - px(10, layout.dpi);
+
+    select_font(hdc, title_font);
+    let _ = unsafe { SetTextColor(hdc, palette.text) };
+    draw_text(
+        hdc,
+        RECT {
+            left: content_left,
+            top: row.top,
+            right: text_right,
+            bottom: row.top + layout.title_h,
+        },
+        &format!(
+            "GPU: {}",
+            format_percent(state.gpu.and_then(GpuStatus::utilization_percent))
+        ),
+        0,
+    );
+
+    select_font(hdc, detail_font);
+    let _ = unsafe { SetTextColor(hdc, palette.muted) };
+    let mut detail_top = row.top + layout.title_h + px(2, layout.dpi);
+    for line in gpu_details(state.gpu) {
         draw_text(
             hdc,
             RECT {
@@ -1023,6 +1106,31 @@ fn memory_details(memory: Option<MemoryStatus>) -> [String; 3] {
     ]
 }
 
+fn gpu_details(gpu: Option<GpuStatus>) -> [String; 2] {
+    [
+        format!("Dedicated: {}", format_gpu_capacity(gpu, true)),
+        format!("Shared: {}", format_gpu_capacity(gpu, false)),
+    ]
+}
+
+fn format_gpu_capacity(gpu: Option<GpuStatus>, dedicated: bool) -> String {
+    let Some(status) = gpu else {
+        return "-- / --".to_owned();
+    };
+    let (used, total) = if dedicated {
+        (status.dedicated_usage_bytes, status.dedicated_budget_bytes)
+    } else {
+        (status.shared_usage_bytes, status.shared_budget_bytes)
+    };
+    if used == 0 && total == 0 {
+        "-- / --".to_owned()
+    } else if total == 0 {
+        format!("{} / --", format_bytes(used, 1))
+    } else {
+        format!("{} / {}", format_bytes(used, 1), format_bytes(total, 1))
+    }
+}
+
 fn storage_capacity(storage: Option<StorageStatus>) -> String {
     match storage.and_then(|status| status.used_bytes().map(|used| (used, status.total_bytes))) {
         Some((used, total)) => format!("{} / {}", format_bytes(used, 2), format_bytes(total, 2)),
@@ -1211,6 +1319,44 @@ fn draw_cpu_icon(
     stroke_line(hdc, body.right, mid_y, rect.right, mid_y, color, 1);
 }
 
+fn draw_gpu_icon(
+    hdc: windows_sys::Win32::Graphics::Gdi::HDC,
+    rect: RECT,
+    color: COLORREF,
+    dpi: i32,
+) {
+    let inset = px(3, dpi);
+    let body = RECT {
+        left: rect.left + inset,
+        top: rect.top + inset + px(1, dpi),
+        right: rect.right - inset,
+        bottom: rect.bottom - inset - px(1, dpi),
+    };
+    stroke_round_rect(hdc, body, color, px(2, dpi), 1);
+    let mid_x = (body.left + body.right) / 2;
+    let mid_y = (body.top + body.bottom) / 2;
+    stroke_line(
+        hdc,
+        body.left + px(3, dpi),
+        mid_y,
+        body.right - px(3, dpi),
+        mid_y,
+        color,
+        1,
+    );
+    stroke_line(
+        hdc,
+        mid_x,
+        body.top + px(2, dpi),
+        mid_x,
+        body.bottom - px(2, dpi),
+        color,
+        1,
+    );
+    stroke_line(hdc, rect.left, mid_y, body.left, mid_y, color, 1);
+    stroke_line(hdc, body.right, mid_y, rect.right, mid_y, color, 1);
+}
+
 fn draw_memory_icon(
     hdc: windows_sys::Win32::Graphics::Gdi::HDC,
     rect: RECT,
@@ -1371,8 +1517,8 @@ fn wide(value: &str) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::{
-        format_bytes, format_percent, format_self_usage, visible_usage_count, window_size,
-        CARD_HEIGHT, CARD_USAGE_BLOCK_HEIGHT, CARD_WIDTH,
+        format_bytes, format_gpu_capacity, format_percent, format_self_usage, visible_usage_count,
+        window_size, CARD_HEIGHT, CARD_USAGE_BLOCK_HEIGHT, CARD_WIDTH,
     };
     use crate::core::{CpuLoad, ProcessStatus, ProviderUsage, UsageSnapshot};
 
@@ -1382,6 +1528,40 @@ mod tests {
         assert_eq!(format_percent(Some(12.34)), "12.3%");
         assert_eq!(format_bytes(1536, 1), "1.5 KB");
         assert_eq!(format_bytes(3_221_225_472, 2), "3.00 GB");
+        assert_eq!(format_gpu_capacity(None, true), "-- / --");
+        assert_eq!(
+            format_gpu_capacity(
+                Some(crate::core::GpuStatus::new(
+                    8 << 30,
+                    2 << 30,
+                    16 << 30,
+                    1 << 30
+                )),
+                true
+            ),
+            "2.0 GB / 8.0 GB"
+        );
+        assert_eq!(
+            format_gpu_capacity(
+                Some(crate::core::GpuStatus::new(0, 0, 16 << 30, 4 << 30)),
+                true
+            ),
+            "-- / --"
+        );
+        assert_eq!(
+            format_gpu_capacity(
+                Some(crate::core::GpuStatus::new(0, 0, 16 << 30, 4 << 30)),
+                false
+            ),
+            "4.0 GB / 16.0 GB"
+        );
+        assert_eq!(
+            format_gpu_capacity(
+                Some(crate::core::GpuStatus::new(0, 0, 0, 834_043_904)),
+                false
+            ),
+            "795.4 MB / --"
+        );
         assert_eq!(format_self_usage(None), "--.-% · --");
         assert_eq!(
             format_self_usage(Some(ProcessStatus::new(5 * 1024 * 1024, None))),
