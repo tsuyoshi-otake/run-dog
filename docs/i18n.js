@@ -33,7 +33,7 @@ export const I18N = {
       },
       {
         title: "必要なメトリクスをカードで",
-        body: "CPU、メモリ、ストレージ。気になる情報を通知領域からすぐ確認できます。",
+        body: "CPU、メモリ、GPU、ストレージ。気になる情報を通知領域からすぐ確認できます。",
       },
       {
         title: "Claude と Codex も見守る",
@@ -89,7 +89,7 @@ export const I18N = {
     privacyTitle: "プライバシー",
     back: "RunDog に戻る",
     privacyBody: [
-      "RunDog はアカウントを作りません。CPU・メモリ・ストレージは Windows の API で端末内だけ読みます。設定はユーザーのレジストリに保存します。",
+      "RunDog はアカウントを作りません。CPU・メモリ・GPU・ストレージは Windows の API で端末内だけ読みます。設定はユーザーのレジストリに保存します。",
       "起動時に一度だけ、GitHub Releases へ新しい版があるか確認します。ダウンロードと導入は、メニューから明示したときだけです。",
       "Claude Code や Codex CLI を使っている場合、そのホームディレクトリのログと、すでに端末にある認証情報で各社の上限を問い合わせることがあります。トークンを第三者と共有することはありません。",
       "広告、解析、クラッシュ報告の SDK は入れていません。",
@@ -119,7 +119,7 @@ export const I18N = {
       },
       {
         title: "A compact system card",
-        body: "CPU, memory, and storage — keep an eye on what matters right from the notification area.",
+        body: "CPU, memory, GPU, and storage — keep an eye on what matters right from the notification area.",
       },
       {
         title: "Claude and Codex, too",
@@ -175,7 +175,7 @@ export const I18N = {
     privacyTitle: "Privacy",
     back: "Back to RunDog",
     privacyBody: [
-      "RunDog does not create an account. CPU, memory, and storage are read locally through Windows APIs. Settings live in the current user's registry.",
+      "RunDog does not create an account. CPU, memory, GPU, and storage are read locally through Windows APIs. Settings live in the current user's registry.",
       "At startup it checks GitHub Releases once for a newer build. Download and install happen only when you choose them from the menu.",
       "If you use Claude Code or Codex CLI, RunDog may read their local logs and query vendor limit APIs with credentials already on the machine. Tokens are never shared with third parties.",
       "There is no advertising, analytics, or crash-reporting SDK.",
@@ -204,7 +204,7 @@ export const I18N = {
       },
       {
         title: "卡片里的系统信息",
-        body: "CPU、内存、存储，从通知区域就能确认。",
+        body: "CPU、内存、GPU、存储，从通知区域就能确认。",
       },
       {
         title: "也照看 Claude 和 Codex",
@@ -260,7 +260,7 @@ export const I18N = {
     privacyTitle: "隐私",
     back: "返回 RunDog",
     privacyBody: [
-      "RunDog 不创建账户。CPU、内存和存储只通过 Windows API 在本机读取。设置保存在当前用户的注册表中。",
+      "RunDog 不创建账户。CPU、内存、GPU 和存储只通过 Windows API 在本机读取。设置保存在当前用户的注册表中。",
       "启动时只会向 GitHub Releases 检查一次是否有新版本。下载和安装仅在你从菜单明确选择时进行。",
       "如果使用 Claude Code 或 Codex CLI，可能会读取其主目录中的日志，并用本机已有的凭据查询厂商限额 API。令牌不会提供给第三方。",
       "不包含广告、分析或崩溃报告 SDK。",
@@ -289,7 +289,7 @@ export const I18N = {
       },
       {
         title: "필요한 지표를 카드로",
-        body: "CPU, 메모리, 저장소. 알림 영역에서 바로 확인할 수 있습니다.",
+        body: "CPU, 메모리, GPU, 저장소. 알림 영역에서 바로 확인할 수 있습니다.",
       },
       {
         title: "Claude와 Codex도 지켜봅니다",
@@ -345,7 +345,7 @@ export const I18N = {
     privacyTitle: "개인정보",
     back: "RunDog로 돌아가기",
     privacyBody: [
-      "RunDog는 계정을 만들지 않습니다. CPU·메모리·저장소는 Windows API로 기기 안에서만 읽습니다. 설정은 현재 사용자 레지스트리에 저장됩니다.",
+      "RunDog는 계정을 만들지 않습니다. CPU·메모리·GPU·저장소는 Windows API로 기기 안에서만 읽습니다. 설정은 현재 사용자 레지스트리에 저장됩니다.",
       "시작할 때 GitHub Releases에서 새 버전이 있는지 한 번만 확인합니다. 다운로드와 설치는 메뉴에서 명시적으로 선택할 때만 진행됩니다.",
       "Claude Code나 Codex CLI를 사용하는 경우 홈 디렉터리 로그와 이미 기기에 있는 자격 증명으로 공급업체 한도 API를 조회할 수 있습니다. 토큰을 제3자와 공유하지 않습니다.",
       "광고, 분석, 충돌 보고 SDK는 포함되어 있지 않습니다.",
@@ -375,7 +375,7 @@ export const I18N = {
       },
       {
         title: "Thông số hệ thống trên thẻ",
-        body: "CPU, bộ nhớ, dung lượng lưu trữ — xem ngay từ khay hệ thống.",
+        body: "CPU, bộ nhớ, GPU, dung lượng lưu trữ — xem ngay từ khay hệ thống.",
       },
       {
         title: "Theo dõi cả Claude và Codex",
@@ -431,7 +431,7 @@ export const I18N = {
     privacyTitle: "Quyền riêng tư",
     back: "Quay lại RunDog",
     privacyBody: [
-      "RunDog không tạo tài khoản. CPU, bộ nhớ và lưu trữ được đọc cục bộ qua API Windows. Cài đặt lưu trong registry của người dùng hiện tại.",
+      "RunDog không tạo tài khoản. CPU, bộ nhớ, GPU và lưu trữ được đọc cục bộ qua API Windows. Cài đặt lưu trong registry của người dùng hiện tại.",
       "Khi khởi động chỉ kiểm tra GitHub Releases một lần xem có bản mới không. Tải và cài chỉ khi bạn chọn rõ từ menu.",
       "Nếu dùng Claude Code hoặc Codex CLI, có thể đọc nhật ký cục bộ và gọi API hạn mức của nhà cung cấp với thông tin xác thực đã có trên máy. Token không chia sẻ với bên thứ ba.",
       "Không có SDK quảng cáo, phân tích hay báo cáo sự cố.",
@@ -461,7 +461,7 @@ export const I18N = {
       },
       {
         title: "Une carte système compacte",
-        body: "CPU, mémoire et stockage — le nécessaire, depuis la zone de notification.",
+        body: "CPU, mémoire, GPU et stockage — le nécessaire, depuis la zone de notification.",
       },
       {
         title: "Claude et Codex aussi",
@@ -517,7 +517,7 @@ export const I18N = {
     privacyTitle: "Confidentialité",
     back: "Retour à RunDog",
     privacyBody: [
-      "RunDog ne crée pas de compte. CPU, mémoire et stockage sont lus localement via les API Windows. Les réglages sont dans le registre de l'utilisateur.",
+      "RunDog ne crée pas de compte. CPU, mémoire, GPU et stockage sont lus localement via les API Windows. Les réglages sont dans le registre de l'utilisateur.",
       "Au démarrage, il vérifie une fois GitHub Releases. Le téléchargement et l'installation n'ont lieu que si vous les choisissez dans le menu.",
       "Si vous utilisez Claude Code ou Codex CLI, RunDog peut lire leurs journaux locaux et interroger les API de plafond avec des identifiants déjà sur la machine. Les jetons ne sont pas partagés avec des tiers.",
       "Aucun SDK de publicité, d'analyse ou de rapport de plantage.",
@@ -547,7 +547,7 @@ export const I18N = {
       },
       {
         title: "Kompakte Systemkarte",
-        body: "CPU, Speicher und Datenträger — das Wichtige direkt aus dem Infobereich.",
+        body: "CPU, Speicher, GPU und Datenträger — das Wichtige direkt aus dem Infobereich.",
       },
       {
         title: "Auch Claude und Codex",
@@ -603,7 +603,7 @@ export const I18N = {
     privacyTitle: "Datenschutz",
     back: "Zurück zu RunDog",
     privacyBody: [
-      "RunDog legt kein Konto an. CPU, Speicher und Datenträger werden lokal über Windows-APIs gelesen. Einstellungen liegen in der Registry des aktuellen Benutzers.",
+      "RunDog legt kein Konto an. CPU, Speicher, GPU und Datenträger werden lokal über Windows-APIs gelesen. Einstellungen liegen in der Registry des aktuellen Benutzers.",
       "Beim Start prüft es einmal GitHub Releases auf eine neuere Version. Download und Installation nur, wenn Sie sie im Menü wählen.",
       "Wenn Sie Claude Code oder Codex CLI nutzen, kann RunDog lokale Protokolle lesen und Limit-APIs der Anbieter mit bereits vorhandenen Anmeldedaten abfragen. Tokens werden nicht an Dritte weitergegeben.",
       "Kein SDK für Werbung, Analyse oder Absturzberichte.",
@@ -633,7 +633,7 @@ export const I18N = {
       },
       {
         title: "Una tarjeta de sistema compacta",
-        body: "CPU, memoria y almacenamiento: lo importante, desde el área de notificación.",
+        body: "CPU, memoria, GPU y almacenamiento: lo importante, desde el área de notificación.",
       },
       {
         title: "También Claude y Codex",
@@ -689,7 +689,7 @@ export const I18N = {
     privacyTitle: "Privacidad",
     back: "Volver a RunDog",
     privacyBody: [
-      "RunDog no crea una cuenta. CPU, memoria y almacenamiento se leen en el equipo con las API de Windows. Los ajustes viven en el registro del usuario actual.",
+      "RunDog no crea una cuenta. CPU, memoria, GPU y almacenamiento se leen en el equipo con las API de Windows. Los ajustes viven en el registro del usuario actual.",
       "Al arrancar comprueba GitHub Releases una sola vez. La descarga e instalación solo ocurren si las eliges en el menú.",
       "Si usas Claude Code o Codex CLI, puede leer sus registros locales y consultar las API de límites con credenciales ya en el equipo. Los tokens no se comparten con terceros.",
       "No incluye SDK de publicidad, analítica ni informes de fallos.",
