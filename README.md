@@ -12,11 +12,11 @@
   <img src="assets/rundog-flyout.png" alt="ホバー時の RunDog カード" width="320">
 </p>
 
-`RunDog` は、Windows の通知領域で CPU 使用率に応じて犬の 3 フレーム・アニメーションを表示する、Rust 製の常駐アプリケーションです。GUI フレームワークもランタイムも余分なスレッドもなく、リリースは LTO で最適化しているので、常駐しても CPU もメモリもほとんど使いません。犬にポインターを重ねると、CPU / メモリ / ストレージ、Claude Code / Codex CLI の利用状況、RunDog 自身の CPU とメモリがカードで開きます。
+`RunDog` は、Windows の通知領域で CPU 使用率に応じて犬の 3 フレーム・アニメーションを表示する、Rust 製の常駐アプリケーションです。GUI フレームワークもランタイムも余分なスレッドもなく、リリースは LTO で最適化しているので、常駐しても CPU もメモリもほとんど使いません。犬にポインターを重ねると、CPU / メモリ / GPU / ストレージ、Claude Code / Codex CLI の利用状況、RunDog 自身の CPU とメモリがカードで開きます。
 
 ## 機能
 
-- `GetSystemTimes` の累積値差分による全体 CPU 使用率と、`GlobalMemoryStatusEx` によるメモリ使用率、システムボリュームの使用量。ホバーで CPU / メモリ / ストレージのカードと直近 1 分のスパークライン、Claude Code / Codex CLI のサブスクリミットと API 相当利用料、RunDog 自身の CPU 割合とプライベートメモリを表示
+- `GetSystemTimes` の累積値差分による全体 CPU 使用率と、`GlobalMemoryStatusEx` によるメモリ使用率、システムボリュームの使用量、GPU エンジン使用率と専用 / 共有ビデオメモリ。ホバーで CPU / メモリ / GPU / ストレージのカードと直近 1 分のスパークライン、Claude Code / Codex CLI のサブスクリミットと API 相当利用料、RunDog 自身の CPU 割合とプライベートメモリを表示
 - CPU 使用率に応じた 5–40 FPS のアニメーション（既定の上限は 20 FPS）
 - System / Light / Dark テーマ、10 / 20 / 30 / 40 FPS 上限の右クリックメニュー
 - Windows のスタートアップで起動、初回トレイ登録時の通知領域ピン留め（ユーザーが隠した場合は維持）、ダブルクリックによる Task Manager 起動、Explorer 再起動後の tray 再登録
@@ -67,7 +67,7 @@ Windows SmartScreen 等の警告が出る可能性があります。SHA-256 side
 
 ローカルで unsigned installer を作るには Inno Setup 6 を導入してから次を実行します。
 
-    .\scripts\build-installer.ps1 -Version 1.1.3
+    .\scripts\build-installer.ps1 -Version 1.1.4
 
 作成物は `dist\RunDog-Setup-x64.exe` と
 `dist\RunDog-Setup-x64.exe.sha256` です。タグ `vX.Y.Z` を push すると

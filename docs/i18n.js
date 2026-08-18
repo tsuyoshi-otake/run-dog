@@ -45,6 +45,7 @@ export const I18N = {
     metrics: [
       "CPU 使用率と System / User / Idle",
       "メモリ使用量",
+      "GPU 使用率と専用 / 共有メモリ",
       "ストレージ使用量",
       "Claude Code の 5 時間・7 日上限",
       "Codex CLI の上限と API 相当の利用料",
@@ -130,6 +131,7 @@ export const I18N = {
     metrics: [
       "CPU usage with System / User / Idle",
       "Memory use",
+      "GPU use with dedicated / shared memory",
       "Storage use",
       "Claude Code 5-hour and 7-day limits",
       "Codex CLI limits and API-equivalent cost",
@@ -214,6 +216,7 @@ export const I18N = {
     metrics: [
       "CPU 使用率以及 System / User / Idle",
       "内存用量",
+      "GPU 使用率及专用 / 共享显存",
       "存储用量",
       "Claude Code 的 5 小时和 7 天限额",
       "Codex CLI 的限额和相当于 API 的费用",
@@ -298,6 +301,7 @@ export const I18N = {
     metrics: [
       "CPU 사용률과 System / User / Idle",
       "메모리 사용량",
+      "GPU 사용률과 전용 / 공유 메모리",
       "저장소 사용량",
       "Claude Code 5시간·7일 한도",
       "Codex CLI 한도와 API에 해당하는 비용",
@@ -383,6 +387,7 @@ export const I18N = {
     metrics: [
       "Mức dùng CPU với System / User / Idle",
       "Bộ nhớ",
+      "GPU với bộ nhớ dành riêng / dùng chung",
       "Lưu trữ",
       "Hạn mức 5 giờ và 7 ngày của Claude Code",
       "Hạn mức Codex CLI và chi phí tương đương API",
@@ -468,6 +473,7 @@ export const I18N = {
     metrics: [
       "Utilisation CPU avec System / User / Idle",
       "Mémoire",
+      "GPU avec mémoire dédiée / partagée",
       "Stockage",
       "Plafonds 5 h et 7 j de Claude Code",
       "Plafonds Codex CLI et coût équivalent API",
@@ -553,6 +559,7 @@ export const I18N = {
     metrics: [
       "CPU-Auslastung mit System / User / Idle",
       "Speicher",
+      "GPU mit dediziertem / gemeinsamem Speicher",
       "Datenträger",
       "5-Stunden- und 7-Tage-Limits von Claude Code",
       "Codex-CLI-Limits und API-äquivalente Kosten",
@@ -638,6 +645,7 @@ export const I18N = {
     metrics: [
       "Uso de CPU con System / User / Idle",
       "Memoria",
+      "GPU con memoria dedicada / compartida",
       "Almacenamiento",
       "Límites de 5 h y 7 d de Claude Code",
       "Límites de Codex CLI y coste equivalente a la API",

@@ -1,6 +1,8 @@
 use std::collections::VecDeque;
 
-use crate::core::{AppSettings, MemoryStatus, ResolvedTheme, StorageStatus, SystemTimes};
+use crate::core::{
+    AppSettings, GpuStatus, MemoryStatus, ResolvedTheme, StorageStatus, SystemTimes,
+};
 
 use super::{commit_protocol::CommitRequest, App, Effect, Event};
 
@@ -12,6 +14,9 @@ pub trait CpuSource {
         None
     }
     fn read_storage(&mut self) -> Option<StorageStatus> {
+        None
+    }
+    fn read_gpu(&mut self) -> Option<GpuStatus> {
         None
     }
 }
@@ -54,6 +59,7 @@ pub fn dispatch_cpu_tick<P: EffectPort, S: CpuSource>(app: &mut App, source: &mu
                 times,
                 memory,
                 storage: source.read_storage(),
+                gpu: source.read_gpu(),
                 process: None,
             },
         );
