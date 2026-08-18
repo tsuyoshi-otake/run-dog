@@ -457,12 +457,18 @@ fn format_tooltip(
     memory: Option<MemoryStatus>,
     gpu: Option<GpuStatus>,
 ) -> String {
-    format!(
-        "CPU: {}\nMemory: {}\nGPU: {}",
+    let mut tooltip = format!(
+        "CPU: {}\nMemory: {}",
         format_percent(cpu_percent),
         format_percent(memory.and_then(MemoryStatus::usage_percent)),
-        format_percent(gpu.and_then(GpuStatus::utilization_percent))
-    )
+    );
+    if gpu.is_some() {
+        tooltip.push_str("\nGPU: ");
+        tooltip.push_str(&format_percent(
+            gpu.and_then(GpuStatus::utilization_percent),
+        ));
+    }
+    tooltip
 }
 
 #[cfg(test)]
@@ -553,10 +559,7 @@ mod tests {
     #[test]
     fn component_tooltip_shows_memory_percent_independently_of_the_first_cpu_sample() {
         let mut app = started_app();
-        assert_eq!(
-            app.snapshot().tooltip,
-            "CPU: --.-%\nMemory: --.-%\nGPU: --.-%"
-        );
+        assert_eq!(app.snapshot().tooltip, "CPU: --.-%\nMemory: --.-%");
 
         let effects = app.dispatch(Event::CpuSample {
             times: SystemTimes::new(0, 0, 0),

@@ -44,19 +44,14 @@ impl GpuSampler {
             return Self::disabled();
         }
         let engine = add_counter(query, ENGINE);
+        if engine.is_null() {
+            let _ = unsafe { PdhCloseQuery(query) };
+            return Self::disabled();
+        }
         let dedicated_usage = add_counter(query, DEDICATED_USAGE);
         let dedicated_limit = add_counter(query, DEDICATED_LIMIT);
         let shared_usage = add_counter(query, SHARED_USAGE);
         let shared_limit = add_counter(query, SHARED_LIMIT);
-        if engine.is_null()
-            && dedicated_usage.is_null()
-            && dedicated_limit.is_null()
-            && shared_usage.is_null()
-            && shared_limit.is_null()
-        {
-            let _ = unsafe { PdhCloseQuery(query) };
-            return Self::disabled();
-        }
         Self {
             query,
             engine,
@@ -93,11 +88,19 @@ impl GpuSampler {
             return None;
         }
 
-        let dedicated_limit = counter_map(self.dedicated_limit);
-        let shared_limit = counter_map(self.shared_limit);
+        let mut dedicated_limit = counter_map(self.dedicated_limit);
+        let mut shared_limit = counter_map(self.shared_limit);
         let dedicated_usage = counter_map(self.dedicated_usage);
         let shared_usage = counter_map(self.shared_usage);
         let engines = counter_items(self.engine);
+        let known = adapter_ids(
+            &dedicated_limit,
+            &shared_limit,
+            &dedicated_usage,
+            &shared_usage,
+            &engines,
+        );
+        apply_dxgi_budgets(&mut dedicated_limit, &mut shared_limit, &known);
         let mut utilization = HashMap::new();
         let mut phys = HashMap::new();
         for (name, _) in engines
@@ -112,13 +115,7 @@ impl GpuSampler {
                 }
             }
         }
-        for id in adapter_ids(
-            &dedicated_limit,
-            &shared_limit,
-            &dedicated_usage,
-            &shared_usage,
-            &engines,
-        ) {
+        for id in known {
             if let Some(value) = adapter_engine_utilization(&engines, id) {
                 utilization.insert(id, value);
             }
@@ -310,6 +307,129 @@ fn select_adapter(
 
 fn value_for(map: &HashMap<AdapterId, u64>, id: AdapterId) -> u64 {
     map.get(&id).copied().unwrap_or(0)
+}
+
+fn apply_dxgi_budgets(
+    dedicated_limit: &mut HashMap<AdapterId, u64>,
+    shared_limit: &mut HashMap<AdapterId, u64>,
+    known: &[AdapterId],
+) {
+    let budgets = dxgi_adapter_budgets();
+    for id in known {
+        let Some(&(dedicated, shared)) = budgets.get(id) else {
+            continue;
+        };
+        fill_if_empty(dedicated_limit, *id, dedicated);
+        fill_if_empty(shared_limit, *id, shared);
+    }
+}
+
+fn fill_if_empty(map: &mut HashMap<AdapterId, u64>, id: AdapterId, value: u64) {
+    if value == 0 {
+        return;
+    }
+    if map.get(&id).copied().unwrap_or(0) == 0 {
+        map.insert(id, value);
+    }
+}
+
+#[repr(C)]
+struct Luid {
+    low: u32,
+    high: i32,
+}
+
+#[repr(C)]
+struct DxgiAdapterDesc {
+    _description: [u16; 128],
+    vendor_id: u32,
+    _device_id: u32,
+    _sub_sys_id: u32,
+    _revision: u32,
+    dedicated_video_memory: usize,
+    _dedicated_system_memory: usize,
+    shared_system_memory: usize,
+    adapter_luid: Luid,
+}
+
+const IID_IDXGI_FACTORY1: windows_sys::core::GUID = windows_sys::core::GUID {
+    data1: 0x770a_ae78,
+    data2: 0xf26f,
+    data3: 0x4dba,
+    data4: [0xa8, 0x29, 0x25, 0x3c, 0x83, 0xd1, 0xb3, 0x87],
+};
+
+#[link(name = "dxgi")]
+extern "system" {
+    fn CreateDXGIFactory1(
+        riid: *const windows_sys::core::GUID,
+        factory: *mut *mut core::ffi::c_void,
+    ) -> i32;
+}
+
+fn dxgi_adapter_budgets() -> HashMap<AdapterId, (u64, u64)> {
+    let mut budgets = HashMap::new();
+    unsafe {
+        let mut factory = ptr::null_mut();
+        if CreateDXGIFactory1(&IID_IDXGI_FACTORY1, &mut factory) != 0 || factory.is_null() {
+            return budgets;
+        }
+        let mut index = 0;
+        loop {
+            let mut adapter = ptr::null_mut();
+            if com_enum_adapters(factory, index, &mut adapter) != 0 || adapter.is_null() {
+                break;
+            }
+            let mut desc = std::mem::zeroed::<DxgiAdapterDesc>();
+            if com_get_desc(adapter, &mut desc) == 0 && desc.vendor_id != 0x1414 {
+                budgets.insert(
+                    AdapterId {
+                        high: desc.adapter_luid.high,
+                        low: desc.adapter_luid.low,
+                    },
+                    (
+                        desc.dedicated_video_memory as u64,
+                        desc.shared_system_memory as u64,
+                    ),
+                );
+            }
+            com_release(adapter);
+            index += 1;
+        }
+        com_release(factory);
+    }
+    budgets
+}
+
+unsafe fn com_vtable(this: *mut core::ffi::c_void) -> *const *const core::ffi::c_void {
+    unsafe { *(this.cast()) }
+}
+
+unsafe fn com_release(this: *mut core::ffi::c_void) {
+    let release: unsafe extern "system" fn(*mut core::ffi::c_void) -> u32 =
+        unsafe { std::mem::transmute(*com_vtable(this).add(2)) };
+    unsafe {
+        let _ = release(this);
+    }
+}
+
+unsafe fn com_enum_adapters(
+    factory: *mut core::ffi::c_void,
+    index: u32,
+    adapter: *mut *mut core::ffi::c_void,
+) -> i32 {
+    let enumerate: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        u32,
+        *mut *mut core::ffi::c_void,
+    ) -> i32 = unsafe { std::mem::transmute(*com_vtable(factory).add(7)) };
+    unsafe { enumerate(factory, index, adapter) }
+}
+
+unsafe fn com_get_desc(adapter: *mut core::ffi::c_void, desc: *mut DxgiAdapterDesc) -> i32 {
+    let get_desc: unsafe extern "system" fn(*mut core::ffi::c_void, *mut DxgiAdapterDesc) -> i32 =
+        unsafe { std::mem::transmute(*com_vtable(adapter).add(8)) };
+    unsafe { get_desc(adapter, desc) }
 }
 
 fn adapter_engine_utilization(items: &[(String, f64)], id: AdapterId) -> Option<f32> {
