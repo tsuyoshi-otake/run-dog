@@ -11,6 +11,9 @@ pub struct TokenUsage {
     pub cache_write_5m: u64,
     pub cache_write_1h: u64,
     pub output: u64,
+    pub long_context_input: u64,
+    pub long_context_cached_input: u64,
+    pub long_context_output: u64,
 }
 
 /// One 5-hour or weekly rate-limit window.
@@ -145,9 +148,14 @@ pub struct UsageSnapshot {
 }
 
 /// USD cents from a per-million-token price table.
+///
+/// `effective_day` is a `YYYY-MM-DD` local day used for scheduled price
+/// revisions, matching otak-usage `calcCost`.
 #[must_use]
-pub fn cost_cents(model: &str, usage: TokenUsage) -> Option<u32> {
-    let pricing = resolve_pricing(model)?;
+pub fn cost_cents(model: &str, usage: TokenUsage, effective_day: Option<&str>) -> Option<u32> {
+    let pricing = resolve_pricing(model, effective_day)?;
+    let long_input_premium = pricing.long_context_input_multiplier.unwrap_or(1.0) - 1.0;
+    let long_output_premium = pricing.long_context_output_multiplier.unwrap_or(1.0) - 1.0;
     let usd = (usage.input as f64).mul_add(
         pricing.input,
         (usage.cached_input as f64).mul_add(
@@ -156,8 +164,21 @@ pub fn cost_cents(model: &str, usage: TokenUsage) -> Option<u32> {
                 pricing.cache_read,
                 (usage.cache_write_5m as f64).mul_add(
                     pricing.cache_write_5m,
-                    (usage.cache_write_1h as f64)
-                        .mul_add(pricing.cache_write_1h, usage.output as f64 * pricing.output),
+                    (usage.cache_write_1h as f64).mul_add(
+                        pricing.cache_write_1h,
+                        (usage.output as f64).mul_add(
+                            pricing.output,
+                            (usage.long_context_input as f64).mul_add(
+                                pricing.input * long_input_premium,
+                                (usage.long_context_cached_input as f64).mul_add(
+                                    pricing.cached_input * long_input_premium,
+                                    usage.long_context_output as f64
+                                        * pricing.output
+                                        * long_output_premium,
+                                ),
+                            ),
+                        ),
+                    ),
                 ),
             ),
         ),
@@ -177,6 +198,9 @@ struct ModelPricing {
     cache_read: f64,
     cache_write_5m: f64,
     cache_write_1h: f64,
+    long_context_threshold: Option<u64>,
+    long_context_input_multiplier: Option<f64>,
+    long_context_output_multiplier: Option<f64>,
 }
 
 fn entry(key: &'static str, input: f64, output: f64) -> ModelPricing {
@@ -188,6 +212,9 @@ fn entry(key: &'static str, input: f64, output: f64) -> ModelPricing {
         cache_read: input * 0.1,
         cache_write_5m: input * 1.25,
         cache_write_1h: input * 2.0,
+        long_context_threshold: None,
+        long_context_input_multiplier: None,
+        long_context_output_multiplier: None,
     }
 }
 
@@ -197,17 +224,30 @@ fn entry_cached(key: &'static str, input: f64, cached: f64, output: f64) -> Mode
     pricing
 }
 
-fn pricing_table() -> [ModelPricing; 28] {
+fn entry_long_context(key: &'static str, input: f64, cached: f64, output: f64) -> ModelPricing {
+    let mut pricing = entry_cached(key, input, cached, output);
+    pricing.long_context_threshold = Some(272_000);
+    pricing.long_context_input_multiplier = Some(2.0);
+    pricing.long_context_output_multiplier = Some(1.5);
+    pricing
+}
+
+fn pricing_table() -> [ModelPricing; 54] {
     [
-        entry("claude-opus-5-fast", 10.0, 50.0),
+        entry("claude-fable-5", 10.0, 50.0),
+        entry("claude-mythos-5", 10.0, 50.0),
         entry("claude-opus-5", 5.0, 25.0),
-        entry("claude-opus-4-8-fast", 10.0, 50.0),
         entry("claude-opus-4-8", 5.0, 25.0),
+        entry("claude-opus-4-7", 5.0, 25.0),
         entry("claude-opus-4-6", 5.0, 25.0),
         entry("claude-opus-4-5", 5.0, 25.0),
         entry("claude-opus-4-1", 15.0, 75.0),
         entry("claude-opus-4", 15.0, 75.0),
-        entry("claude-sonnet-5", 3.0, 15.0),
+        entry("claude-opus-5-fast", 10.0, 50.0),
+        entry("claude-opus-4-8-fast", 10.0, 50.0),
+        entry("claude-opus-4-7-fast", 30.0, 150.0),
+        entry("claude-opus-4-6-fast", 30.0, 150.0),
+        entry("claude-sonnet-5", 2.0, 10.0),
         entry("claude-sonnet-4-6", 3.0, 15.0),
         entry("claude-sonnet-4-5", 3.0, 15.0),
         entry("claude-sonnet-4", 3.0, 15.0),
@@ -215,31 +255,86 @@ fn pricing_table() -> [ModelPricing; 28] {
         entry("claude-3-7-sonnet", 3.0, 15.0),
         entry("claude-3-5-sonnet", 3.0, 15.0),
         entry("claude-3-5-haiku", 0.8, 4.0),
-        entry_cached("gpt-5.6", 5.0, 0.5, 30.0),
-        entry_cached("gpt-5.5", 5.0, 0.5, 30.0),
+        entry("claude-3-opus", 15.0, 75.0),
+        entry("claude-3-sonnet", 3.0, 15.0),
+        entry("claude-3-haiku", 0.25, 1.25),
+        entry_long_context("gpt-5.6-sol", 5.0, 0.5, 30.0),
+        entry_long_context("gpt-5.6-terra", 2.5, 0.25, 15.0),
+        entry_long_context("gpt-5.6-luna", 1.0, 0.1, 6.0),
+        entry_long_context("gpt-5.6", 5.0, 0.5, 30.0),
+        entry_long_context("gpt-5.5-pro", 30.0, 3.0, 180.0),
+        entry_long_context("gpt-5.5", 5.0, 0.5, 30.0),
+        entry_long_context("gpt-5.4-pro", 30.0, 3.0, 180.0),
         entry_cached("gpt-5.4-mini", 0.75, 0.075, 4.5),
-        entry_cached("gpt-5.4", 2.5, 0.25, 15.0),
+        entry_cached("gpt-5.4-nano", 0.2, 0.02, 1.25),
+        entry_long_context("gpt-5.4", 2.5, 0.25, 15.0),
         entry_cached("gpt-5.3-codex", 1.75, 0.175, 14.0),
         entry_cached("gpt-5.2-codex", 1.75, 0.175, 14.0),
+        entry_cached("gpt-5.2", 1.75, 0.175, 14.0),
         entry_cached("gpt-5.1-codex-mini", 0.25, 0.025, 2.0),
         entry_cached("gpt-5.1-codex", 1.25, 0.125, 10.0),
         entry_cached("gpt-5.1", 1.25, 0.125, 10.0),
         entry_cached("gpt-5-codex", 1.25, 0.125, 10.0),
         entry_cached("gpt-5-mini", 0.25, 0.025, 2.0),
+        entry_cached("gpt-5-nano", 0.05, 0.005, 0.4),
         entry_cached("gpt-5", 1.25, 0.125, 10.0),
+        entry_cached("codex-mini-latest", 1.5, 0.375, 6.0),
+        entry("o3-pro", 20.0, 80.0),
+        entry_cached("o3-mini", 1.1, 0.55, 4.4),
+        entry_cached("o3", 2.0, 0.5, 8.0),
+        entry_cached("o4-mini", 1.1, 0.275, 4.4),
+        entry_cached("gpt-4.1-mini", 0.4, 0.1, 1.6),
+        entry_cached("gpt-4.1-nano", 0.1, 0.025, 0.4),
+        entry_cached("gpt-4.1", 2.0, 0.5, 8.0),
+        entry_cached("gpt-4o-mini", 0.15, 0.075, 0.6),
+        entry_cached("gpt-4o", 2.5, 1.25, 10.0),
     ]
 }
 
-fn resolve_pricing(model: &str) -> Option<ModelPricing> {
+fn resolve_pricing(model: &str, effective_day: Option<&str>) -> Option<ModelPricing> {
     let table = pricing_table();
-    if let Some(exact) = table.iter().find(|entry| entry.key == model) {
-        return Some(copy_pricing(exact));
+    let mut pricing = if let Some(exact) = table.iter().find(|entry| entry.key == model) {
+        copy_pricing(exact)
+    } else {
+        table
+            .iter()
+            .filter(|entry| model_matches(model, entry.key))
+            .max_by_key(|entry| entry.key.len())
+            .map(copy_pricing)?
+    };
+    apply_revisions(&mut pricing, effective_day);
+    Some(pricing)
+}
+
+fn apply_revisions(pricing: &mut ModelPricing, effective_day: Option<&str>) {
+    let Some(day) = effective_day else {
+        return;
+    };
+    match pricing.key {
+        "claude-sonnet-5" if day >= "2026-09-01" => {
+            pricing.input = 3.0;
+            pricing.output = 15.0;
+            refresh_cache_from_input(pricing);
+        }
+        "gpt-5.6-terra" if day >= "2026-07-30" => {
+            pricing.input = 2.0;
+            pricing.cached_input = 0.2;
+            pricing.output = 12.0;
+        }
+        "gpt-5.6-luna" if day >= "2026-07-30" => {
+            pricing.input = 0.2;
+            pricing.cached_input = 0.02;
+            pricing.output = 1.2;
+        }
+        _ => {}
     }
-    table
-        .iter()
-        .filter(|entry| model_matches(model, entry.key))
-        .max_by_key(|entry| entry.key.len())
-        .map(copy_pricing)
+}
+
+fn refresh_cache_from_input(pricing: &mut ModelPricing) {
+    pricing.cached_input = pricing.input * 0.1;
+    pricing.cache_read = pricing.input * 0.1;
+    pricing.cache_write_5m = pricing.input * 1.25;
+    pricing.cache_write_1h = pricing.input * 2.0;
 }
 
 fn copy_pricing(entry: &ModelPricing) -> ModelPricing {
@@ -251,7 +346,31 @@ fn copy_pricing(entry: &ModelPricing) -> ModelPricing {
         cache_read: entry.cache_read,
         cache_write_5m: entry.cache_write_5m,
         cache_write_1h: entry.cache_write_1h,
+        long_context_threshold: entry.long_context_threshold,
+        long_context_input_multiplier: entry.long_context_input_multiplier,
+        long_context_output_multiplier: entry.long_context_output_multiplier,
     }
+}
+
+#[must_use]
+pub fn is_long_context_request(model: &str, input_tokens: u64) -> bool {
+    resolve_pricing(model, None)
+        .and_then(|pricing| pricing.long_context_threshold)
+        .is_some_and(|threshold| input_tokens > threshold)
+}
+
+#[must_use]
+pub fn resolve_codex_model(model: &str) -> &str {
+    if model == "codex-auto-review" {
+        "gpt-5.4"
+    } else {
+        model
+    }
+}
+
+#[must_use]
+pub fn ymd_iso(year: i32, month: u8, day: u8) -> String {
+    format!("{year:04}-{month:02}-{day:02}")
 }
 
 fn model_matches(model: &str, key: &str) -> bool {
@@ -304,8 +423,8 @@ pub fn days_to_ymd(days: i64) -> (i32, u8, u8) {
 #[cfg(test)]
 mod tests {
     use super::{
-        cost_cents, days_to_ymd, format_plan_label, local_ymd, ymd_key, LimitWindow, ProviderUsage,
-        TokenUsage,
+        cost_cents, days_to_ymd, format_plan_label, is_long_context_request, local_ymd,
+        resolve_codex_model, ymd_key, LimitWindow, ProviderUsage, TokenUsage,
     };
 
     #[test]
@@ -315,19 +434,39 @@ mod tests {
             output: 1_000_000,
             ..TokenUsage::default()
         };
-        assert_eq!(cost_cents("claude-opus-5", usage), Some(3_000));
-        assert_eq!(cost_cents("claude-opus-5-fast", usage), Some(6_000));
+        assert_eq!(cost_cents("claude-opus-5", usage, None), Some(3_000));
+        assert_eq!(cost_cents("claude-opus-5-fast", usage, None), Some(6_000));
         assert_eq!(
-            cost_cents("claude-opus-5-20260120-fast", usage),
+            cost_cents("claude-opus-5-20260120-fast", usage, None),
             Some(6_000)
         );
-        assert_eq!(cost_cents("gpt-5.6-sol", usage), Some(3_500));
-        assert_eq!(cost_cents("gpt-5.6-terra", usage), Some(3_500));
+        assert_eq!(
+            cost_cents("claude-opus-4-6-fast", usage, None),
+            Some(18_000)
+        );
+        assert_eq!(cost_cents("claude-opus-4-7", usage, None), Some(3_000));
+        assert_eq!(cost_cents("claude-sonnet-5", usage, None), Some(1_200));
+        assert_eq!(
+            cost_cents("claude-sonnet-5", usage, Some("2026-09-01")),
+            Some(1_800)
+        );
+        assert_eq!(cost_cents("gpt-5.6-sol", usage, None), Some(3_500));
+        assert_eq!(cost_cents("gpt-5.6-terra", usage, None), Some(1_750));
+        assert_eq!(
+            cost_cents("gpt-5.6-terra", usage, Some("2026-08-19")),
+            Some(1_400)
+        );
+        assert_eq!(resolve_codex_model("codex-auto-review"), "gpt-5.4");
+        assert!(is_long_context_request("gpt-5.4", 272_001));
+        assert!(!is_long_context_request("gpt-5.4", 272_000));
     }
 
     #[test]
     fn component_unknown_model_has_no_api_equivalent_cost() {
-        assert_eq!(cost_cents("mystery-model", TokenUsage::default()), None);
+        assert_eq!(
+            cost_cents("mystery-model", TokenUsage::default(), None),
+            None
+        );
     }
 
     #[test]
