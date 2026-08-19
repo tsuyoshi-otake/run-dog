@@ -1055,15 +1055,18 @@ fn paint_limit_metric(
 }
 
 fn format_reset(window: LimitWindow) -> String {
+    format_reset_local(window, super::usage::timezone_bias_minutes())
+}
+
+fn format_reset_local(window: LimitWindow, bias_minutes: i32) -> String {
     if window.resets_at_ms == 0 {
         return String::new();
     }
-    let bias = super::usage::timezone_bias_minutes();
+    let (hour, minute) = local_hms(window.resets_at_ms, bias_minutes);
     if window.window_minutes >= 1_440 {
-        let (_, month, day) = local_ymd(window.resets_at_ms, bias);
-        format!("{month:02}-{day:02}")
+        let (_, month, day) = local_ymd(window.resets_at_ms, bias_minutes);
+        format!("{month:02}-{day:02} {hour:02}:{minute:02}")
     } else {
-        let (hour, minute) = local_hms(window.resets_at_ms, bias);
         format!("{hour:02}:{minute:02}")
     }
 }
@@ -1526,11 +1529,11 @@ fn wide(value: &str) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::{
-        format_bytes, format_gpu_capacity, format_percent, format_self_usage, gpu_details,
-        visible_usage_count, window_size, CARD_GPU_BLOCK_HEIGHT, CARD_HEIGHT,
+        format_bytes, format_gpu_capacity, format_percent, format_reset_local, format_self_usage,
+        gpu_details, visible_usage_count, window_size, CARD_GPU_BLOCK_HEIGHT, CARD_HEIGHT,
         CARD_USAGE_BLOCK_HEIGHT, CARD_WIDTH,
     };
-    use crate::core::{CpuLoad, ProcessStatus, ProviderUsage, UsageSnapshot};
+    use crate::core::{CpuLoad, LimitWindow, ProcessStatus, ProviderUsage, UsageSnapshot};
 
     #[test]
     fn component_flyout_formatters_cover_unknown_and_scaled_values() {
@@ -1597,6 +1600,34 @@ mod tests {
             ))),
             "0.4% · 5.0 MB"
         );
+    }
+
+    #[test]
+    fn component_limit_reset_uses_local_civil_time() {
+        // 2026-08-18T00:00:00Z weekly, and 2026-08-16T07:39:00Z 5-hour.
+        const WEEKLY_UTC_MIDNIGHT_MS: u64 = 1_787_011_200_000;
+        const SESSION_UTC_MS: u64 = 1_786_865_940_000;
+        let weekly = LimitWindow {
+            used_tenths: 130,
+            resets_at_ms: WEEKLY_UTC_MIDNIGHT_MS,
+            window_minutes: 10_080,
+        };
+        let session = LimitWindow {
+            used_tenths: 284,
+            resets_at_ms: SESSION_UTC_MS,
+            window_minutes: 300,
+        };
+        let unknown = LimitWindow {
+            used_tenths: 50,
+            resets_at_ms: 0,
+            window_minutes: 10_080,
+        };
+
+        assert_eq!(format_reset_local(weekly, -540), "08-18 09:00");
+        assert_eq!(format_reset_local(weekly, 0), "08-18 00:00");
+        assert_eq!(format_reset_local(weekly, 480), "08-17 16:00");
+        assert_eq!(format_reset_local(session, -540), "16:39");
+        assert_eq!(format_reset_local(unknown, -540), "");
     }
 
     #[test]
