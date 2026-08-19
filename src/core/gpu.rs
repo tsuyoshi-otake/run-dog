@@ -66,14 +66,15 @@ impl GpuStatus {
             .saturating_add(self.shared_usage_bytes)
     }
 
+    /// Unused dedicated video memory. Shared memory is system RAM, so it is
+    /// not added here; iGPUs without a dedicated budget fall back to shared.
     #[must_use]
     pub const fn available_bytes(self) -> Option<u64> {
-        let dedicated = remaining(self.dedicated_usage_bytes, self.dedicated_budget_bytes);
-        let shared = remaining(self.shared_usage_bytes, self.shared_budget_bytes);
-        match (dedicated, shared) {
-            (None, None) => None,
-            (Some(dedicated), Some(shared)) => Some(dedicated.saturating_add(shared)),
-            (Some(value), None) | (None, Some(value)) => Some(value),
+        if let Some(dedicated) = remaining(self.dedicated_usage_bytes, self.dedicated_budget_bytes)
+        {
+            Some(dedicated)
+        } else {
+            remaining(self.shared_usage_bytes, self.shared_budget_bytes)
         }
     }
 }
@@ -125,7 +126,8 @@ mod tests {
         assert!(shared.has_shared());
 
         let both = GpuStatus::new(8, 2, 16, 4);
-        assert_eq!(both.available_bytes(), Some(18));
+        assert_eq!(both.available_bytes(), Some(6));
+        assert_eq!(GpuStatus::new(8, 2, 0, 0).available_bytes(), Some(6));
 
         assert_eq!(GpuStatus::new(8, 9, 0, 0).dedicated_percent(), Some(100.0));
         assert_eq!(

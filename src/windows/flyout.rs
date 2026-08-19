@@ -1585,7 +1585,7 @@ mod tests {
             [
                 "Dedicated: 2.0 GB / 8.0 GB".to_owned(),
                 "Shared: 1.0 GB / 16.0 GB".to_owned(),
-                "Available: 21.0 GB".to_owned(),
+                "Available: 6.0 GB".to_owned(),
             ]
         );
         assert_eq!(format_self_usage(None), "--.-% · --");
