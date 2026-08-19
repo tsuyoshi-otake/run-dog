@@ -40,7 +40,7 @@ use windows_sys::Win32::{
 };
 
 use crate::core::{
-    cost_cents, local_ymd, ymd_key, LimitWindow, ProviderUsage, TokenUsage, UsageSnapshot,
+    cost_cents, local_ymd, ymd_iso, ymd_key, LimitWindow, ProviderUsage, TokenUsage, UsageSnapshot,
 };
 
 pub const USAGE_TIMER_ID: usize = 4;
@@ -410,10 +410,12 @@ impl UsageCollector {
                     continue;
                 }
             }
-            let Some(cents) = cost_cents(&event.model, event.usage) else {
+            let day = ymd_key_from_unix(event.timestamp_ms, window.bias_minutes);
+            let (year, month, day_of_month) = local_ymd(event.timestamp_ms, window.bias_minutes);
+            let day_iso = ymd_iso(year, month, day_of_month);
+            let Some(cents) = cost_cents(&event.model, event.usage, Some(&day_iso)) else {
                 continue;
             };
-            let day = ymd_key_from_unix(event.timestamp_ms, window.bias_minutes);
             let target = match kind {
                 SourceKind::Claude => &mut self.snapshot.claude,
                 SourceKind::Codex => &mut self.snapshot.codex,
@@ -1206,19 +1208,25 @@ fn parse_codex_usage_line(line: &str, model: Option<&str>) -> Option<ParsedEvent
     if payload.kind.as_deref() != Some("token_count") {
         return None;
     }
-    let model = model?.to_owned();
+    let model = crate::core::resolve_codex_model(model?);
     let last = payload.info?.last_token_usage?;
     let raw_input = last.input_tokens.unwrap_or(0);
     let cached = last.cached_input_tokens.unwrap_or(0).min(raw_input);
+    let mut usage = TokenUsage {
+        input: raw_input - cached,
+        cached_input: cached,
+        output: last.output_tokens.unwrap_or(0),
+        ..TokenUsage::default()
+    };
+    if crate::core::is_long_context_request(model, raw_input) {
+        usage.long_context_input = usage.input;
+        usage.long_context_cached_input = usage.cached_input;
+        usage.long_context_output = usage.output;
+    }
     Some(ParsedEvent {
-        model,
+        model: model.to_owned(),
         timestamp_ms: parse_timestamp(rec.timestamp.as_deref()?)?,
-        usage: TokenUsage {
-            input: raw_input - cached,
-            cached_input: cached,
-            output: last.output_tokens.unwrap_or(0),
-            ..TokenUsage::default()
-        },
+        usage,
     })
 }
 
@@ -1787,6 +1795,13 @@ mod tests {
         assert_eq!(event.usage.input, 15);
         assert_eq!(event.usage.cached_input, 5);
         assert_eq!(event.usage.output, 3);
+
+        let auto = parse_codex_usage_line(
+            r#"{"type":"event_msg","timestamp":"2026-08-16T01:02:03Z","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":20,"cached_input_tokens":0,"output_tokens":3}}}}"#,
+            Some("codex-auto-review"),
+        )
+        .expect("auto-review");
+        assert_eq!(auto.model, "gpt-5.4");
     }
 
     #[test]
