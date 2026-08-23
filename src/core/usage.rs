@@ -369,6 +369,11 @@ fn apply_revisions(pricing: &mut ModelPricing, effective_day: Option<&str>) {
             pricing.cached_input = 0.02;
             pricing.output = 1.2;
         }
+        "gpt-5.6-sol" if day >= "2026-08-21" => {
+            pricing.input = 4.0;
+            pricing.output = 20.0;
+            refresh_cache_from_input(pricing);
+        }
         _ => {}
     }
 }
@@ -521,6 +526,14 @@ mod tests {
             Some(1_800)
         );
         assert_eq!(cost_cents("gpt-5.6-sol", usage, None), Some(3_500));
+        assert_eq!(
+            cost_cents("gpt-5.6-sol", usage, Some("2026-08-20")),
+            Some(3_500)
+        );
+        assert_eq!(
+            cost_cents("gpt-5.6-sol", usage, Some("2026-08-21")),
+            Some(2_400)
+        );
         assert_eq!(cost_cents("gpt-5.6-terra", usage, None), Some(1_750));
         assert_eq!(
             cost_cents("gpt-5.6-terra", usage, Some("2026-08-19")),
