@@ -227,6 +227,7 @@ impl EffectPort for FakePlatform {
             Effect::SetThemeMenu(_)
             | Effect::SetFpsMenu(_)
             | Effect::SetStartupMenu(_)
+            | Effect::NotifyStartupChanged(_)
             | Effect::CommitSettings { .. }
             | Effect::CancelCommit { .. } => {}
         }
