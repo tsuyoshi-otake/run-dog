@@ -238,7 +238,7 @@ impl UsageCollector {
         let _ = self.take_claude_limits();
 
         if self.last_discover_ms == 0
-            || now_ms.saturating_sub(self.last_discover_ms) >= REDISCOVER_MS
+            || (!self.catch_up && now_ms.saturating_sub(self.last_discover_ms) >= REDISCOVER_MS)
         {
             self.queue_roots();
             self.last_discover_ms = now_ms;
@@ -293,6 +293,10 @@ impl UsageCollector {
         let Some(checkpoint) = super::registry::load_usage_checkpoint() else {
             return;
         };
+        if checkpoint.month_start != window.month_start || !checkpoint.catch_up_done {
+            let _ = super::registry::clear_usage_checkpoint();
+            return;
+        }
         self.apply_checkpoint(window, checkpoint);
     }
 
