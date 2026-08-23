@@ -170,6 +170,8 @@ fn extract_multiplier(lower: &str) -> Option<&'static str> {
 pub struct UsageSnapshot {
     pub claude: ProviderUsage,
     pub codex: ProviderUsage,
+    /// True while the collector is re-reading JSONL for the current month.
+    pub month_scan_in_progress: bool,
 }
 
 /// Compact decimal token count for flyout labels (`1.2K`, `3.4M`, `5.6B`).

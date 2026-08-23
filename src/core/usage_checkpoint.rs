@@ -165,6 +165,7 @@ impl UsageCheckpoint {
                     month_output_tokens: codex_out,
                     ..ProviderUsage::default()
                 },
+                ..UsageSnapshot::default()
             },
             files,
         })
@@ -217,6 +218,7 @@ mod tests {
                     month_output_tokens: 250_000,
                     ..ProviderUsage::default()
                 },
+                ..UsageSnapshot::default()
             },
             files: [(
                 FileCheckpointKey::Claude("projects/p1/session.jsonl".to_owned()),

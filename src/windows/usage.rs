@@ -129,6 +129,7 @@ pub struct UsageCollector {
     remote_fetch: RemoteLimitsFetch,
     checkpoint_dirty: bool,
     persist_checkpoint: bool,
+    month_rescan_notify: bool,
 }
 
 struct RemoteLimits {
@@ -186,6 +187,7 @@ impl UsageCollector {
             },
             checkpoint_dirty: false,
             persist_checkpoint,
+            month_rescan_notify: false,
         };
         if persist_checkpoint {
             collector.restore_checkpoint(day_window(unix_now_ms()));
@@ -203,7 +205,19 @@ impl UsageCollector {
 
     #[must_use]
     pub fn snapshot(&self) -> UsageSnapshot {
-        self.snapshot
+        UsageSnapshot {
+            month_scan_in_progress: self.catch_up,
+            ..self.snapshot
+        }
+    }
+
+    #[must_use]
+    pub fn take_month_rescan_finished(&mut self) -> bool {
+        if self.month_rescan_notify && !self.catch_up {
+            self.month_rescan_notify = false;
+            return true;
+        }
+        false
     }
 
     pub fn take_claude_limits(&mut self) -> bool {
@@ -382,6 +396,7 @@ impl UsageCollector {
         if self.month_key == 0 {
             self.month_key = window.month_start;
         }
+        self.month_rescan_notify = true;
         self.begin_month_rescan(window);
     }
 

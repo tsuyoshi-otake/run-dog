@@ -437,6 +437,10 @@ impl TrayAdapter {
         self.show_balloon("RunDog", "Full scan of current month usage started.");
     }
 
+    pub fn notify_month_rescan_finished(&mut self) {
+        self.show_balloon("RunDog", "Current month usage scan complete.");
+    }
+
     fn show_balloon(&self, title: &str, body: &str) {
         if !self.added {
             return;
