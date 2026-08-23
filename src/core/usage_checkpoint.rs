@@ -5,7 +5,8 @@ use std::collections::HashMap;
 use super::{ProviderUsage, UsageSnapshot};
 
 const HEADER_V1: &str = "rundog-usage-checkpoint-1";
-const HEADER: &str = "rundog-usage-checkpoint-2";
+const HEADER_V2: &str = "rundog-usage-checkpoint-2";
+const HEADER: &str = "rundog-usage-checkpoint-3";
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub enum FileCheckpointKey {
@@ -86,7 +87,7 @@ impl UsageCheckpoint {
         let mut lines = payload.lines();
         match lines.next()? {
             HEADER => {}
-            HEADER_V1 => return None,
+            HEADER_V1 | HEADER_V2 => return None,
             _ => return None,
         }
         let mut month_start = None;
@@ -184,7 +185,9 @@ fn parse_file_line(value: &str) -> Option<(char, &str, u64, u64)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{FileCheckpointCursor, FileCheckpointKey, UsageCheckpoint, HEADER, HEADER_V1};
+    use super::{
+        FileCheckpointCursor, FileCheckpointKey, UsageCheckpoint, HEADER, HEADER_V1, HEADER_V2,
+    };
     use crate::core::{ProviderUsage, UsageSnapshot};
     use std::collections::HashMap;
 
@@ -237,7 +240,7 @@ mod tests {
     }
 
     #[test]
-    fn component_v1_and_incomplete_checkpoints_are_rejected() {
+    fn component_v1_v2_and_incomplete_checkpoints_are_rejected() {
         let complete = UsageCheckpoint {
             month_start: 20_260_801,
             today: 20_260_823,
@@ -246,9 +249,13 @@ mod tests {
             snapshot: UsageSnapshot::default(),
             files: HashMap::new(),
         };
-        let mut payload = complete.encode();
-        payload = payload.replacen(HEADER, HEADER_V1, 1);
-        assert!(UsageCheckpoint::decode(&payload).is_none());
+        let mut v1_payload = complete.encode();
+        v1_payload = v1_payload.replacen(HEADER, HEADER_V1, 1);
+        assert!(UsageCheckpoint::decode(&v1_payload).is_none());
+
+        let mut v2_payload = complete.encode();
+        v2_payload = v2_payload.replacen(HEADER, HEADER_V2, 1);
+        assert!(UsageCheckpoint::decode(&v2_payload).is_none());
 
         let incomplete = UsageCheckpoint {
             catch_up_done: false,
