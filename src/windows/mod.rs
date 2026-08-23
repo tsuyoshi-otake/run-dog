@@ -226,6 +226,9 @@ impl WindowContext {
     fn tick_usage(&mut self) {
         let more = self.usage.tick(self.platform.hwnd);
         self.dispatch(Event::UsageSample(self.usage.snapshot()));
+        if self.usage.take_month_rescan_finished() {
+            self.platform.tray.notify_month_rescan_finished();
+        }
         let interval = match more {
             UsageTick::MoreWork => USAGE_CONTINUE_INTERVAL_MS,
             UsageTick::Idle => {

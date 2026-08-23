@@ -86,6 +86,9 @@ impl HoverFlyout {
         self.state = Some(icon.clone());
         if self.is_visible() {
             self.place_near_icon();
+            if !self.hwnd.is_null() {
+                let _ = unsafe { InvalidateRect(self.hwnd, ptr::null(), 1) };
+            }
         }
     }
 
@@ -277,7 +280,11 @@ fn window_size(dpi: i32, usage: Option<UsageSnapshot>, show_gpu: bool) -> (i32, 
 }
 
 fn visible_usage_count(usage: UsageSnapshot) -> usize {
-    usize::from(usage.claude.has_month_activity()) + usize::from(usage.codex.has_month_activity())
+    if usage.month_scan_in_progress {
+        2
+    } else {
+        usize::from(usage.claude.has_month_activity()) + usize::from(usage.codex.has_month_activity())
+    }
 }
 
 fn window_dpi(hwnd: HWND) -> i32 {
@@ -524,6 +531,7 @@ fn paint(hwnd: HWND) {
             row.title,
             row.usage,
             row.mark,
+            state.usage.month_scan_in_progress,
             &palette,
             &layout,
             title_font,
@@ -874,15 +882,16 @@ struct VisibleUsageRow {
 }
 
 fn visible_usage_rows(usage: UsageSnapshot) -> Vec<VisibleUsageRow> {
+    let scanning = usage.month_scan_in_progress;
     let mut rows = Vec::with_capacity(2);
-    if usage.claude.has_month_activity() {
+    if usage.claude.has_month_activity() || scanning {
         rows.push(VisibleUsageRow {
             title: "Claude",
             usage: usage.claude,
             mark: UsageMark::Claude,
         });
     }
-    if usage.codex.has_month_activity() {
+    if usage.codex.has_month_activity() || scanning {
         rows.push(VisibleUsageRow {
             title: "Codex",
             usage: usage.codex,
@@ -900,6 +909,7 @@ fn paint_usage_row(
     title: &str,
     usage: ProviderUsage,
     mark: UsageMark,
+    month_scan_in_progress: bool,
     palette: &Palette,
     layout: &Layout,
     title_font: windows_sys::Win32::Graphics::Gdi::HFONT,
@@ -989,14 +999,20 @@ fn paint_usage_row(
             right: row.right,
             bottom: metric_top + layout.detail_h,
         },
-        &format_month_usage(usage),
+        &format_month_usage(usage, month_scan_in_progress),
         0,
     );
 }
 
-fn format_month_usage(usage: ProviderUsage) -> String {
+fn format_month_usage(usage: ProviderUsage, scanning: bool) -> String {
+    let has_totals = usage.month_cents > 0
+        || usage.month_input_tokens > 0
+        || usage.month_output_tokens > 0;
+    if scanning && !has_totals {
+        return "Month: Scanning...".to_owned();
+    }
     let amount = format_usd(usage.month_cents, usage.month_cents == 0);
-    if usage.month_input_tokens == 0 && usage.month_output_tokens == 0 {
+    let mut line = if usage.month_input_tokens == 0 && usage.month_output_tokens == 0 {
         format!("Month {amount}")
     } else {
         format!(
@@ -1005,7 +1021,11 @@ fn format_month_usage(usage: ProviderUsage) -> String {
             format_compact_token_count(usage.month_input_tokens),
             format_compact_token_count(usage.month_output_tokens),
         )
+    };
+    if scanning {
+        line.push_str(" · scanning");
     }
+    line
 }
 
 fn paint_self_row(
@@ -1631,20 +1651,30 @@ mod tests {
             "0.4% · 5.0 MB"
         );
         assert_eq!(
-            format_month_usage(ProviderUsage {
-                month_cents: 125,
-                ..ProviderUsage::default()
-            }),
+            format_month_usage(
+                ProviderUsage {
+                    month_cents: 125,
+                    ..ProviderUsage::default()
+                },
+                false,
+            ),
             "Month $1.25"
         );
         assert_eq!(
-            format_month_usage(ProviderUsage {
-                month_cents: 125,
-                month_input_tokens: 1_500_000,
-                month_output_tokens: 2_500,
-                ..ProviderUsage::default()
-            }),
+            format_month_usage(
+                ProviderUsage {
+                    month_cents: 125,
+                    month_input_tokens: 1_500_000,
+                    month_output_tokens: 2_500,
+                    ..ProviderUsage::default()
+                },
+                false,
+            ),
             "Month $1.25 (1.5M / 2.5K)"
+        );
+        assert_eq!(
+            format_month_usage(ProviderUsage::default(), true),
+            "Month: Scanning..."
         );
     }
 
@@ -1710,6 +1740,7 @@ mod tests {
                 month_cents: 125,
                 ..ProviderUsage::default()
             },
+            ..UsageSnapshot::default()
         };
         assert_eq!(visible_usage_count(usage), 2);
         assert_eq!(
