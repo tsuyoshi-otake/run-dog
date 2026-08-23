@@ -280,7 +280,14 @@ fn load_usage_checkpoint_at(settings_key: &str) -> Option<UsageCheckpoint> {
     let key = open_key(settings_key, KEY_READ)?;
     let payload = read_string(key, USAGE_CHECKPOINT_VALUE);
     close_key(key);
-    payload.as_deref().and_then(UsageCheckpoint::decode)
+    let Some(payload) = payload else {
+        return None;
+    };
+    if let Some(checkpoint) = UsageCheckpoint::decode(&payload) {
+        return Some(checkpoint);
+    }
+    let _ = clear_usage_checkpoint_at(settings_key);
+    None
 }
 
 fn save_usage_checkpoint_at(settings_key: &str, checkpoint: &UsageCheckpoint) -> bool {

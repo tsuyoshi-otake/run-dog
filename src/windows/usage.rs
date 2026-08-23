@@ -297,7 +297,7 @@ impl UsageCollector {
     }
 
     fn apply_checkpoint(&mut self, window: DayWindow, checkpoint: UsageCheckpoint) {
-        if checkpoint.month_start != window.month_start {
+        if checkpoint.month_start != window.month_start || !checkpoint.catch_up_done {
             return;
         }
         self.snapshot = checkpoint.snapshot;
@@ -332,13 +332,14 @@ impl UsageCollector {
             month_start: window.month_start,
             today: window.today,
             last_collected_ms: self.last_collected_ms,
+            catch_up_done: true,
             snapshot: self.snapshot,
             files,
         }
     }
 
     fn persist_checkpoint_if_needed(&mut self, window: DayWindow) {
-        if !self.persist_checkpoint || !self.checkpoint_dirty {
+        if !self.persist_checkpoint || !self.checkpoint_dirty || self.catch_up {
             return;
         }
         let checkpoint = self.build_checkpoint(window);
@@ -2159,6 +2160,7 @@ mod tests {
             month_start: window.month_start,
             today: window.today,
             last_collected_ms: timestamp_ms,
+            catch_up_done: true,
             snapshot: collector.snapshot(),
             files: HashMap::from([(
                 key,
