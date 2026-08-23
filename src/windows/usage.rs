@@ -372,6 +372,20 @@ impl UsageCollector {
             return;
         }
         self.month_key = window.month_start;
+        self.begin_month_rescan(window);
+    }
+
+    /// Clears the durable checkpoint and rescans every JSONL file for the
+    /// current month. Use when Month totals look stale after a bad checkpoint.
+    pub fn rescan_current_month(&mut self) {
+        let window = day_window(unix_now_ms());
+        if self.month_key == 0 {
+            self.month_key = window.month_start;
+        }
+        self.begin_month_rescan(window);
+    }
+
+    fn begin_month_rescan(&mut self, window: DayWindow) {
         self.day_key = window.today;
         self.last_collected_ms = 0;
         self.file_checkpoint.clear();
@@ -390,7 +404,10 @@ impl UsageCollector {
         self.snapshot.codex.month_input_tokens = 0;
         self.snapshot.codex.month_output_tokens = 0;
         self.checkpoint_dirty = false;
-        let _ = super::registry::clear_usage_checkpoint();
+        if self.persist_checkpoint {
+            let _ = super::registry::clear_usage_checkpoint();
+        }
+        self.last_discover_ms = 0;
         self.queue_roots();
     }
 
@@ -2194,5 +2211,57 @@ mod tests {
         assert_eq!(restored.snapshot().claude.month_cents, 1_000);
         assert_eq!(restored.snapshot().claude.month_input_tokens, 2_000_000);
         assert!(!restored.catch_up);
+    }
+
+    #[test]
+    fn component_rescan_current_month_rebuilds_totals_from_jsonl() {
+        use super::{unix_now_ms, UsageCollector, UsageTick};
+        use crate::core::local_ymd;
+
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-usage-rescan-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let claude_dir = root.join("claude");
+        let project = claude_dir.join("projects").join("p1");
+        fs::create_dir_all(&project).expect("temp project");
+        let now = unix_now_ms();
+        let (year, month, day) = local_ymd(now, 0);
+        let timestamp = format!("{year:04}-{month:02}-{day:02}T12:00:00Z");
+        let line = format!(
+            r#"{{"type":"assistant","timestamp":"{timestamp}","requestId":"a","message":{{"id":"a","model":"claude-opus-5","usage":{{"input_tokens":1000000,"output_tokens":0}}}}}}"#
+        );
+        fs::write(project.join("session.jsonl"), format!("{line}\n")).expect("jsonl");
+
+        let mut collector =
+            UsageCollector::with_dirs(claude_dir.clone(), root.join("codex"), false);
+        for _ in 0..16 {
+            if collector.tick(ptr::null_mut()) == UsageTick::Idle
+                && collector.snapshot().claude.month_cents == 500
+            {
+                break;
+            }
+        }
+        assert_eq!(collector.snapshot().claude.month_cents, 500);
+
+        collector.snapshot.claude.month_cents = 12;
+        collector.snapshot.claude.month_input_tokens = 0;
+        collector.catch_up = false;
+        collector.rescan_current_month();
+        assert!(collector.catch_up);
+        assert_eq!(collector.snapshot().claude.month_cents, 0);
+
+        let mut last = UsageTick::MoreWork;
+        for _ in 0..16 {
+            last = collector.tick(ptr::null_mut());
+            if last == UsageTick::Idle && collector.snapshot().claude.month_cents == 500 {
+                break;
+            }
+        }
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(last, UsageTick::Idle);
+        assert_eq!(collector.snapshot().claude.month_cents, 500);
+        assert_eq!(collector.snapshot().claude.month_input_tokens, 1_000_000);
     }
 }
