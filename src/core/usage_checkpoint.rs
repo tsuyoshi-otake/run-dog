@@ -4,7 +4,8 @@ use std::collections::HashMap;
 
 use super::{ProviderUsage, UsageSnapshot};
 
-const HEADER: &str = "rundog-usage-checkpoint-1";
+const HEADER_V1: &str = "rundog-usage-checkpoint-1";
+const HEADER: &str = "rundog-usage-checkpoint-2";
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub enum FileCheckpointKey {
@@ -23,6 +24,7 @@ pub struct UsageCheckpoint {
     pub month_start: u32,
     pub today: u32,
     pub last_collected_ms: u64,
+    pub catch_up_done: bool,
     pub snapshot: UsageSnapshot,
     pub files: HashMap<FileCheckpointKey, FileCheckpointCursor>,
 }
@@ -35,6 +37,7 @@ impl UsageCheckpoint {
                 "month={}\n",
                 "day={}\n",
                 "last_ms={}\n",
+                "catch_up_done={}\n",
                 "claude_today={}\n",
                 "claude_month={}\n",
                 "claude_in={}\n",
@@ -47,6 +50,7 @@ impl UsageCheckpoint {
             self.month_start,
             self.today,
             self.last_collected_ms,
+            u32::from(self.catch_up_done),
             self.snapshot.claude.today_cents,
             self.snapshot.claude.month_cents,
             self.snapshot.claude.month_input_tokens,
@@ -80,12 +84,15 @@ impl UsageCheckpoint {
     #[must_use]
     pub fn decode(payload: &str) -> Option<Self> {
         let mut lines = payload.lines();
-        if lines.next()? != HEADER {
-            return None;
+        match lines.next()? {
+            HEADER => {}
+            HEADER_V1 => return None,
+            _ => return None,
         }
         let mut month_start = None;
         let mut today = None;
         let mut last_collected_ms = None;
+        let mut catch_up_done = false;
         let mut claude_today = 0_u32;
         let mut claude_month = 0_u32;
         let mut claude_in = 0_u64;
@@ -102,6 +109,8 @@ impl UsageCheckpoint {
                 today = value.parse().ok();
             } else if let Some(value) = line.strip_prefix("last_ms=") {
                 last_collected_ms = value.parse().ok();
+            } else if let Some(value) = line.strip_prefix("catch_up_done=") {
+                catch_up_done = value.parse::<u32>().ok()? != 0;
             } else if let Some(value) = line.strip_prefix("claude_today=") {
                 claude_today = value.parse().ok()?;
             } else if let Some(value) = line.strip_prefix("claude_month=") {
@@ -128,10 +137,14 @@ impl UsageCheckpoint {
                 files.insert(key, FileCheckpointCursor { offset, size });
             }
         }
+        if !catch_up_done {
+            return None;
+        }
         Some(Self {
             month_start: month_start?,
             today: today?,
             last_collected_ms: last_collected_ms?,
+            catch_up_done,
             snapshot: UsageSnapshot {
                 claude: ProviderUsage {
                     today_cents: claude_today,
@@ -171,8 +184,9 @@ fn parse_file_line(value: &str) -> Option<(char, &str, u64, u64)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{FileCheckpointCursor, FileCheckpointKey, UsageCheckpoint};
+    use super::{FileCheckpointCursor, FileCheckpointKey, UsageCheckpoint, HEADER, HEADER_V1};
     use crate::core::{ProviderUsage, UsageSnapshot};
+    use std::collections::HashMap;
 
     #[test]
     fn component_usage_checkpoint_round_trips_costs_and_tokens() {
@@ -180,6 +194,7 @@ mod tests {
             month_start: 20_260_801,
             today: 20_260_823,
             last_collected_ms: 1_786_865_940_000,
+            catch_up_done: true,
             snapshot: UsageSnapshot {
                 claude: ProviderUsage {
                     today_cents: 12,
@@ -219,5 +234,26 @@ mod tests {
             UsageCheckpoint::decode(&checkpoint.encode()).expect("checkpoint"),
             checkpoint
         );
+    }
+
+    #[test]
+    fn component_v1_and_incomplete_checkpoints_are_rejected() {
+        let complete = UsageCheckpoint {
+            month_start: 20_260_801,
+            today: 20_260_823,
+            last_collected_ms: 0,
+            catch_up_done: true,
+            snapshot: UsageSnapshot::default(),
+            files: HashMap::new(),
+        };
+        let mut payload = complete.encode();
+        payload = payload.replacen(HEADER, HEADER_V1, 1);
+        assert!(UsageCheckpoint::decode(&payload).is_none());
+
+        let incomplete = UsageCheckpoint {
+            catch_up_done: false,
+            ..complete
+        };
+        assert!(UsageCheckpoint::decode(&incomplete.encode()).is_none());
     }
 }
