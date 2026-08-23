@@ -293,10 +293,6 @@ impl UsageCollector {
         let Some(checkpoint) = super::registry::load_usage_checkpoint() else {
             return;
         };
-        if checkpoint.month_start != window.month_start || !checkpoint.catch_up_done {
-            let _ = super::registry::clear_usage_checkpoint();
-            return;
-        }
         self.apply_checkpoint(window, checkpoint);
     }
 
