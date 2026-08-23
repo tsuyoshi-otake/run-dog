@@ -40,6 +40,7 @@ pub const COMMAND_TOGGLE_STARTUP: u32 = 1_020;
 pub const COMMAND_TOGGLE_PINNED_FLYOUT: u32 = 1_021;
 pub const COMMAND_CHECK_FOR_UPDATES: u32 = 1_030;
 pub const COMMAND_INSTALL_UPDATE: u32 = 1_031;
+pub const COMMAND_RESCAN_MONTH_USAGE: u32 = 1_032;
 pub const COMMAND_EXIT: u32 = 1_099;
 
 /// Converts a menu command to a pure application event.
@@ -217,6 +218,11 @@ impl TrayAdapter {
             self.flyout_pinned,
         );
         let _ = unsafe { AppendMenuW(root, MF_SEPARATOR, 0, ptr::null()) };
+        append_action(
+            root,
+            COMMAND_RESCAN_MONTH_USAGE,
+            "Full scan: current month usage",
+        );
         append_update_menu(root, update_state);
         let _ = unsafe { AppendMenuW(root, MF_SEPARATOR, 0, ptr::null()) };
         append_checked(root, COMMAND_EXIT, "Exit", false);
@@ -425,6 +431,10 @@ impl TrayAdapter {
         if let Some(body) = update_balloon_text(state, notify_always) {
             self.show_balloon("RunDog", &body);
         }
+    }
+
+    pub fn notify_month_rescan_started(&mut self) {
+        self.show_balloon("RunDog", "Full scan of current month usage started.");
     }
 
     fn show_balloon(&self, title: &str, body: &str) {

@@ -56,7 +56,8 @@ use self::{
     icons::IconFrames,
     tray::{
         event_for_command, TrayAdapter, COMMAND_CHECK_FOR_UPDATES, COMMAND_INSTALL_UPDATE,
-        COMMAND_TOGGLE_PINNED_FLYOUT, PROMOTE_TIMER_ID, TRAY_CALLBACK_MESSAGE,
+        COMMAND_RESCAN_MONTH_USAGE, COMMAND_TOGGLE_PINNED_FLYOUT, PROMOTE_TIMER_ID,
+        TRAY_CALLBACK_MESSAGE,
     },
     update::{UpdateController, UPDATE_CHECK_DONE_MESSAGE, UPDATE_REQUEST_EXIT_MESSAGE},
     usage::{
@@ -506,6 +507,14 @@ unsafe extern "system" fn window_proc(
             context.updater.install_available(hwnd);
         } else if command == COMMAND_TOGGLE_PINNED_FLYOUT {
             context.platform.tray.toggle_pinned_flyout();
+        } else if command == COMMAND_RESCAN_MONTH_USAGE {
+            context.usage.rescan_current_month();
+            context.dispatch(Event::UsageSample(context.usage.snapshot()));
+            context
+                .platform
+                .tray
+                .notify_month_rescan_started();
+            context.arm_usage_timer(USAGE_CONTINUE_INTERVAL_MS);
         } else if let Some(event) = event_for_command(command) {
             context.dispatch(event);
         }
