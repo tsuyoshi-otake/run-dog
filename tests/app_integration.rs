@@ -435,7 +435,6 @@ fn integration_taskbar_recovery_activation_and_exit_stay_inside_fake_adapters() 
         .count();
 
     rig.event(Event::TaskbarRecreated);
-    rig.event(Event::TrayActivated);
     rig.event(Event::ExitRequested);
 
     assert_eq!(
@@ -446,7 +445,6 @@ fn integration_taskbar_recovery_activation_and_exit_stay_inside_fake_adapters() 
             .count(),
         original_adds + 1
     );
-    assert_eq!(rig.platform.task_manager_launches, 1);
     assert!(rig.platform.active_timers.is_empty());
     assert!(rig.platform.tray.is_none());
     assert!(rig.platform.quit_requested);

@@ -1,0 +1,223 @@
+//! Durable cursor for incremental Claude / Codex JSONL usage collection.
+
+use std::collections::HashMap;
+
+use super::{ProviderUsage, UsageSnapshot};
+
+const HEADER: &str = "rundog-usage-checkpoint-1";
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub enum FileCheckpointKey {
+    Claude(String),
+    Codex(String),
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct FileCheckpointCursor {
+    pub offset: u64,
+    pub size: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct UsageCheckpoint {
+    pub month_start: u32,
+    pub today: u32,
+    pub last_collected_ms: u64,
+    pub snapshot: UsageSnapshot,
+    pub files: HashMap<FileCheckpointKey, FileCheckpointCursor>,
+}
+
+impl UsageCheckpoint {
+    #[must_use]
+    pub fn encode(&self) -> String {
+        let mut out = format!(
+            concat!(
+                "month={}\n",
+                "day={}\n",
+                "last_ms={}\n",
+                "claude_today={}\n",
+                "claude_month={}\n",
+                "claude_in={}\n",
+                "claude_out={}\n",
+                "codex_today={}\n",
+                "codex_month={}\n",
+                "codex_in={}\n",
+                "codex_out={}\n",
+            ),
+            self.month_start,
+            self.today,
+            self.last_collected_ms,
+            self.snapshot.claude.today_cents,
+            self.snapshot.claude.month_cents,
+            self.snapshot.claude.month_input_tokens,
+            self.snapshot.claude.month_output_tokens,
+            self.snapshot.codex.today_cents,
+            self.snapshot.codex.month_cents,
+            self.snapshot.codex.month_input_tokens,
+            self.snapshot.codex.month_output_tokens,
+        );
+        out.insert_str(0, &format!("{HEADER}\n"));
+        let mut files: Vec<_> = self.files.iter().collect();
+        files.sort_by(|(left, _), (right, _)| {
+            file_key_sort_key(left).cmp(&file_key_sort_key(right))
+        });
+        for (key, cursor) in files {
+            let prefix = match key {
+                FileCheckpointKey::Claude(_) => 'c',
+                FileCheckpointKey::Codex(_) => 'x',
+            };
+            let path = match key {
+                FileCheckpointKey::Claude(path) | FileCheckpointKey::Codex(path) => path,
+            };
+            out.push_str(&format!(
+                "file={prefix}\t{path}\t{}\t{}\n",
+                cursor.offset, cursor.size
+            ));
+        }
+        out
+    }
+
+    #[must_use]
+    pub fn decode(payload: &str) -> Option<Self> {
+        let mut lines = payload.lines();
+        if lines.next()? != HEADER {
+            return None;
+        }
+        let mut month_start = None;
+        let mut today = None;
+        let mut last_collected_ms = None;
+        let mut claude_today = 0_u32;
+        let mut claude_month = 0_u32;
+        let mut claude_in = 0_u64;
+        let mut claude_out = 0_u64;
+        let mut codex_today = 0_u32;
+        let mut codex_month = 0_u32;
+        let mut codex_in = 0_u64;
+        let mut codex_out = 0_u64;
+        let mut files = HashMap::new();
+        for line in lines {
+            if let Some(value) = line.strip_prefix("month=") {
+                month_start = value.parse().ok();
+            } else if let Some(value) = line.strip_prefix("day=") {
+                today = value.parse().ok();
+            } else if let Some(value) = line.strip_prefix("last_ms=") {
+                last_collected_ms = value.parse().ok();
+            } else if let Some(value) = line.strip_prefix("claude_today=") {
+                claude_today = value.parse().ok()?;
+            } else if let Some(value) = line.strip_prefix("claude_month=") {
+                claude_month = value.parse().ok()?;
+            } else if let Some(value) = line.strip_prefix("claude_in=") {
+                claude_in = value.parse().ok()?;
+            } else if let Some(value) = line.strip_prefix("claude_out=") {
+                claude_out = value.parse().ok()?;
+            } else if let Some(value) = line.strip_prefix("codex_today=") {
+                codex_today = value.parse().ok()?;
+            } else if let Some(value) = line.strip_prefix("codex_month=") {
+                codex_month = value.parse().ok()?;
+            } else if let Some(value) = line.strip_prefix("codex_in=") {
+                codex_in = value.parse().ok()?;
+            } else if let Some(value) = line.strip_prefix("codex_out=") {
+                codex_out = value.parse().ok()?;
+            } else if let Some(value) = line.strip_prefix("file=") {
+                let (prefix, path, offset, size) = parse_file_line(value)?;
+                let key = match prefix {
+                    'c' => FileCheckpointKey::Claude(path.to_owned()),
+                    'x' => FileCheckpointKey::Codex(path.to_owned()),
+                    _ => return None,
+                };
+                files.insert(key, FileCheckpointCursor { offset, size });
+            }
+        }
+        Some(Self {
+            month_start: month_start?,
+            today: today?,
+            last_collected_ms: last_collected_ms?,
+            snapshot: UsageSnapshot {
+                claude: ProviderUsage {
+                    today_cents: claude_today,
+                    month_cents: claude_month,
+                    month_input_tokens: claude_in,
+                    month_output_tokens: claude_out,
+                    ..ProviderUsage::default()
+                },
+                codex: ProviderUsage {
+                    today_cents: codex_today,
+                    month_cents: codex_month,
+                    month_input_tokens: codex_in,
+                    month_output_tokens: codex_out,
+                    ..ProviderUsage::default()
+                },
+            },
+            files,
+        })
+    }
+}
+
+fn file_key_sort_key(key: &FileCheckpointKey) -> (&'static str, &str) {
+    match key {
+        FileCheckpointKey::Claude(path) => ("c", path.as_str()),
+        FileCheckpointKey::Codex(path) => ("x", path.as_str()),
+    }
+}
+
+fn parse_file_line(value: &str) -> Option<(char, &str, u64, u64)> {
+    let mut parts = value.split('\t');
+    let prefix = parts.next()?.chars().next()?;
+    let path = parts.next()?;
+    let offset = parts.next()?.parse().ok()?;
+    let size = parts.next()?.parse().ok()?;
+    Some((prefix, path, offset, size))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FileCheckpointCursor, FileCheckpointKey, UsageCheckpoint};
+    use crate::core::{ProviderUsage, UsageSnapshot};
+
+    #[test]
+    fn component_usage_checkpoint_round_trips_costs_and_tokens() {
+        let mut checkpoint = UsageCheckpoint {
+            month_start: 20_260_801,
+            today: 20_260_823,
+            last_collected_ms: 1_786_865_940_000,
+            snapshot: UsageSnapshot {
+                claude: ProviderUsage {
+                    today_cents: 12,
+                    month_cents: 28_449,
+                    month_input_tokens: 142_500_000,
+                    month_output_tokens: 3_200_000,
+                    ..ProviderUsage::default()
+                },
+                codex: ProviderUsage {
+                    today_cents: 56,
+                    month_cents: 879_982,
+                    month_input_tokens: 9_500_000,
+                    month_output_tokens: 250_000,
+                    ..ProviderUsage::default()
+                },
+            },
+            files: [(
+                FileCheckpointKey::Claude("projects/p1/session.jsonl".to_owned()),
+                FileCheckpointCursor {
+                    offset: 4096,
+                    size: 4096,
+                },
+            )]
+            .into(),
+        };
+        let decoded = UsageCheckpoint::decode(&checkpoint.encode()).expect("checkpoint");
+        assert_eq!(decoded, checkpoint);
+
+        checkpoint.files.insert(
+            FileCheckpointKey::Codex("sessions/2026/08/a.jsonl".to_owned()),
+            FileCheckpointCursor {
+                offset: 10,
+                size: 20,
+            },
+        );
+        assert_eq!(
+            UsageCheckpoint::decode(&checkpoint.encode()).expect("checkpoint"),
+            checkpoint
+        );
+    }
+}

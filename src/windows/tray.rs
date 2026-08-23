@@ -11,8 +11,8 @@ use windows_sys::Win32::{
         WindowsAndMessaging::{
             AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, KillTimer, PostMessageW,
             SetForegroundWindow, SetTimer, TrackPopupMenu, HMENU, MF_CHECKED, MF_GRAYED, MF_POPUP,
-            MF_SEPARATOR, MF_STRING, MF_UNCHECKED, TPM_RIGHTBUTTON, WM_CONTEXTMENU,
-            WM_LBUTTONDBLCLK, WM_NULL, WM_RBUTTONUP,
+            MF_SEPARATOR, MF_STRING, MF_UNCHECKED, TPM_RIGHTBUTTON, WM_CONTEXTMENU, WM_NULL,
+            WM_RBUTTONUP,
         },
     },
 };
@@ -38,6 +38,7 @@ pub const COMMAND_FPS_20: u32 = 1_011;
 pub const COMMAND_FPS_30: u32 = 1_012;
 pub const COMMAND_FPS_40: u32 = 1_013;
 pub const COMMAND_TOGGLE_STARTUP: u32 = 1_020;
+pub const COMMAND_TOGGLE_PINNED_FLYOUT: u32 = 1_021;
 pub const COMMAND_CHECK_FOR_UPDATES: u32 = 1_030;
 pub const COMMAND_INSTALL_UPDATE: u32 = 1_031;
 pub const COMMAND_EXIT: u32 = 1_099;
@@ -67,6 +68,7 @@ pub struct TrayAdapter {
     theme: ThemePreference,
     fps_limit: FpsLimit,
     startup_enabled: bool,
+    flyout_pinned: bool,
     added: bool,
     promote_attempts: u8,
     flyout: HoverFlyout,
@@ -87,6 +89,7 @@ impl TrayAdapter {
             theme,
             fps_limit,
             startup_enabled: startup,
+            flyout_pinned: super::registry::load_pinned_flyout(),
             added: false,
             promote_attempts: 0,
             flyout: HoverFlyout::new(),
@@ -103,6 +106,9 @@ impl TrayAdapter {
             Effect::AddTray(icon) => {
                 self.add(icon);
                 self.begin_promote();
+                if self.flyout_pinned {
+                    self.show_pinned_flyout();
+                }
             }
             Effect::ModifyTray(icon) => self.modify(icon),
             Effect::RemoveTray => {
@@ -139,6 +145,7 @@ impl TrayAdapter {
 
     /// Opens the right-click menu. Menu handles exist only for this invocation.
     pub fn show_menu(&mut self, update_state: &UpdateMenuState) {
+        let restore_pinned = self.flyout_pinned;
         self.flyout.hide();
         super::process::trim_working_set();
         let root = unsafe { CreatePopupMenu() };
@@ -209,6 +216,12 @@ impl TrayAdapter {
             startup_menu_label(self.startup_enabled),
             self.startup_enabled,
         );
+        append_checked(
+            root,
+            COMMAND_TOGGLE_PINNED_FLYOUT,
+            pinned_flyout_menu_label(self.flyout_pinned),
+            self.flyout_pinned,
+        );
         let _ = unsafe { AppendMenuW(root, MF_SEPARATOR, 0, ptr::null()) };
         append_update_menu(root, update_state);
         let _ = unsafe { AppendMenuW(root, MF_SEPARATOR, 0, ptr::null()) };
@@ -235,6 +248,9 @@ impl TrayAdapter {
         }
         // Destroying the root also destroys its attached submenus.
         let _ = unsafe { DestroyMenu(root) };
+        if restore_pinned {
+            self.show_pinned_flyout();
+        }
     }
 
     #[must_use]
@@ -253,8 +269,8 @@ impl TrayAdapter {
     }
 
     #[must_use]
-    pub const fn is_activation_notification(notification: u32) -> bool {
-        notification == WM_LBUTTONDBLCLK || notification == NIN_SELECT || notification == 1_025
+    pub const fn is_pin_toggle_notification(notification: u32) -> bool {
+        notification == NIN_SELECT
     }
 
     #[must_use]
@@ -267,10 +283,31 @@ impl TrayAdapter {
         notification == NIN_POPUPCLOSE
     }
 
-    pub fn handle_hover(&mut self, notification: u32) {
-        if Self::is_popup_close_notification(notification) {
+    pub fn toggle_pinned_flyout(&mut self) {
+        self.flyout_pinned = !self.flyout_pinned;
+        let _ = super::registry::save_pinned_flyout(self.flyout_pinned);
+        self.flyout.set_pinned(self.flyout_pinned);
+        if self.flyout_pinned {
+            self.show_pinned_flyout();
+        } else {
             self.flyout.hide();
             super::process::trim_working_set();
+        }
+    }
+
+    fn show_pinned_flyout(&mut self) {
+        if self.last_icon.is_some() {
+            self.flyout.set_pinned(true);
+            self.flyout.show_near_icon(self.hwnd);
+        }
+    }
+
+    pub fn handle_hover(&mut self, notification: u32) {
+        if Self::is_popup_close_notification(notification) {
+            self.flyout.hide_unless_pinned();
+            if !self.flyout.is_pinned() {
+                super::process::trim_working_set();
+            }
             return;
         }
         if Self::is_popup_open_notification(notification) && self.last_icon.is_some() {
@@ -499,6 +536,14 @@ fn startup_menu_label(enabled: bool) -> &'static str {
     }
 }
 
+fn pinned_flyout_menu_label(enabled: bool) -> &'static str {
+    if enabled {
+        "Pin monitor card: On"
+    } else {
+        "Pin monitor card: Off"
+    }
+}
+
 #[must_use]
 fn update_balloon_text(state: &UpdateMenuState, notify_always: bool) -> Option<String> {
     match state {
@@ -528,14 +573,15 @@ fn wide(value: &str) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::{
-        event_for_command, startup_menu_label, update_balloon_text, TrayAdapter, UpdateMenuState,
-        COMMAND_CHECK_FOR_UPDATES, COMMAND_EXIT, COMMAND_FPS_40, COMMAND_THEME_DARK,
-        COMMAND_TOGGLE_STARTUP,
+        event_for_command, pinned_flyout_menu_label, startup_menu_label, update_balloon_text,
+        TrayAdapter, UpdateMenuState, COMMAND_CHECK_FOR_UPDATES, COMMAND_EXIT, COMMAND_FPS_40,
+        COMMAND_THEME_DARK, COMMAND_TOGGLE_STARTUP,
     };
     use crate::{
         application::Event,
         core::{FpsLimit, ThemePreference},
     };
+    use windows_sys::Win32::UI::Shell::NIN_SELECT;
     use windows_sys::Win32::UI::WindowsAndMessaging::{WM_CONTEXTMENU, WM_RBUTTONUP};
 
     #[test]
@@ -565,10 +611,9 @@ mod tests {
         assert!(TrayAdapter::is_context_menu_notification(v4_right_click));
         assert!(TrayAdapter::is_context_menu_notification(v4_context_menu));
         assert!(!TrayAdapter::is_context_menu_notification(515));
-        assert!(TrayAdapter::is_activation_notification(515));
-        assert!(TrayAdapter::is_activation_notification(1024));
-        assert!(TrayAdapter::is_activation_notification(1025));
-        assert!(!TrayAdapter::is_activation_notification(0));
+        assert!(TrayAdapter::is_pin_toggle_notification(NIN_SELECT));
+        assert!(!TrayAdapter::is_pin_toggle_notification(515));
+        assert!(!TrayAdapter::is_pin_toggle_notification(0));
         assert!(TrayAdapter::is_popup_open_notification(0x0406));
         assert!(TrayAdapter::is_popup_close_notification(0x0407));
         assert!(!TrayAdapter::is_popup_open_notification(0x0400));
@@ -578,6 +623,8 @@ mod tests {
     fn component_startup_label_and_update_balloons_cover_user_visible_states() {
         assert_eq!(startup_menu_label(true), "Launch at startup: On");
         assert_eq!(startup_menu_label(false), "Launch at startup: Off");
+        assert_eq!(pinned_flyout_menu_label(true), "Pin monitor card: On");
+        assert_eq!(pinned_flyout_menu_label(false), "Pin monitor card: Off");
         assert_eq!(
             update_balloon_text(&UpdateMenuState::Current, true).as_deref(),
             Some("RunDog is up to date.")

@@ -16,6 +16,26 @@ pub struct TokenUsage {
     pub long_context_output: u64,
 }
 
+impl TokenUsage {
+    /// All input-side tokens seen while parsing provider JSONL.
+    #[must_use]
+    pub const fn processed_input_tokens(self) -> u64 {
+        self.input
+            .saturating_add(self.cached_input)
+            .saturating_add(self.cache_read)
+            .saturating_add(self.cache_write_5m)
+            .saturating_add(self.cache_write_1h)
+            .saturating_add(self.long_context_input)
+            .saturating_add(self.long_context_cached_input)
+    }
+
+    /// All output-side tokens seen while parsing provider JSONL.
+    #[must_use]
+    pub const fn processed_output_tokens(self) -> u64 {
+        self.output.saturating_add(self.long_context_output)
+    }
+}
+
 /// One 5-hour or weekly rate-limit window.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct LimitWindow {
@@ -51,6 +71,8 @@ impl LimitWindow {
 pub struct ProviderUsage {
     pub today_cents: u32,
     pub month_cents: u32,
+    pub month_input_tokens: u64,
+    pub month_output_tokens: u64,
     pub plan: [u8; 16],
     pub plan_len: u8,
     pub primary: Option<LimitWindow>,
@@ -81,7 +103,10 @@ impl ProviderUsage {
     /// return 5h/7d bars without any use this month.
     #[must_use]
     pub const fn has_month_activity(self) -> bool {
-        self.month_cents > 0 || self.today_cents > 0
+        self.month_cents > 0
+            || self.today_cents > 0
+            || self.month_input_tokens > 0
+            || self.month_output_tokens > 0
     }
 
     #[must_use]
@@ -145,6 +170,24 @@ fn extract_multiplier(lower: &str) -> Option<&'static str> {
 pub struct UsageSnapshot {
     pub claude: ProviderUsage,
     pub codex: ProviderUsage,
+}
+
+/// Compact decimal token count for flyout labels (`1.2K`, `3.4M`, `5.6B`).
+#[must_use]
+pub fn format_compact_token_count(tokens: u64) -> String {
+    const K: f64 = 1_000.0;
+    const M: f64 = 1_000_000.0;
+    const B: f64 = 1_000_000_000.0;
+    let value = tokens as f64;
+    if value >= B {
+        format!("{:.1}B", value / B)
+    } else if value >= M {
+        format!("{:.1}M", value / M)
+    } else if value >= K {
+        format!("{:.1}K", value / K)
+    } else {
+        tokens.to_string()
+    }
 }
 
 /// USD cents from a per-million-token price table.
@@ -423,9 +466,36 @@ pub fn days_to_ymd(days: i64) -> (i32, u8, u8) {
 #[cfg(test)]
 mod tests {
     use super::{
-        cost_cents, days_to_ymd, format_plan_label, is_long_context_request, local_ymd,
-        resolve_codex_model, ymd_key, LimitWindow, ProviderUsage, TokenUsage,
+        cost_cents, days_to_ymd, format_compact_token_count, format_plan_label,
+        is_long_context_request, local_ymd, resolve_codex_model, ymd_key, LimitWindow,
+        ProviderUsage, TokenUsage,
     };
+
+    #[test]
+    fn component_compact_token_counts_use_decimal_si_suffixes() {
+        assert_eq!(format_compact_token_count(0), "0");
+        assert_eq!(format_compact_token_count(999), "999");
+        assert_eq!(format_compact_token_count(1_500), "1.5K");
+        assert_eq!(format_compact_token_count(2_500_000), "2.5M");
+        assert_eq!(format_compact_token_count(3_400_000_000), "3.4B");
+    }
+
+    #[test]
+    fn component_processed_token_totals_include_cache_and_long_context_fields() {
+        let usage = TokenUsage {
+            input: 10,
+            cached_input: 2,
+            cache_read: 3,
+            cache_write_5m: 4,
+            cache_write_1h: 5,
+            output: 7,
+            long_context_input: 11,
+            long_context_cached_input: 13,
+            long_context_output: 17,
+        };
+        assert_eq!(usage.processed_input_tokens(), 48);
+        assert_eq!(usage.processed_output_tokens(), 24);
+    }
 
     #[test]
     fn component_opus_standard_request_matches_published_rates() {

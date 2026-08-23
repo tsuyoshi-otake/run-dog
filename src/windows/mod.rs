@@ -56,7 +56,7 @@ use self::{
     icons::IconFrames,
     tray::{
         event_for_command, TrayAdapter, COMMAND_CHECK_FOR_UPDATES, COMMAND_INSTALL_UPDATE,
-        PROMOTE_TIMER_ID, TRAY_CALLBACK_MESSAGE,
+        COMMAND_TOGGLE_PINNED_FLYOUT, PROMOTE_TIMER_ID, TRAY_CALLBACK_MESSAGE,
     },
     update::{UpdateController, UPDATE_CHECK_DONE_MESSAGE, UPDATE_REQUEST_EXIT_MESSAGE},
     usage::{
@@ -238,6 +238,7 @@ impl WindowContext {
             if !self.platform.hwnd.is_null() {
                 let _ = unsafe { KillTimer(self.platform.hwnd, USAGE_TIMER_ID) };
             }
+            self.usage.flush_checkpoint();
         }
         dispatch_and_execute(&mut self.app, &mut self.platform, event);
     }
@@ -460,8 +461,8 @@ unsafe extern "system" fn window_proc(
         if TrayAdapter::is_context_menu_notification(notification) {
             let update_state = context.updater.menu_state();
             context.platform.tray.show_menu(&update_state);
-        } else if TrayAdapter::is_activation_notification(notification) {
-            context.dispatch(Event::TrayActivated);
+        } else if TrayAdapter::is_pin_toggle_notification(notification) {
+            context.platform.tray.toggle_pinned_flyout();
         } else {
             context.platform.tray.handle_hover(notification);
         }
@@ -494,6 +495,8 @@ unsafe extern "system" fn window_proc(
             context.updater.check_for_updates(hwnd, true);
         } else if command == COMMAND_INSTALL_UPDATE {
             context.updater.install_available(hwnd);
+        } else if command == COMMAND_TOGGLE_PINNED_FLYOUT {
+            context.platform.tray.toggle_pinned_flyout();
         } else if let Some(event) = event_for_command(command) {
             context.dispatch(event);
         }

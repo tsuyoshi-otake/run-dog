@@ -40,7 +40,8 @@ use windows_sys::Win32::{
 };
 
 use crate::core::{
-    cost_cents, local_ymd, ymd_iso, ymd_key, LimitWindow, ProviderUsage, TokenUsage, UsageSnapshot,
+    cost_cents, local_ymd, ymd_iso, ymd_key, FileCheckpointCursor, FileCheckpointKey, LimitWindow,
+    ProviderUsage, TokenUsage, UsageCheckpoint, UsageSnapshot,
 };
 
 pub const USAGE_TIMER_ID: usize = 4;
@@ -114,6 +115,9 @@ pub struct UsageCollector {
     pending: VecDeque<PathBuf>,
     snapshot: UsageSnapshot,
     month_key: u32,
+    day_key: u32,
+    last_collected_ms: u64,
+    file_checkpoint: HashMap<FileCheckpointKey, FileCheckpointCursor>,
     last_discover_ms: u64,
     last_claude_limits_ms: u64,
     last_codex_limits_ms: u64,
@@ -123,6 +127,8 @@ pub struct UsageCollector {
     read_buf: Vec<u8>,
     codex_from_remote: bool,
     remote_fetch: RemoteLimitsFetch,
+    checkpoint_dirty: bool,
+    persist_checkpoint: bool,
 }
 
 struct RemoteLimits {
@@ -148,12 +154,12 @@ impl UsageCollector {
         let codex_home = std::env::var_os("CODEX_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".codex"));
-        Self::with_dirs(claude_dir, codex_home)
+        Self::with_dirs(claude_dir, codex_home, true)
     }
 
     #[must_use]
-    fn with_dirs(claude_dir: PathBuf, codex_home: PathBuf) -> Self {
-        Self {
+    fn with_dirs(claude_dir: PathBuf, codex_home: PathBuf, persist_checkpoint: bool) -> Self {
+        let mut collector = Self {
             claude_dir,
             codex_home,
             files: HashMap::new(),
@@ -163,6 +169,9 @@ impl UsageCollector {
             pending: VecDeque::new(),
             snapshot: UsageSnapshot::default(),
             month_key: 0,
+            day_key: 0,
+            last_collected_ms: 0,
+            file_checkpoint: HashMap::new(),
             last_discover_ms: 0,
             last_claude_limits_ms: 0,
             last_codex_limits_ms: 0,
@@ -175,7 +184,21 @@ impl UsageCollector {
                 in_flight: Arc::new(AtomicBool::new(false)),
                 latest: Arc::new(Mutex::new(None)),
             },
+            checkpoint_dirty: false,
+            persist_checkpoint,
+        };
+        if persist_checkpoint {
+            collector.restore_checkpoint(day_window(unix_now_ms()));
         }
+        collector
+    }
+
+    pub fn flush_checkpoint(&mut self) {
+        if !self.persist_checkpoint {
+            return;
+        }
+        let window = day_window(unix_now_ms());
+        self.persist_checkpoint_if_needed(window);
     }
 
     #[must_use]
@@ -211,6 +234,7 @@ impl UsageCollector {
         let now_ms = unix_now_ms();
         let window = day_window(now_ms);
         self.reset_if_month_changed(window);
+        self.reset_if_day_changed(window);
         let _ = self.take_claude_limits();
 
         if self.last_discover_ms == 0
@@ -250,15 +274,92 @@ impl UsageCollector {
         self.maybe_fetch_remote_limits(hwnd, now_ms);
 
         if self.catch_up && self.discover.is_empty() && !unread_remaining {
-            self.finish_catch_up();
+            self.finish_catch_up(window);
         }
 
-        if self.discover.is_empty() && !unread_remaining && opens < self.file_budget() {
+        let tick = if self.discover.is_empty() && !unread_remaining && opens < self.file_budget() {
             self.release_scratch();
             UsageTick::Idle
         } else {
             UsageTick::MoreWork
+        };
+        if matches!(tick, UsageTick::Idle) {
+            self.persist_checkpoint_if_needed(window);
         }
+        tick
+    }
+
+    fn restore_checkpoint(&mut self, window: DayWindow) {
+        let Some(checkpoint) = super::registry::load_usage_checkpoint() else {
+            return;
+        };
+        self.apply_checkpoint(window, checkpoint);
+    }
+
+    fn apply_checkpoint(&mut self, window: DayWindow, checkpoint: UsageCheckpoint) {
+        if checkpoint.month_start != window.month_start {
+            return;
+        }
+        self.snapshot = checkpoint.snapshot;
+        if checkpoint.today != window.today {
+            self.snapshot.claude.today_cents = 0;
+            self.snapshot.codex.today_cents = 0;
+        }
+        self.last_collected_ms = checkpoint.last_collected_ms;
+        self.month_key = window.month_start;
+        self.day_key = window.today;
+        self.file_checkpoint = checkpoint.files;
+        self.catch_up = false;
+    }
+
+    fn build_checkpoint(&self, window: DayWindow) -> UsageCheckpoint {
+        let mut files = self.file_checkpoint.clone();
+        for (path, cursor) in &self.files {
+            let Some(key) =
+                file_checkpoint_key(path, &self.claude_dir, &self.codex_home, cursor.kind)
+            else {
+                continue;
+            };
+            files.insert(
+                key,
+                FileCheckpointCursor {
+                    offset: cursor.offset,
+                    size: cursor.size,
+                },
+            );
+        }
+        UsageCheckpoint {
+            month_start: window.month_start,
+            today: window.today,
+            last_collected_ms: self.last_collected_ms,
+            snapshot: self.snapshot,
+            files,
+        }
+    }
+
+    fn persist_checkpoint_if_needed(&mut self, window: DayWindow) {
+        if !self.persist_checkpoint || !self.checkpoint_dirty {
+            return;
+        }
+        let checkpoint = self.build_checkpoint(window);
+        if super::registry::save_usage_checkpoint(&checkpoint) {
+            self.file_checkpoint = checkpoint.files;
+            self.checkpoint_dirty = false;
+        }
+    }
+
+    fn reset_if_day_changed(&mut self, window: DayWindow) {
+        if self.day_key == 0 {
+            self.day_key = window.today;
+            return;
+        }
+        if self.day_key == window.today {
+            return;
+        }
+        self.day_key = window.today;
+        self.snapshot.claude.today_cents = 0;
+        self.snapshot.codex.today_cents = 0;
+        self.checkpoint_dirty = true;
     }
 
     fn reset_if_month_changed(&mut self, window: DayWindow) {
@@ -270,6 +371,9 @@ impl UsageCollector {
             return;
         }
         self.month_key = window.month_start;
+        self.day_key = window.today;
+        self.last_collected_ms = 0;
+        self.file_checkpoint.clear();
         self.files.clear();
         self.dirs.clear();
         self.claude_keys.clear();
@@ -278,8 +382,14 @@ impl UsageCollector {
         self.catch_up = true;
         self.snapshot.claude.today_cents = 0;
         self.snapshot.claude.month_cents = 0;
+        self.snapshot.claude.month_input_tokens = 0;
+        self.snapshot.claude.month_output_tokens = 0;
         self.snapshot.codex.today_cents = 0;
         self.snapshot.codex.month_cents = 0;
+        self.snapshot.codex.month_input_tokens = 0;
+        self.snapshot.codex.month_output_tokens = 0;
+        self.checkpoint_dirty = false;
+        let _ = super::registry::clear_usage_checkpoint();
         self.queue_roots();
     }
 
@@ -342,15 +452,23 @@ impl UsageCollector {
             };
             if let std::collections::hash_map::Entry::Vacant(entry) = self.files.entry(path.clone())
             {
+                let offset = restored_file_offset(
+                    &self.file_checkpoint,
+                    path,
+                    &self.claude_dir,
+                    &self.codex_home,
+                    kind,
+                    size,
+                );
                 entry.insert(FileCursor {
                     size,
                     mtime_ms,
-                    offset: 0,
+                    offset,
                     last_stat_ms: 0,
                     last_model: None,
                     kind,
                 });
-                if size > 0 {
+                if size > offset {
                     self.enqueue_scan(path.clone(), mtime_ms, window);
                 }
             }
@@ -405,6 +523,9 @@ impl UsageCollector {
             }
         }
         for (event, key) in chunk.events.into_iter().zip(chunk.dedupe) {
+            if event.timestamp_ms < self.last_collected_ms {
+                continue;
+            }
             if let Some(key) = key {
                 if !self.claude_keys.insert(key) {
                     continue;
@@ -425,7 +546,15 @@ impl UsageCollector {
             }
             if day >= window.month_start {
                 target.month_cents = target.month_cents.saturating_add(cents);
+                target.month_input_tokens = target
+                    .month_input_tokens
+                    .saturating_add(event.usage.processed_input_tokens());
+                target.month_output_tokens = target
+                    .month_output_tokens
+                    .saturating_add(event.usage.processed_output_tokens());
             }
+            self.last_collected_ms = self.last_collected_ms.max(event.timestamp_ms);
+            self.checkpoint_dirty = true;
         }
         chunk.consumed
     }
@@ -533,9 +662,10 @@ impl UsageCollector {
         self.pending.extend(items);
     }
 
-    fn finish_catch_up(&mut self) {
+    fn finish_catch_up(&mut self, window: DayWindow) {
         self.catch_up = false;
         self.pending.extend(self.deferred.drain(..));
+        self.persist_checkpoint_if_needed(window);
     }
 
     fn release_scratch(&mut self) {
@@ -1653,6 +1783,43 @@ fn codex_month_dir(home: &Path, year: i32, month: u8) -> PathBuf {
         .join(format!("{month:02}"))
 }
 
+fn file_checkpoint_key(
+    path: &Path,
+    claude_dir: &Path,
+    codex_home: &Path,
+    kind: SourceKind,
+) -> Option<FileCheckpointKey> {
+    let relative = match kind {
+        SourceKind::Claude => path.strip_prefix(claude_dir).ok()?,
+        SourceKind::Codex => path.strip_prefix(codex_home).ok()?,
+    };
+    let normalized = relative.to_string_lossy().replace('\\', "/");
+    Some(match kind {
+        SourceKind::Claude => FileCheckpointKey::Claude(normalized),
+        SourceKind::Codex => FileCheckpointKey::Codex(normalized),
+    })
+}
+
+fn restored_file_offset(
+    checkpoint: &HashMap<FileCheckpointKey, FileCheckpointCursor>,
+    path: &Path,
+    claude_dir: &Path,
+    codex_home: &Path,
+    kind: SourceKind,
+    size: u64,
+) -> u64 {
+    let Some(key) = file_checkpoint_key(path, claude_dir, codex_home, kind) else {
+        return 0;
+    };
+    let Some(cursor) = checkpoint.get(&key) else {
+        return 0;
+    };
+    if size < cursor.size {
+        return 0;
+    }
+    cursor.offset.min(size)
+}
+
 fn path_mtime_ms(path: &Path) -> Option<u64> {
     let modified = fs::metadata(path).ok()?.modified().ok()?;
     Some(modified.duration_since(UNIX_EPOCH).ok()?.as_millis() as u64)
@@ -1881,7 +2048,8 @@ mod tests {
         );
         fs::write(project.join("session.jsonl"), format!("{line}\n")).expect("jsonl");
 
-        let mut collector = UsageCollector::with_dirs(root.join("claude"), root.join("codex"));
+        let mut collector =
+            UsageCollector::with_dirs(root.join("claude"), root.join("codex"), false);
         assert_eq!(collector.snapshot().claude.month_cents, 0);
         let mut last = UsageTick::MoreWork;
         for _ in 0..16 {
@@ -1893,6 +2061,8 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         assert_eq!(last, UsageTick::Idle);
         assert_eq!(collector.snapshot().claude.month_cents, 500);
+        assert_eq!(collector.snapshot().claude.month_input_tokens, 1_000_000);
+        assert_eq!(collector.snapshot().claude.month_output_tokens, 0);
         assert!(!collector.catch_up);
     }
 
@@ -1922,7 +2092,8 @@ mod tests {
         );
         fs::write(project.join("session.jsonl"), jsonl).expect("jsonl");
 
-        let mut collector = UsageCollector::with_dirs(root.join("claude"), root.join("codex"));
+        let mut collector =
+            UsageCollector::with_dirs(root.join("claude"), root.join("codex"), false);
         let mut last = UsageTick::MoreWork;
         for _ in 0..64 {
             last = collector.tick(ptr::null_mut());
@@ -1934,5 +2105,92 @@ mod tests {
         assert_eq!(last, UsageTick::Idle);
         assert_eq!(collector.snapshot().claude.month_cents, 1_000);
         assert!(!collector.catch_up);
+    }
+
+    #[test]
+    fn component_checkpoint_restore_reads_only_appended_jsonl() {
+        use super::{
+            day_window, file_checkpoint_key, parse_timestamp, unix_now_ms, SourceKind,
+            UsageCollector, UsageTick,
+        };
+        use crate::core::{FileCheckpointCursor, UsageCheckpoint};
+        use std::collections::HashMap;
+
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-usage-checkpoint-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let claude_dir = root.join("claude");
+        let codex_home = root.join("codex");
+        let project = claude_dir.join("projects").join("p1");
+        fs::create_dir_all(&project).expect("temp project");
+        let session = project.join("session.jsonl");
+        let now = unix_now_ms();
+        let (year, month, day) = local_ymd(now, 0);
+        let (hour, minute) = local_hms(now, 0);
+        let timestamp = format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:00Z");
+        let timestamp_ms = parse_timestamp(&timestamp).expect("timestamp");
+        let event = |id: &str| {
+            format!(
+                r#"{{"type":"assistant","timestamp":"{timestamp}","requestId":"{id}","message":{{"id":"{id}","model":"claude-opus-5","usage":{{"input_tokens":1000000,"output_tokens":0}}}}}}"#
+            )
+        };
+        fs::write(&session, format!("{}\n", event("a"))).expect("jsonl");
+
+        let mut collector =
+            UsageCollector::with_dirs(claude_dir.clone(), codex_home.clone(), false);
+        let mut last = UsageTick::MoreWork;
+        for _ in 0..16 {
+            last = collector.tick(ptr::null_mut());
+            if last == UsageTick::Idle && collector.snapshot().claude.month_cents > 0 {
+                break;
+            }
+        }
+        assert_eq!(last, UsageTick::Idle);
+        assert_eq!(collector.snapshot().claude.month_cents, 500);
+        assert_eq!(collector.snapshot().claude.month_input_tokens, 1_000_000);
+
+        let window = day_window(now);
+        let file_size = fs::metadata(&session).expect("session").len();
+        let key = file_checkpoint_key(&session, &claude_dir, &codex_home, SourceKind::Claude)
+            .expect("checkpoint key");
+        let checkpoint = UsageCheckpoint {
+            month_start: window.month_start,
+            today: window.today,
+            last_collected_ms: timestamp_ms,
+            snapshot: collector.snapshot(),
+            files: HashMap::from([(
+                key,
+                FileCheckpointCursor {
+                    offset: file_size,
+                    size: file_size,
+                },
+            )]),
+        };
+
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&session)
+            .and_then(|mut file| {
+                use std::io::Write;
+                file.write_all(format!("{}\n", event("b")).as_bytes())
+            })
+            .expect("append");
+
+        let mut restored = UsageCollector::with_dirs(claude_dir.clone(), codex_home.clone(), false);
+        restored.apply_checkpoint(window, checkpoint);
+        last = UsageTick::MoreWork;
+        for _ in 0..16 {
+            last = restored.tick(ptr::null_mut());
+            if last == UsageTick::Idle && restored.snapshot().claude.month_cents == 1_000 {
+                break;
+            }
+        }
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(last, UsageTick::Idle);
+        assert_eq!(restored.snapshot().claude.month_cents, 1_000);
+        assert_eq!(restored.snapshot().claude.month_input_tokens, 2_000_000);
+        assert!(!restored.catch_up);
     }
 }

@@ -19,7 +19,7 @@
 - `GetSystemTimes` の累積値差分による全体 CPU 使用率と、`GlobalMemoryStatusEx` によるメモリ使用率、システムボリュームの使用量、GPU エンジン使用率と専用 / 共有ビデオメモリ。ホバーで CPU / メモリ / GPU / ストレージのカードと直近 1 分のスパークライン、Claude Code / Codex CLI のサブスクリミットと API 相当利用料、RunDog 自身の CPU 割合とプライベートメモリを表示
 - CPU 使用率に応じた 5–40 FPS のアニメーション（既定の上限は 20 FPS）
 - System / Light / Dark テーマ、10 / 20 / 30 / 40 FPS 上限の右クリックメニュー
-- Windows のスタートアップで起動、初回トレイ登録時の通知領域ピン留め（ユーザーが隠した場合は維持）、ダブルクリックによる Task Manager 起動、Explorer 再起動後の tray 再登録
+- Windows のスタートアップで起動、初回トレイ登録時の通知領域ピン留め（ユーザーが隠した場合は維持）、左クリックでモニターカードの常時表示と TOP 固定トグル、Explorer 再起動後の tray 再登録
 - GitHub Releases の stable release を起動時に一度だけ非同期確認し、検証済みの新版をサイレント導入
 - 単一インスタンス、単一 message-loop thread。GUI フレームワーク / GC / 常時ポーリングスレッドなし。リリースは `lto`・単一 codegen unit・`panic = "abort"` で最小化
 

@@ -33,6 +33,14 @@ impl GpuStatus {
         }
     }
 
+    /// True when PDH returned utilization or memory usage for this adapter.
+    #[must_use]
+    pub const fn is_measurable(self) -> bool {
+        self.utilization_percent.is_some()
+            || self.dedicated_usage_bytes > 0
+            || self.shared_usage_bytes > 0
+    }
+
     #[must_use]
     pub fn utilization_percent(self) -> Option<f32> {
         self.utilization_percent
@@ -108,6 +116,7 @@ mod tests {
         assert_eq!(empty.dedicated_percent(), None);
         assert_eq!(empty.shared_percent(), None);
         assert_eq!(empty.utilization_percent(), None);
+        assert!(!empty.is_measurable());
         assert_eq!(empty.available_bytes(), None);
         assert_eq!(empty.in_use_bytes(), 0);
         assert!(!empty.has_dedicated());
@@ -117,6 +126,7 @@ mod tests {
         assert_eq!(dedicated.dedicated_percent(), Some(25.0));
         assert_eq!(dedicated.shared_percent(), None);
         assert_eq!(dedicated.utilization_percent(), Some(12.5));
+        assert!(dedicated.is_measurable());
         assert!(dedicated.has_dedicated());
 
         let shared = GpuStatus::new(0, 0, 16, 4);

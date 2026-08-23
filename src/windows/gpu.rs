@@ -128,15 +128,14 @@ impl GpuSampler {
             &utilization,
             &phys,
         )?;
-        Some(
-            GpuStatus::new(
-                value_for(&dedicated_limit, adapter),
-                value_for(&dedicated_usage, adapter),
-                value_for(&shared_limit, adapter),
-                value_for(&shared_usage, adapter),
-            )
-            .with_utilization(utilization.get(&adapter).copied()),
+        let status = GpuStatus::new(
+            value_for(&dedicated_limit, adapter),
+            value_for(&dedicated_usage, adapter),
+            value_for(&shared_limit, adapter),
+            value_for(&shared_usage, adapter),
         )
+        .with_utilization(utilization.get(&adapter).copied());
+        status.is_measurable().then_some(status)
     }
 }
 
@@ -271,9 +270,7 @@ fn select_adapter(
     ids.sort_by_key(|id| (id.high, id.low));
     ids.dedup();
     ids.retain(|id| {
-        dedicated_limit.get(id).copied().unwrap_or(0) > 0
-            || shared_limit.get(id).copied().unwrap_or(0) > 0
-            || dedicated_usage.get(id).copied().unwrap_or(0) > 0
+        dedicated_usage.get(id).copied().unwrap_or(0) > 0
             || shared_usage.get(id).copied().unwrap_or(0) > 0
             || utilization.contains_key(id)
     });
@@ -556,7 +553,9 @@ mod tests {
         let mut shared = HashMap::new();
         shared.insert(discrete, 16 << 30);
         shared.insert(integrated, 16 << 30);
-        let utilization = HashMap::new();
+        let mut utilization = HashMap::new();
+        utilization.insert(integrated, 0.0);
+        utilization.insert(discrete, 0.0);
         let mut phys = HashMap::new();
         phys.insert(integrated, 0);
         phys.insert(discrete, 1);
@@ -564,6 +563,22 @@ mod tests {
         assert_eq!(
             select_adapter(&dedicated, &shared, &usage, &usage, &utilization, &phys),
             Some(integrated)
+        );
+    }
+
+    #[test]
+    fn component_adapter_with_only_dxgi_budget_is_not_selected() {
+        let legacy = AdapterId { high: 0, low: 1 };
+        let mut dedicated = HashMap::new();
+        dedicated.insert(legacy, 128 << 20);
+        let mut shared = HashMap::new();
+        shared.insert(legacy, 16 << 30);
+        let usage: HashMap<AdapterId, u64> = HashMap::new();
+        let utilization: HashMap<AdapterId, f32> = HashMap::new();
+        let phys: HashMap<AdapterId, u32> = HashMap::new();
+        assert_eq!(
+            select_adapter(&dedicated, &shared, &usage, &usage, &utilization, &phys),
+            None
         );
     }
 
