@@ -555,10 +555,9 @@ impl UsageCollector {
                 apply_provider_limits(&mut self.snapshot.codex, limits);
             }
         }
+        // Count every in-month event. A global timestamp watermark would drop
+        // older JSONL after a newer file is scanned first (Codex catch-up).
         for (event, key) in chunk.events.into_iter().zip(chunk.dedupe) {
-            if event.timestamp_ms < self.last_collected_ms {
-                continue;
-            }
             if let Some(key) = key {
                 if !self.claude_keys.insert(key) {
                     continue;
@@ -1337,6 +1336,7 @@ struct CodexTokens {
     input_tokens: Option<u64>,
     cached_input_tokens: Option<u64>,
     output_tokens: Option<u64>,
+    reasoning_output_tokens: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -1378,7 +1378,10 @@ fn parse_codex_usage_line(line: &str, model: Option<&str>) -> Option<ParsedEvent
     let mut usage = TokenUsage {
         input: raw_input - cached,
         cached_input: cached,
-        output: last.output_tokens.unwrap_or(0),
+        output: last
+            .output_tokens
+            .unwrap_or(0)
+            .saturating_add(last.reasoning_output_tokens.unwrap_or(0)),
         ..TokenUsage::default()
     };
     if crate::core::is_long_context_request(model, raw_input) {
@@ -2278,5 +2281,128 @@ mod tests {
         assert_eq!(last, UsageTick::Idle);
         assert_eq!(collector.snapshot().claude.month_cents, 500);
         assert_eq!(collector.snapshot().claude.month_input_tokens, 1_000_000);
+    }
+
+    #[test]
+    fn component_older_jsonl_still_counts_after_newer_file() {
+        use super::{unix_now_ms, UsageCollector, UsageTick};
+        use crate::core::local_ymd;
+
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-usage-order-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let claude_dir = root.join("claude");
+        let project = claude_dir.join("projects").join("p1");
+        fs::create_dir_all(&project).expect("temp project");
+        let now = unix_now_ms();
+        let (year, month, day) = local_ymd(now, 0);
+        let older_day = if day > 1 { day - 1 } else { day };
+        let older_stamp = format!("{year:04}-{month:02}-{older_day:02}T01:00:00Z");
+        let newer_stamp = format!("{year:04}-{month:02}-{day:02}T23:00:00Z");
+        let event = |id: &str, stamp: &str| {
+            format!(
+                r#"{{"type":"assistant","timestamp":"{stamp}","requestId":"{id}","message":{{"id":"{id}","model":"claude-opus-5","usage":{{"input_tokens":1000000,"output_tokens":0}}}}}}"#
+            )
+        };
+        fs::write(project.join("older.jsonl"), format!("{}\n", event("old", &older_stamp)))
+            .expect("older jsonl");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(project.join("newer.jsonl"), format!("{}\n", event("new", &newer_stamp)))
+            .expect("newer jsonl");
+
+        let mut collector =
+            UsageCollector::with_dirs(claude_dir, root.join("codex"), false);
+        let mut last = UsageTick::MoreWork;
+        for _ in 0..32 {
+            last = collector.tick(ptr::null_mut());
+            if last == UsageTick::Idle && collector.snapshot().claude.month_cents == 1_000 {
+                break;
+            }
+        }
+        let cents = collector.snapshot().claude.month_cents;
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(last, UsageTick::Idle);
+        assert_eq!(cents, 1_000, "newer-first scan must still count older files");
+    }
+
+    #[test]
+    #[ignore = "manual: scans installed Claude/Codex JSONL on this machine"]
+    fn live_installed_jsonl_full_scan_round_trips_month_totals() {
+        use std::path::PathBuf;
+
+        let home = std::env::var_os("USERPROFILE")
+            .map(PathBuf::from)
+            .unwrap_or_default();
+        let claude_dir = std::env::var_os("CLAUDE_CONFIG_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".claude"));
+        let codex_home = std::env::var_os("CODEX_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".codex"));
+        if !claude_dir.join("projects").is_dir() && !codex_home.is_dir() {
+            eprintln!("skip: no Claude/Codex directories");
+            return;
+        }
+
+        let mut collector = UsageCollector::with_dirs(claude_dir, codex_home, false);
+        let baseline = run_until_scan_idle(&mut collector, 20_000);
+        eprintln!(
+            "baseline: claude_month={}c codex_month={}c scan={}",
+            baseline.claude.month_cents,
+            baseline.codex.month_cents,
+            baseline.month_scan_in_progress
+        );
+
+        collector.rescan_current_month();
+        let reset = collector.snapshot();
+        assert!(
+            reset.month_scan_in_progress,
+            "expected catch_up after rescan"
+        );
+        assert_eq!(reset.claude.month_cents, 0, "claude month should reset");
+        assert_eq!(reset.codex.month_cents, 0, "codex month should reset");
+
+        let rebuilt = run_until_scan_idle(&mut collector, 20_000);
+        eprintln!(
+            "rebuilt: claude_month={}c codex_month={}c claude_in={} claude_out={}",
+            rebuilt.claude.month_cents,
+            rebuilt.codex.month_cents,
+            rebuilt.claude.month_input_tokens,
+            rebuilt.claude.month_output_tokens,
+        );
+        assert!(
+            !rebuilt.month_scan_in_progress,
+            "scan did not finish within tick budget"
+        );
+        assert_eq!(
+            rebuilt.claude.month_cents, baseline.claude.month_cents,
+            "claude month should match after full rescan"
+        );
+        assert_eq!(
+            rebuilt.codex.month_cents, baseline.codex.month_cents,
+            "codex month should match after full rescan"
+        );
+    }
+
+    fn run_until_scan_idle(collector: &mut UsageCollector, max_ticks: usize) -> crate::core::UsageSnapshot {
+        let mut last = collector.snapshot();
+        for tick in 0..max_ticks {
+            let more = collector.tick(ptr::null_mut());
+            last = collector.snapshot();
+            if tick % 100 == 0 {
+                eprintln!(
+                    "tick {tick}: catch_up={} claude_month={}c codex_month={}c",
+                    last.month_scan_in_progress,
+                    last.claude.month_cents,
+                    last.codex.month_cents,
+                );
+            }
+            if more == UsageTick::Idle && !last.month_scan_in_progress {
+                return last;
+            }
+        }
+        last
     }
 }

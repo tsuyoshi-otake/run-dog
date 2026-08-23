@@ -10,7 +10,7 @@ const HEADER: &str = "rundog-usage-checkpoint-3";
 
 /// Registry migration epoch for `UsageCheckpoint`. Bump when on-disk layout or
 /// restore semantics change and stale checkpoints must be discarded.
-pub const USAGE_CHECKPOINT_MIGRATION_VERSION: u32 = 3;
+pub const USAGE_CHECKPOINT_MIGRATION_VERSION: u32 = 4;
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub enum FileCheckpointKey {
