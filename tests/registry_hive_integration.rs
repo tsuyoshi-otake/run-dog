@@ -260,6 +260,63 @@ fn live_hive_clear_tombstone_allows_startup_commit_again() {
 }
 
 #[test]
+fn live_hive_usage_checkpoint_migration_invalidates_stale_versions() {
+    use run_dog::{
+        core::{ProviderUsage, UsageCheckpoint, UsageSnapshot, USAGE_CHECKPOINT_MIGRATION_VERSION},
+        windows::registry::{
+            clear_usage_checkpoint, load_usage_checkpoint, save_usage_checkpoint,
+            set_settings_key_override, set_usage_checkpoint_migration_for_test, test_hive_path,
+        },
+    };
+
+    let suffix = unique_suffix("usage-checkpoint");
+    let path = test_hive_path(&suffix);
+    set_settings_key_override(Some(path));
+
+    let checkpoint = UsageCheckpoint {
+        month_start: 20_260_801,
+        today: 20_260_823,
+        last_collected_ms: 0,
+        catch_up_done: true,
+        snapshot: UsageSnapshot {
+            claude: ProviderUsage {
+                month_cents: 12_345,
+                ..ProviderUsage::default()
+            },
+            ..UsageSnapshot::default()
+        },
+        files: Default::default(),
+    };
+    assert!(save_usage_checkpoint(&checkpoint));
+    assert_eq!(
+        load_usage_checkpoint()
+            .expect("checkpoint")
+            .snapshot
+            .claude
+            .month_cents,
+        12_345
+    );
+
+    assert!(set_usage_checkpoint_migration_for_test(
+        USAGE_CHECKPOINT_MIGRATION_VERSION - 1
+    ));
+    assert!(load_usage_checkpoint().is_none());
+
+    assert!(save_usage_checkpoint(&checkpoint));
+    assert_eq!(
+        load_usage_checkpoint()
+            .expect("checkpoint")
+            .snapshot
+            .claude
+            .month_cents,
+        12_345
+    );
+
+    let _ = clear_usage_checkpoint();
+    set_settings_key_override(None);
+}
+
+#[test]
 fn production_settings_key_cannot_be_tombstoned() {
     let mut store = RegistryStore::production();
     assert!(!store.tombstone());

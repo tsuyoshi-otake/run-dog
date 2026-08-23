@@ -17,7 +17,10 @@ use crate::{
     application::{
         execute_commit, recover_pending, CommitGate, CommitOutcome, CommitRequest, DurableStore,
     },
-    core::{AppSettings, PendingJournal, ResolvedTheme, SettingsRecord, UsageCheckpoint},
+    core::{
+        AppSettings, PendingJournal, ResolvedTheme, SettingsRecord, UsageCheckpoint,
+        USAGE_CHECKPOINT_MIGRATION_VERSION,
+    },
 };
 
 const DEFAULT_SETTINGS_KEY: &str = "Software\\SystemExe\\RunDog";
@@ -27,6 +30,7 @@ const APP_VALUE: &str = "RunDog";
 const SETTINGS_RECORD_VALUE: &str = "SettingsRecord";
 const PENDING_JOURNAL_VALUE: &str = "PendingJournal";
 const USAGE_CHECKPOINT_VALUE: &str = "UsageCheckpoint";
+const USAGE_CHECKPOINT_MIGRATION_VALUE: &str = "UsageCheckpointMigration";
 const PINNED_FLYOUT_VALUE: &str = "PinnedFlyout";
 const LIFECYCLE_VALUE: &str = "Lifecycle";
 const LIFECYCLE_ACTIVE: &str = "active";
@@ -277,16 +281,17 @@ fn load_usage_checkpoint_at(settings_key: &str) -> Option<UsageCheckpoint> {
     if lifecycle_is_tombstoned_at(settings_key) {
         return None;
     }
-    let key = open_key(settings_key, KEY_READ)?;
-    let payload = read_string(key, USAGE_CHECKPOINT_VALUE);
-    close_key(key);
-    let Some(payload) = payload else {
+    if load_usage_checkpoint_migration_at(settings_key) != USAGE_CHECKPOINT_MIGRATION_VERSION {
+        let _ = clear_usage_checkpoint_payload_at(settings_key);
         return None;
-    };
+    }
+    let key = open_key(settings_key, KEY_READ)?;
+    let payload = read_string(key, USAGE_CHECKPOINT_VALUE)?;
+    close_key(key);
     if let Some(checkpoint) = UsageCheckpoint::decode(&payload) {
         return Some(checkpoint);
     }
-    let _ = clear_usage_checkpoint_at(settings_key);
+    let _ = clear_usage_checkpoint_payload_at(settings_key);
     None
 }
 
@@ -297,7 +302,12 @@ fn save_usage_checkpoint_at(settings_key: &str, checkpoint: &UsageCheckpoint) ->
     let Some(key) = open_writable_settings_key_at(settings_key) else {
         return false;
     };
-    let wrote = write_string(key, USAGE_CHECKPOINT_VALUE, &checkpoint.encode());
+    let wrote = write_string(key, USAGE_CHECKPOINT_VALUE, &checkpoint.encode())
+        && write_dword(
+            key,
+            USAGE_CHECKPOINT_MIGRATION_VALUE,
+            USAGE_CHECKPOINT_MIGRATION_VERSION,
+        );
     close_key(key);
     wrote
 }
@@ -306,9 +316,42 @@ fn clear_usage_checkpoint_at(settings_key: &str) -> bool {
     let Some(key) = open_writable_settings_key_at(settings_key) else {
         return false;
     };
+    let cleared = delete_value(key, USAGE_CHECKPOINT_VALUE)
+        && delete_value(key, USAGE_CHECKPOINT_MIGRATION_VALUE);
+    close_key(key);
+    cleared
+}
+
+fn clear_usage_checkpoint_payload_at(settings_key: &str) -> bool {
+    let Some(key) = open_writable_settings_key_at(settings_key) else {
+        return false;
+    };
     let cleared = delete_value(key, USAGE_CHECKPOINT_VALUE);
     close_key(key);
     cleared
+}
+
+fn load_usage_checkpoint_migration_at(settings_key: &str) -> u32 {
+    let Some(key) = open_key(settings_key, KEY_READ) else {
+        return 0;
+    };
+    let version = read_dword(key, USAGE_CHECKPOINT_MIGRATION_VALUE).unwrap_or(0);
+    close_key(key);
+    version
+}
+
+#[doc(hidden)]
+pub fn set_usage_checkpoint_migration_for_test(version: u32) -> bool {
+    set_usage_checkpoint_migration_at(&settings_key(), version)
+}
+
+fn set_usage_checkpoint_migration_at(settings_key: &str, version: u32) -> bool {
+    let Some(key) = open_writable_settings_key_at(settings_key) else {
+        return false;
+    };
+    let wrote = write_dword(key, USAGE_CHECKPOINT_MIGRATION_VALUE, version);
+    close_key(key);
+    wrote
 }
 
 fn load_pinned_flyout_at(settings_key: &str) -> bool {
