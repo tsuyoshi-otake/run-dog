@@ -27,4 +27,6 @@ pub use usage::{
     is_long_context_request, local_hms, local_ymd, resolve_codex_model, ymd_iso, ymd_key,
     LimitWindow, ProviderUsage, TokenUsage, UsageSnapshot,
 };
-pub use usage_checkpoint::{FileCheckpointCursor, FileCheckpointKey, UsageCheckpoint};
+pub use usage_checkpoint::{
+    FileCheckpointCursor, FileCheckpointKey, UsageCheckpoint, USAGE_CHECKPOINT_MIGRATION_VERSION,
+};
