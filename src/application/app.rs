@@ -387,6 +387,7 @@ impl App {
 
         let previous_resolved_theme = self.resolved_theme;
         let previous_fps_limit = self.settings.fps_limit;
+        let notify_startup = pending.sync_run_entry;
         self.settings = settings;
         self.resolved_theme = settings.theme.resolve(self.system_theme);
 
@@ -395,6 +396,11 @@ impl App {
             Effect::SetFpsMenu(self.settings.fps_limit),
             Effect::SetStartupMenu(self.settings.launch_at_startup),
         ];
+        if notify_startup {
+            effects.push(Effect::NotifyStartupChanged(
+                self.settings.launch_at_startup,
+            ));
+        }
         if previous_resolved_theme != self.resolved_theme {
             effects.push(Effect::ModifyTray(self.tray_icon()));
         }

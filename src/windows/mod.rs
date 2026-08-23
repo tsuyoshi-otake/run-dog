@@ -37,7 +37,7 @@ use windows_sys::Win32::{
     },
     UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
-        GetWindowLongPtrW, KillTimer, PostQuitMessage, RegisterClassW, RegisterWindowMessageW,
+        GetWindowLongPtrW, KillTimer, PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW,
         SetTimer, SetWindowLongPtrW, TranslateMessage, GWLP_USERDATA, MSG, SW_SHOWNORMAL,
         WM_COMMAND, WM_DESTROY, WM_SETTINGCHANGE, WM_THEMECHANGED, WM_TIMER, WNDCLASSW,
     },
@@ -70,6 +70,9 @@ const MUTEX_NAME: &str = "Local\\SystemExe.RunDog";
 const TASKBAR_CREATED_MESSAGE: &str = "TaskbarCreated";
 const TIMER_CPU: usize = 1;
 const TIMER_ANIMATION: usize = 2;
+/// Deferred tray context menu. Posted from the shell callback so the opening
+/// right-button release cannot activate a menu item underneath the cursor.
+const WM_SHOW_TRAY_MENU: u32 = 0x8000 + 2;
 
 /// Creates the hidden message window and runs the single-threaded tray loop.
 pub fn run() -> Result<(), String> {
@@ -289,6 +292,7 @@ impl EffectPort for WindowsPlatform {
             | Effect::SetThemeMenu(_)
             | Effect::SetFpsMenu(_)
             | Effect::SetStartupMenu(_)
+            | Effect::NotifyStartupChanged(_)
             | Effect::CommitSettings { .. }
             | Effect::CancelCommit { .. } => {}
         }
@@ -459,13 +463,18 @@ unsafe extern "system" fn window_proc(
     if message == TRAY_CALLBACK_MESSAGE {
         let notification = TrayAdapter::notification_code(lparam as u32);
         if TrayAdapter::is_context_menu_notification(notification) {
-            let update_state = context.updater.menu_state();
-            context.platform.tray.show_menu(&update_state);
+            let _ = unsafe { PostMessageW(hwnd, WM_SHOW_TRAY_MENU, 0, 0) };
         } else if TrayAdapter::is_pin_toggle_notification(notification) {
             context.platform.tray.toggle_pinned_flyout();
         } else {
             context.platform.tray.handle_hover(notification);
         }
+        return 0;
+    }
+
+    if message == WM_SHOW_TRAY_MENU {
+        let update_state = context.updater.menu_state();
+        context.platform.tray.show_menu(&update_state);
         return 0;
     }
 

@@ -61,6 +61,8 @@ pub enum Effect {
     SetThemeMenu(ThemePreference),
     SetFpsMenu(FpsLimit),
     SetStartupMenu(bool),
+    /// User-visible confirmation after a successful Launch-at-startup toggle.
+    NotifyStartupChanged(bool),
     LaunchTaskManager,
     Quit,
 }
