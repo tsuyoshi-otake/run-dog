@@ -39,8 +39,9 @@ use windows_sys::{
 use crate::{
     application::TrayIcon,
     core::{
-        local_hms, local_ymd, GpuStatus, LimitWindow, MemoryStatus, ProcessStatus, ProviderUsage,
-        ResolvedTheme, Sparkline, StorageStatus, UsageSnapshot, SPARKLINE_CAPACITY,
+        format_compact_token_count, local_hms, local_ymd, GpuStatus, LimitWindow, MemoryStatus,
+        ProcessStatus, ProviderUsage, ResolvedTheme, Sparkline, StorageStatus, UsageSnapshot,
+        SPARKLINE_CAPACITY,
     },
 };
 
@@ -58,6 +59,7 @@ pub struct HoverFlyout {
     hwnd: HWND,
     owner: HWND,
     state: Option<TrayIcon>,
+    pinned: bool,
 }
 
 impl HoverFlyout {
@@ -67,7 +69,17 @@ impl HoverFlyout {
             hwnd: ptr::null_mut(),
             owner: ptr::null_mut(),
             state: None,
+            pinned: false,
         }
+    }
+
+    pub fn set_pinned(&mut self, pinned: bool) {
+        self.pinned = pinned;
+    }
+
+    #[must_use]
+    pub const fn is_pinned(&self) -> bool {
+        self.pinned
     }
 
     pub fn set_state(&mut self, icon: &TrayIcon) {
@@ -115,6 +127,12 @@ impl HoverFlyout {
         let _ = unsafe { InvalidateRect(self.hwnd, ptr::null(), 1) };
     }
 
+    pub fn hide_unless_pinned(&mut self) {
+        if !self.pinned {
+            self.hide();
+        }
+    }
+
     pub fn hide(&mut self) {
         if !self.hwnd.is_null() {
             let _ = unsafe { ShowWindow(self.hwnd, SW_HIDE) };
@@ -129,6 +147,7 @@ impl HoverFlyout {
         self.hwnd = ptr::null_mut();
         self.owner = ptr::null_mut();
         self.state = None;
+        self.pinned = false;
     }
 
     #[must_use]
@@ -970,12 +989,23 @@ fn paint_usage_row(
             right: row.right,
             bottom: metric_top + layout.detail_h,
         },
-        &format!(
-            "Month {}",
-            format_usd(usage.month_cents, usage.month_cents == 0)
-        ),
+        &format_month_usage(usage),
         0,
     );
+}
+
+fn format_month_usage(usage: ProviderUsage) -> String {
+    let amount = format_usd(usage.month_cents, usage.month_cents == 0);
+    if usage.month_input_tokens == 0 && usage.month_output_tokens == 0 {
+        format!("Month {amount}")
+    } else {
+        format!(
+            "Month {} ({} / {})",
+            amount,
+            format_compact_token_count(usage.month_input_tokens),
+            format_compact_token_count(usage.month_output_tokens),
+        )
+    }
 }
 
 fn paint_self_row(
@@ -1529,9 +1559,9 @@ fn wide(value: &str) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::{
-        format_bytes, format_gpu_capacity, format_percent, format_reset_local, format_self_usage,
-        gpu_details, visible_usage_count, window_size, CARD_GPU_BLOCK_HEIGHT, CARD_HEIGHT,
-        CARD_USAGE_BLOCK_HEIGHT, CARD_WIDTH,
+        format_bytes, format_gpu_capacity, format_month_usage, format_percent, format_reset_local,
+        format_self_usage, gpu_details, visible_usage_count, window_size, CARD_GPU_BLOCK_HEIGHT,
+        CARD_HEIGHT, CARD_USAGE_BLOCK_HEIGHT, CARD_WIDTH,
     };
     use crate::core::{CpuLoad, LimitWindow, ProcessStatus, ProviderUsage, UsageSnapshot};
 
@@ -1599,6 +1629,22 @@ mod tests {
                 Some(CpuLoad::percent(0.4))
             ))),
             "0.4% · 5.0 MB"
+        );
+        assert_eq!(
+            format_month_usage(ProviderUsage {
+                month_cents: 125,
+                ..ProviderUsage::default()
+            }),
+            "Month $1.25"
+        );
+        assert_eq!(
+            format_month_usage(ProviderUsage {
+                month_cents: 125,
+                month_input_tokens: 1_500_000,
+                month_output_tokens: 2_500,
+                ..ProviderUsage::default()
+            }),
+            "Month $1.25 (1.5M / 2.5K)"
         );
     }
 
