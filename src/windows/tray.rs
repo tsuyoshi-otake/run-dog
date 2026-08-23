@@ -12,7 +12,6 @@ use windows_sys::Win32::{
             AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, KillTimer, PostMessageW,
             SetForegroundWindow, SetTimer, TrackPopupMenu, HMENU, MF_CHECKED, MF_GRAYED, MF_POPUP,
             MF_SEPARATOR, MF_STRING, MF_UNCHECKED, TPM_RIGHTBUTTON, WM_CONTEXTMENU, WM_NULL,
-            WM_RBUTTONUP,
         },
     },
 };
@@ -119,20 +118,15 @@ impl TrayAdapter {
             }
             Effect::SetThemeMenu(theme) => self.theme = *theme,
             Effect::SetFpsMenu(limit) => self.fps_limit = *limit,
-            Effect::SetStartupMenu(enabled) => {
-                let changed = self.startup_enabled != *enabled;
-                self.startup_enabled = *enabled;
-                if changed {
-                    self.show_balloon(
-                        "RunDog",
-                        if *enabled {
-                            "Launch at startup is on."
-                        } else {
-                            "Launch at startup is off."
-                        },
-                    );
-                }
-            }
+            Effect::SetStartupMenu(enabled) => self.startup_enabled = *enabled,
+            Effect::NotifyStartupChanged(enabled) => self.show_balloon(
+                "RunDog",
+                if *enabled {
+                    "Launch at startup is on."
+                } else {
+                    "Launch at startup is off."
+                },
+            ),
             Effect::SetTimer { .. }
             | Effect::KillTimer(TimerKind::CpuSampling | TimerKind::Animation)
             | Effect::SaveSettings(_)
@@ -255,7 +249,10 @@ impl TrayAdapter {
 
     #[must_use]
     pub const fn is_context_menu_notification(notification: u32) -> bool {
-        notification == WM_RBUTTONUP || notification == WM_CONTEXTMENU
+        // NOTIFYICON_VERSION_4 delivers WM_CONTEXTMENU for the tray menu. Handling
+        // WM_RBUTTONUP as well opens the menu twice and can treat the button-up
+        // as a click on the item under the cursor (spurious startup toggles).
+        notification == WM_CONTEXTMENU
     }
 
     /// Extracts the Shell notification code from the callback `lParam`.
@@ -608,8 +605,8 @@ mod tests {
         let v4_right_click = TrayAdapter::notification_code((1 << 16) | WM_RBUTTONUP);
         let v4_context_menu = TrayAdapter::notification_code((1 << 16) | WM_CONTEXTMENU);
 
-        assert!(TrayAdapter::is_context_menu_notification(v4_right_click));
         assert!(TrayAdapter::is_context_menu_notification(v4_context_menu));
+        assert!(!TrayAdapter::is_context_menu_notification(v4_right_click));
         assert!(!TrayAdapter::is_context_menu_notification(515));
         assert!(TrayAdapter::is_pin_toggle_notification(NIN_SELECT));
         assert!(!TrayAdapter::is_pin_toggle_notification(515));
