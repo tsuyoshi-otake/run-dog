@@ -17,7 +17,7 @@ use crate::{
     application::{
         execute_commit, recover_pending, CommitGate, CommitOutcome, CommitRequest, DurableStore,
     },
-    core::{AppSettings, PendingJournal, ResolvedTheme, SettingsRecord},
+    core::{AppSettings, PendingJournal, ResolvedTheme, SettingsRecord, UsageCheckpoint},
 };
 
 const DEFAULT_SETTINGS_KEY: &str = "Software\\SystemExe\\RunDog";
@@ -26,6 +26,8 @@ const PERSONALIZE_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\The
 const APP_VALUE: &str = "RunDog";
 const SETTINGS_RECORD_VALUE: &str = "SettingsRecord";
 const PENDING_JOURNAL_VALUE: &str = "PendingJournal";
+const USAGE_CHECKPOINT_VALUE: &str = "UsageCheckpoint";
+const PINNED_FLYOUT_VALUE: &str = "PinnedFlyout";
 const LIFECYCLE_VALUE: &str = "Lifecycle";
 const LIFECYCLE_ACTIVE: &str = "active";
 const LIFECYCLE_TOMBSTONED: &str = "tombstoned";
@@ -247,6 +249,83 @@ pub fn save_settings(settings: AppSettings) {
         settings,
     );
     let _ = write_settings_record_at(&key, next, current.generation);
+}
+
+#[must_use]
+pub fn load_pinned_flyout() -> bool {
+    load_pinned_flyout_at(&settings_key())
+}
+
+pub fn save_pinned_flyout(pinned: bool) -> bool {
+    save_pinned_flyout_at(&settings_key(), pinned)
+}
+
+#[must_use]
+pub fn load_usage_checkpoint() -> Option<UsageCheckpoint> {
+    load_usage_checkpoint_at(&settings_key())
+}
+
+pub fn save_usage_checkpoint(checkpoint: &UsageCheckpoint) -> bool {
+    save_usage_checkpoint_at(&settings_key(), checkpoint)
+}
+
+pub fn clear_usage_checkpoint() -> bool {
+    clear_usage_checkpoint_at(&settings_key())
+}
+
+fn load_usage_checkpoint_at(settings_key: &str) -> Option<UsageCheckpoint> {
+    if lifecycle_is_tombstoned_at(settings_key) {
+        return None;
+    }
+    let key = open_key(settings_key, KEY_READ)?;
+    let payload = read_string(key, USAGE_CHECKPOINT_VALUE);
+    close_key(key);
+    payload.as_deref().and_then(UsageCheckpoint::decode)
+}
+
+fn save_usage_checkpoint_at(settings_key: &str, checkpoint: &UsageCheckpoint) -> bool {
+    if lifecycle_is_tombstoned_at(settings_key) {
+        return false;
+    }
+    let Some(key) = open_writable_settings_key_at(settings_key) else {
+        return false;
+    };
+    let wrote = write_string(key, USAGE_CHECKPOINT_VALUE, &checkpoint.encode());
+    close_key(key);
+    wrote
+}
+
+fn clear_usage_checkpoint_at(settings_key: &str) -> bool {
+    let Some(key) = open_writable_settings_key_at(settings_key) else {
+        return false;
+    };
+    let cleared = delete_value(key, USAGE_CHECKPOINT_VALUE);
+    close_key(key);
+    cleared
+}
+
+fn load_pinned_flyout_at(settings_key: &str) -> bool {
+    if lifecycle_is_tombstoned_at(settings_key) {
+        return false;
+    }
+    let Some(key) = open_key(settings_key, KEY_READ) else {
+        return false;
+    };
+    let pinned = read_dword(key, PINNED_FLYOUT_VALUE).is_some_and(|value| value != 0);
+    close_key(key);
+    pinned
+}
+
+fn save_pinned_flyout_at(settings_key: &str, pinned: bool) -> bool {
+    if lifecycle_is_tombstoned_at(settings_key) {
+        return false;
+    }
+    let Some(key) = open_writable_settings_key_at(settings_key) else {
+        return false;
+    };
+    let wrote = write_dword(key, PINNED_FLYOUT_VALUE, u32::from(pinned));
+    close_key(key);
+    wrote
 }
 
 fn load_pending_journal_at(settings_key: &str) -> Option<PendingJournal> {
@@ -484,6 +563,20 @@ fn write_string(key: HKEY, name: &str, value: &str) -> bool {
             REG_SZ,
             value.as_ptr().cast::<u8>(),
             byte_length,
+        )
+    }) == ERROR_SUCCESS
+}
+
+fn write_dword(key: HKEY, name: &str, value: u32) -> bool {
+    let name = wide(name);
+    (unsafe {
+        RegSetValueExW(
+            key,
+            name.as_ptr(),
+            0,
+            REG_DWORD,
+            (&raw const value).cast::<u8>(),
+            size_of::<u32>() as u32,
         )
     }) == ERROR_SUCCESS
 }

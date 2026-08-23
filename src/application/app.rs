@@ -204,7 +204,7 @@ impl App {
                 new_generation,
                 last_operation_id,
             ),
-            Event::TrayActivated => vec![Effect::LaunchTaskManager],
+            Event::TrayActivated => Vec::new(),
             Event::TaskbarRecreated => vec![Effect::AddTray(self.tray_icon())],
             Event::UsageSample(usage) => {
                 if self.usage == usage {
@@ -233,8 +233,10 @@ impl App {
         if storage.is_some_and(|status| status.used_percent().is_some()) {
             self.storage = storage;
         }
-        if gpu.is_some() {
+        if gpu.is_some_and(GpuStatus::is_measurable) {
             self.gpu = gpu;
+        } else if gpu.is_none() {
+            self.gpu = None;
         }
         let process_changed = process.is_some_and(|status| self.process != Some(status));
         if let Some(status) = process {
@@ -623,13 +625,10 @@ mod tests {
             gpu: None,
             process: None,
         });
-        assert_eq!(
-            app.snapshot().tooltip,
-            "CPU: 100.0%\nMemory: 75.0%\nGPU: 40.0%"
-        );
+        assert_eq!(app.snapshot().tooltip, "CPU: 100.0%\nMemory: 75.0%");
         assert_eq!(app.snapshot().cpu_sparkline.len(), 2);
         assert_eq!(app.snapshot().memory_sparkline.len(), 2);
-        assert_eq!(app.snapshot().gpu_sparkline.len(), 2);
+        assert_eq!(app.snapshot().gpu_sparkline.len(), 1);
         assert!(effects.contains(&Effect::ModifyTray(app.tray_icon())));
     }
 
