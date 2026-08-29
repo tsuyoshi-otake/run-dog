@@ -5,6 +5,8 @@ const FONTS = {
   zh: "https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;600;700&display=swap",
   ko: "https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;600;700&display=swap",
   vi: "https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;600;700&display=swap",
+  ru: "https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;600;700&display=swap",
+  th: "https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@400;600;700&display=swap",
 };
 
 function detectLang() {

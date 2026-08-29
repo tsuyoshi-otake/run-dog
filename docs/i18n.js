@@ -7,6 +7,9 @@ export const LANGS = [
   { id: "fr", label: "Français" },
   { id: "de", label: "Deutsch" },
   { id: "es", label: "Español" },
+  { id: "ru", label: "Русский" },
+  { id: "it", label: "Italiano" },
+  { id: "th", label: "ไทย" },
 ];
 
 export const I18N = {
@@ -58,7 +61,7 @@ export const I18N = {
     faq: [
       {
         q: "対応している言語は？",
-        a: "この紹介ページは日本語、英語、中国語、韓国語、ベトナム語、フランス語、ドイツ語、スペイン語に対応しています。アプリ本体のカード表記は英語です。",
+        a: "紹介ページは日本語、英語、中国語、韓国語、ベトナム語、フランス語、ドイツ語、スペイン語、ロシア語、イタリア語、タイ語に対応しています。右クリックメニューは Windows の表示言語に合わせます。ホバーカードの表記は英語です。",
       },
       {
         q: "RunCat と同じものですか？",
@@ -144,7 +147,7 @@ export const I18N = {
     faq: [
       {
         q: "What languages does it support?",
-        a: "This site is in Japanese, English, Chinese, Korean, Vietnamese, French, German, and Spanish. The app card itself is labeled in English.",
+        a: "This site is in Japanese, English, Chinese, Korean, Vietnamese, French, German, Spanish, Russian, Italian, and Thai. The tray menu follows the Windows display language. The hover card remains in English.",
       },
       {
         q: "Is this the same as RunCat?",
@@ -229,7 +232,7 @@ export const I18N = {
     faq: [
       {
         q: "支持哪些语言？",
-        a: "本介绍页支持日语、英语、中文、韩语、越南语、法语、德语和西班牙语。应用卡片上的文字为英语。",
+        a: "本介绍页支持日语、英语、中文、韩语、越南语、法语、德语、西班牙语、俄语、意大利语和泰语。右键菜单跟随 Windows 显示语言。悬停卡片上的文字为英语。",
       },
       {
         q: "和 RunCat 是同一个软件吗？",
@@ -314,7 +317,7 @@ export const I18N = {
     faq: [
       {
         q: "어떤 언어를 지원하나요?",
-        a: "이 소개 페이지는 일본어, 영어, 중국어, 한국어, 베트남어, 프랑스어, 독일어, 스페인어를 지원합니다. 앱 카드의 표기는 영어입니다.",
+        a: "이 소개 페이지는 일본어, 영어, 중국어, 한국어, 베트남어, 프랑스어, 독일어, 스페인어, 러시아어, 이탈리아어, 태국어를 지원합니다. 오른쪽 클릭 메뉴는 Windows 표시 언어를 따릅니다. 호버 카드의 표기는 영어입니다.",
       },
       {
         q: "RunCat과 같은 앱인가요?",
@@ -400,7 +403,7 @@ export const I18N = {
     faq: [
       {
         q: "Hỗ trợ ngôn ngữ nào?",
-        a: "Trang giới thiệu có tiếng Nhật, Anh, Trung, Hàn, Việt, Pháp, Đức và Tây Ban Nha. Nhãn trên thẻ ứng dụng là tiếng Anh.",
+        a: "Trang giới thiệu có tiếng Nhật, Anh, Trung, Hàn, Việt, Pháp, Đức, Tây Ban Nha, Nga, Ý và Thái. Menu chuột phải theo ngôn ngữ hiển thị của Windows. Nhãn trên thẻ khi di chuột là tiếng Anh.",
       },
       {
         q: "Có phải RunCat không?",
@@ -486,7 +489,7 @@ export const I18N = {
     faq: [
       {
         q: "Quelles langues sont prises en charge ?",
-        a: "Ce site existe en japonais, anglais, chinois, coréen, vietnamien, français, allemand et espagnol. Les libellés de la carte de l'application sont en anglais.",
+        a: "Ce site existe en japonais, anglais, chinois, coréen, vietnamien, français, allemand, espagnol, russe, italien et thaï. Le menu contextuel suit la langue d'affichage de Windows. Les libellés de la carte au survol restent en anglais.",
       },
       {
         q: "Est-ce le même logiciel que RunCat ?",
@@ -572,7 +575,7 @@ export const I18N = {
     faq: [
       {
         q: "Welche Sprachen werden unterstützt?",
-        a: "Diese Seite gibt es auf Japanisch, Englisch, Chinesisch, Koreanisch, Vietnamesisch, Französisch, Deutsch und Spanisch. Die Kartenbeschriftung der App ist Englisch.",
+        a: "Diese Seite gibt es auf Japanisch, Englisch, Chinesisch, Koreanisch, Vietnamesisch, Französisch, Deutsch, Spanisch, Russisch, Italienisch und Thai. Das Kontextmenü folgt der Windows-Anzeigesprache. Die Kartenbeschriftung bleibt Englisch.",
       },
       {
         q: "Ist das dasselbe wie RunCat?",
@@ -658,7 +661,7 @@ export const I18N = {
     faq: [
       {
         q: "¿Qué idiomas admite?",
-        a: "Este sitio está en japonés, inglés, chino, coreano, vietnamita, francés, alemán y español. Las etiquetas de la tarjeta de la aplicación están en inglés.",
+        a: "Este sitio está en japonés, inglés, chino, coreano, vietnamita, francés, alemán, español, ruso, italiano y tailandés. El menú contextual sigue el idioma de Windows. Las etiquetas de la tarjeta al pasar el puntero siguen en inglés.",
       },
       {
         q: "¿Es lo mismo que RunCat?",
@@ -693,6 +696,264 @@ export const I18N = {
       "Al arrancar comprueba GitHub Releases una sola vez. La descarga e instalación solo ocurren si las eliges en el menú.",
       "Si usas Claude Code o Codex CLI, puede leer sus registros locales y consultar las API de límites con credenciales ya en el equipo. Los tokens no se comparten con terceros.",
       "No incluye SDK de publicidad, analítica ni informes de fallos.",
+      "This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.",
+    ],
+  },
+  ru: {
+    title: "RunDog",
+    description:
+      "Собака в области уведомлений. По скорости бега видно нагрузку CPU в Windows.",
+    tagline: "Завести собаку в области уведомлений?",
+    lead: "Скорость бега показывает загрузку CPU в Windows. Написано на Rust и оптимизировано так, чтобы в трее почти не занимать CPU и память.",
+    download: "Скачать для Windows",
+    requirement: "Windows 10 / 11 (64-бит)",
+    viewGithub: "Смотреть на GitHub",
+    altTaskbar: "RunDog в области уведомлений",
+    altFlyout: "Карточка RunDog при наведении",
+    featuresTitle: "Особенности",
+    features: [
+      {
+        title: "Почти без нагрузки",
+        body: "Rust и Win32: без GUI-фреймворка и лишних потоков. Release собирается с LTO, чтобы простой CPU и память были минимальными.",
+      },
+      {
+        title: "Нагрузка с одного взгляда",
+        body: "Чем занятее CPU, тем быстрее бежит собака. В покое она идёт шагом. Цифры читать не обязательно.",
+      },
+      {
+        title: "Компактная системная карточка",
+        body: "CPU, память, GPU и диск — нужное прямо из области уведомлений.",
+      },
+      {
+        title: "Claude и Codex тоже",
+        body: "Лимиты подписки и стоимость, эквивалентная API, без запуска CLI.",
+      },
+    ],
+    metricsTitle: "Карточка при наведении",
+    metricsLead: "Наведите на собаку — карточка откроется. Искать цифры не нужно.",
+    metrics: [
+      "Загрузка CPU: System / User / Idle",
+      "Память",
+      "GPU и выделенная / общая видеопамять",
+      "Диск",
+      "Лимиты Claude Code на 5 часов и 7 дней",
+      "Лимиты Codex CLI и стоимость, эквивалентная API",
+      "Собственные CPU и память RunDog",
+    ],
+    usageTitle: "Claude Code и Codex",
+    usageBody:
+      "На карточке — окна подписки 5 часов и 7 дней плюс стоимость, эквивалентная API. RunDog не запускает claude или codex, а читает только нужные журналы.",
+    faqTitle: "Частые вопросы",
+    faq: [
+      {
+        q: "Какие языки поддерживаются?",
+        a: "Сайт есть на японском, английском, китайском, корейском, вьетнамском, французском, немецком, испанском, русском, итальянском и тайском. Контекстное меню следует языку интерфейса Windows. Подписи карточки остаются на английском.",
+      },
+      {
+        q: "Это то же самое, что RunCat?",
+        a: "Нет. RunDog — новое независимое приложение для Windows. Это не замена RunCat, а дань идее бегущего питомца как индикатора нагрузки.",
+      },
+      {
+        q: "Оно тяжёлое?",
+        a: "Нет. Rust говорит с Win32 напрямую, без GUI-фреймворка и лишних потоков. С LTO в простое доля CPU машины часто ниже 0,1%, частная память — несколько МиБ.",
+      },
+      {
+        q: "Отправляет ли оно данные наружу?",
+        a: "При запуске один раз проверяет GitHub Releases. Если вы пользуетесь Claude или Codex, может запросить их API лимитов с уже имеющимися учётными данными. Нет SDK рекламы или аналитики.",
+      },
+      {
+        q: "Предупредит ли SmartScreen?",
+        a: "Подпись SignPath Foundation ещё в заявке. Пока нет Authenticode, Windows может предупредить. Установщик проверяется SHA-256. Ставьте из GitHub-репозитория проекта.",
+      },
+      {
+        q: "Как удалить?",
+        a: "Параметры Windows → Приложения → RunDog. Ярлыки меню «Пуск» и необязательный автозапуск тоже снимаются.",
+      },
+      {
+        q: "Какие требования?",
+        a: "64-разрядная Windows 10 или 11.",
+      },
+    ],
+    privacy: "Конфиденциальность",
+    privacyTitle: "Конфиденциальность",
+    back: "Назад к RunDog",
+    privacyBody: [
+      "RunDog не создаёт учётную запись. CPU, память, GPU и диск читаются локально через API Windows. Настройки хранятся в реестре текущего пользователя.",
+      "При запуске один раз проверяет GitHub Releases. Загрузка и установка только если вы выберете их в меню.",
+      "Если вы пользуетесь Claude Code или Codex CLI, RunDog может читать локальные журналы и запрашивать API лимитов с уже имеющимися учётными данными. Токены третьим лицам не передаются.",
+      "Нет SDK рекламы, аналитики или отчётов о сбоях.",
+      "This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.",
+    ],
+  },
+  it: {
+    title: "RunDog",
+    description:
+      "Un cane nell'area di notifica. Quanto corre indica il carico CPU di Windows.",
+    tagline: "Adottare un cane nell'area di notifica?",
+    lead: "La velocità del cane indica il carico CPU di Windows. Scritto in Rust e ottimizzato per usare quasi zero CPU e memoria mentre resta nel vassoio.",
+    download: "Scarica per Windows",
+    requirement: "Windows 10 / 11 (64 bit)",
+    viewGithub: "Vedi su GitHub",
+    altTaskbar: "RunDog nell'area di notifica",
+    altFlyout: "Scheda RunDog al passaggio del puntatore",
+    featuresTitle: "Caratteristiche",
+    features: [
+      {
+        title: "Quasi nessun overhead",
+        body: "Rust su Win32: niente framework GUI né thread extra. Le build di release usano LTO per tenere bassi CPU e memoria a riposo.",
+      },
+      {
+        title: "Il carico a colpo d'occhio",
+        body: "Più la CPU è occupata, più il cane corre. Quando è calmo, cammina. Non serve leggere i numeri.",
+      },
+      {
+        title: "Una scheda di sistema compatta",
+        body: "CPU, memoria, GPU e archiviazione: l'essenziale, dall'area di notifica.",
+      },
+      {
+        title: "Anche Claude e Codex",
+        body: "Limiti dell'abbonamento e costo equivalente API, senza avviare le CLI.",
+      },
+    ],
+    metricsTitle: "Scheda al passaggio",
+    metricsLead: "Punta il cane e la scheda si apre. Non devi andare a caccia di numeri.",
+    metrics: [
+      "Uso CPU con System / User / Idle",
+      "Memoria",
+      "GPU con memoria dedicata / condivisa",
+      "Archiviazione",
+      "Limiti Claude Code di 5 ore e 7 giorni",
+      "Limiti Codex CLI e costo equivalente API",
+      "CPU e memoria di RunDog stesso",
+    ],
+    usageTitle: "Claude Code e Codex",
+    usageBody:
+      "La scheda mostra le finestre di abbonamento da 5 ore e 7 giorni, più il costo equivalente API. RunDog non avvia claude né codex: legge solo i registri necessari.",
+    faqTitle: "Domande frequenti",
+    faq: [
+      {
+        q: "Quali lingue sono supportate?",
+        a: "Il sito è in giapponese, inglese, cinese, coreano, vietnamita, francese, tedesco, spagnolo, russo, italiano e thai. Il menu contestuale segue la lingua di visualizzazione di Windows. Le etichette della scheda restano in inglese.",
+      },
+      {
+        q: "È lo stesso di RunCat?",
+        a: "No. RunDog è un'app Windows scritta da zero. Non sostituisce RunCat: è un omaggio all'idea di un animale che corre per mostrare il carico.",
+      },
+      {
+        q: "È pesante?",
+        a: "No. Parla con Win32 in Rust, senza framework GUI né thread extra. Con LTO, a riposo la CPU della macchina è spesso sotto lo 0,1% e la memoria privata pochi MiB.",
+      },
+      {
+        q: "Invia dati all'esterno?",
+        a: "All'avvio controlla GitHub Releases una volta. Se usi Claude o Codex, può interrogare le loro API dei limiti con credenziali già presenti. Nessun SDK di pubblicità o analitica.",
+      },
+      {
+        q: "SmartScreen avviserà?",
+        a: "La firma SignPath Foundation è in corso di richiesta. Finché non c'è Authenticode, Windows può avvisare. L'installer è verificato con SHA-256. Installa dal repository GitHub del progetto.",
+      },
+      {
+        q: "Come si disinstalla?",
+        a: "Impostazioni Windows → App → RunDog. Si rimuovono anche i collegamenti del menu Start e l'avvio opzionale.",
+      },
+      {
+        q: "Requisiti?",
+        a: "Windows 10 o 11 a 64 bit.",
+      },
+    ],
+    privacy: "Privacy",
+    privacyTitle: "Privacy",
+    back: "Torna a RunDog",
+    privacyBody: [
+      "RunDog non crea un account. CPU, memoria, GPU e archiviazione si leggono in locale tramite le API di Windows. Le impostazioni stanno nel registro dell'utente corrente.",
+      "All'avvio controlla GitHub Releases una sola volta. Download e installazione solo se li scegli dal menu.",
+      "Se usi Claude Code o Codex CLI, può leggere i registri locali e interrogare le API dei limiti con credenziali già sul PC. I token non si condividono con terzi.",
+      "Nessun SDK di pubblicità, analitica o segnalazione crash.",
+      "This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.",
+    ],
+  },
+  th: {
+    title: "RunDog",
+    description:
+      "สุนัขในพื้นที่แจ้งเตือน ความเร็วที่วิ่งบอกภาระ CPU ของ Windows",
+    tagline: "เลี้ยงสุนัขในพื้นที่แจ้งเตือนไหม?",
+    lead: "ความเร็วที่สุนัขวิ่งบอกการใช้ CPU ของ Windows เขียนด้วย Rust และปรับให้ตอนอยู่ในถาดระบบแทบไม่กิน CPU หรือหน่วยความจำ",
+    download: "ดาวน์โหลดสำหรับ Windows",
+    requirement: "Windows 10 / 11 (64 บิต)",
+    viewGithub: "ดูบน GitHub",
+    altTaskbar: "RunDog ในพื้นที่แจ้งเตือน",
+    altFlyout: "การ์ด RunDog เมื่อชี้เมาส์",
+    featuresTitle: "จุดเด่น",
+    features: [
+      {
+        title: "แทบไม่เพิ่มภาระ",
+        body: "Rust คุยกับ Win32 โดยตรง ไม่มีเฟรมเวิร์ก GUI และไม่มีเธรดเกิน Release ใช้ LTO เพื่อให้ CPU และหน่วยความจำตอนว่างน้อยที่สุด",
+      },
+      {
+        title: "เห็นภาระในพริบตา",
+        body: "CPU ยิ่งยุ่ง สุนัขยิ่งวิ่งเร็ว ตอนว่างก็เดินช้า ไม่ต้องอ่านตัวเลข",
+      },
+      {
+        title: "การ์ดระบบแบบกระชับ",
+        body: "CPU หน่วยความจำ GPU และที่เก็บข้อมูล ดูได้จากพื้นที่แจ้งเตือน",
+      },
+      {
+        title: "ดู Claude และ Codex ด้วย",
+        body: "โควตาแพ็กเกจและค่าใช้จ่ายเทียบ API โดยไม่ต้องเปิด CLI",
+      },
+    ],
+    metricsTitle: "การ์ดเมื่อชี้เมาส์",
+    metricsLead: "ชี้ที่สุนัขแล้วการ์ดจะเปิด ไม่ต้องไปหาตัวเลข",
+    metrics: [
+      "การใช้ CPU พร้อม System / User / Idle",
+      "หน่วยความจำ",
+      "GPU พร้อมหน่วยความจำเฉพาะ / ใช้ร่วม",
+      "ที่เก็บข้อมูล",
+      "โควตา 5 ชั่วโมงและ 7 วันของ Claude Code",
+      "โควตา Codex CLI และค่าใช้จ่ายเทียบ API",
+      "CPU และหน่วยความจำของตัว RunDog เอง",
+    ],
+    usageTitle: "Claude Code และ Codex",
+    usageBody:
+      "การ์ดแสดงหน้าต่างแพ็กเกจ 5 ชั่วโมงและ 7 วัน พร้อมค่าใช้จ่ายเทียบ API RunDog ไม่เปิด claude หรือ codex แค่อ่านล็อกที่จำเป็น",
+    faqTitle: "คำถามที่พบบ่อย",
+    faq: [
+      {
+        q: "รองรับภาษาอะไรบ้าง?",
+        a: "หน้านี้มีภาษาญี่ปุ่น อังกฤษ จีน เกาหลี เวียดนาม ฝรั่งเศส เยอรมัน สเปน รัสเซีย อิตาลี และไทย เมนูคลิกขวาตามภาษาที่แสดงของ Windows ข้อความบนการ์ดยังเป็นภาษาอังกฤษ",
+      },
+      {
+        q: "เป็นตัวเดียวกับ RunCat หรือไม่?",
+        a: "ไม่ใช่ RunDog เป็นแอป Windows ที่เขียนใหม่ ไม่ได้มาแทน RunCat แต่เป็นการคารวะแนวคิดสัตว์เลี้ยงที่วิ่งเพื่อบอกภาระ",
+      },
+      {
+        q: "กินเครื่องไหม?",
+        a: "ไม่ Rust พูดกับ Win32 โดยตรง ไม่มีเฟรมเวิร์ก GUI และเธรดเกิน บิลด์ LTO ตอนว่าง CPU ทั้งเครื่องมักต่ำกว่า 0.1% และหน่วยความจำส่วนตัวแค่ไม่กี่ MiB",
+      },
+      {
+        q: "ส่งข้อมูลออกเครื่องไหม?",
+        a: "ตอนเริ่มจะเช็ก GitHub Releases ครั้งเดียว ถ้าใช้ Claude หรือ Codex อาจเรียก API โควตาด้วยข้อมูลรับรองที่มีอยู่แล้ว ไม่มี SDK โฆษณาหรือวิเคราะห์",
+      },
+      {
+        q: "SmartScreen จะเตือนไหม?",
+        a: "กำลังยื่นลายเซ็น SignPath Foundation ยังไม่มี Authenticode ดังนั้น Windows อาจเตือน ตัวติดตั้งตรวจด้วย SHA-256 ติดตั้งจากที่เก็บ GitHub ของโปรเจกต์",
+      },
+      {
+        q: "ถอนการติดตั้งอย่างไร?",
+        a: "การตั้งค่า Windows → แอป → RunDog ทางลัดเมนูเริ่มต้นและรายการเริ่มอัตโนมัติแบบเลือกได้จะถูกลบด้วย",
+      },
+      {
+        q: "ความต้องการของระบบ?",
+        a: "Windows 10 หรือ 11 แบบ 64 บิต",
+      },
+    ],
+    privacy: "ความเป็นส่วนตัว",
+    privacyTitle: "ความเป็นส่วนตัว",
+    back: "กลับไป RunDog",
+    privacyBody: [
+      "RunDog ไม่สร้างบัญชี CPU หน่วยความจำ GPU และที่เก็บข้อมูลอ่านในเครื่องผ่าน Windows API การตั้งค่าอยู่ในรีจิสทรีของผู้ใช้ปัจจุบัน",
+      "ตอนเริ่มจะเช็ก GitHub Releases ครั้งเดียวว่ามีรุ่นใหม่หรือไม่ การดาวน์โหลดและติดตั้งเกิดเมื่อคุณเลือกจากเมนูเท่านั้น",
+      "ถ้าใช้ Claude Code หรือ Codex CLI อาจอ่านล็อกในเครื่องและเรียก API โควตาด้วยข้อมูลรับรองที่มีอยู่แล้ว ไม่แชร์โทเค็นกับบุคคลที่สาม",
+      "ไม่มี SDK โฆษณา วิเคราะห์ หรือรายงานข้อผิดพลาด",
       "This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.",
     ],
   },

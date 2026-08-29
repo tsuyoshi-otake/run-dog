@@ -517,7 +517,7 @@ mod tests {
         let effects = app.dispatch(Event::cpu_sample(SystemTimes::new(0, 100, 0)));
         assert!(effects.contains(&Effect::SetTimer {
             kind: TimerKind::Animation,
-            interval_ms: 50,
+            interval_ms: 25,
         }));
         assert!(app
             .dispatch(Event::SystemThemeChanged(ResolvedTheme::Dark))
@@ -526,7 +526,7 @@ mod tests {
             .dispatch(Event::SelectTheme(ThemePreference::System))
             .is_empty());
         assert!(app
-            .dispatch(Event::SelectFpsLimit(FpsLimit::Fps20))
+            .dispatch(Event::SelectFpsLimit(FpsLimit::Fps40))
             .is_empty());
     }
 
