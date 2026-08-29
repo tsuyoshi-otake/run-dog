@@ -5,6 +5,7 @@ mod brand;
 mod cpu;
 mod flyout;
 mod gpu;
+mod i18n;
 mod icons;
 mod memory;
 mod notify_icon;
@@ -37,9 +38,10 @@ use windows_sys::Win32::{
     },
     UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
-        GetWindowLongPtrW, KillTimer, PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW,
-        SetTimer, SetWindowLongPtrW, TranslateMessage, GWLP_USERDATA, MSG, SW_SHOWNORMAL,
-        WM_COMMAND, WM_DESTROY, WM_SETTINGCHANGE, WM_THEMECHANGED, WM_TIMER, WNDCLASSW,
+        GetWindowLongPtrW, KillTimer, PostMessageW, PostQuitMessage, RegisterClassW,
+        RegisterWindowMessageW, SetTimer, SetWindowLongPtrW, TranslateMessage, GWLP_USERDATA, MSG,
+        SW_SHOWNORMAL, WM_COMMAND, WM_DESTROY, WM_SETTINGCHANGE, WM_THEMECHANGED, WM_TIMER,
+        WNDCLASSW,
     },
 };
 
@@ -55,9 +57,9 @@ use self::{
     cpu::WindowsCpuSource,
     icons::IconFrames,
     tray::{
-        event_for_command, TrayAdapter, COMMAND_CHECK_FOR_UPDATES, COMMAND_INSTALL_UPDATE,
-        COMMAND_RESCAN_MONTH_USAGE, COMMAND_TOGGLE_PINNED_FLYOUT, PROMOTE_TIMER_ID,
-        TRAY_CALLBACK_MESSAGE,
+        event_for_command, TrayAdapter, COMMAND_ABOUT, COMMAND_CHECK_FOR_UPDATES,
+        COMMAND_INSTALL_UPDATE, COMMAND_RESCAN_MONTH_USAGE, COMMAND_TOGGLE_PINNED_FLYOUT,
+        PROMOTE_TIMER_ID, TRAY_CALLBACK_MESSAGE,
     },
     update::{UpdateController, UPDATE_CHECK_DONE_MESSAGE, UPDATE_REQUEST_EXIT_MESSAGE},
     usage::{
@@ -513,11 +515,10 @@ unsafe extern "system" fn window_proc(
         } else if command == COMMAND_RESCAN_MONTH_USAGE {
             context.usage.rescan_current_month();
             context.dispatch(Event::UsageSample(context.usage.snapshot()));
-            context
-                .platform
-                .tray
-                .notify_month_rescan_started();
+            context.platform.tray.notify_month_rescan_started();
             context.arm_usage_timer(USAGE_CONTINUE_INTERVAL_MS);
+        } else if command == COMMAND_ABOUT {
+            crate::windows::i18n::open_about_page();
         } else if let Some(event) = event_for_command(command) {
             context.dispatch(event);
         }
