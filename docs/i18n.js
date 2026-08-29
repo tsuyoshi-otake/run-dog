@@ -2,6 +2,7 @@ export const LANGS = [
   { id: "ja", label: "日本語" },
   { id: "en", label: "English" },
   { id: "zh", label: "简体中文" },
+  { id: "zh-TW", label: "繁體中文" },
   { id: "ko", label: "한국어" },
   { id: "vi", label: "Tiếng Việt" },
   { id: "fr", label: "Français" },
@@ -61,7 +62,7 @@ export const I18N = {
     faq: [
       {
         q: "対応している言語は？",
-        a: "紹介ページは日本語、英語、中国語、韓国語、ベトナム語、フランス語、ドイツ語、スペイン語、ロシア語、イタリア語、タイ語に対応しています。右クリックメニューは Windows の表示言語に合わせます。ホバーカードの表記は英語です。",
+        a: "紹介ページは日本語、英語、簡体字中国語、繁体字中国語、韓国語、ベトナム語、フランス語、ドイツ語、スペイン語、ロシア語、イタリア語、タイ語に対応しています。右クリックメニューは Windows の表示言語に合わせます。ホバーカードの表記は英語です。",
       },
       {
         q: "RunCat と同じものですか？",
@@ -147,7 +148,7 @@ export const I18N = {
     faq: [
       {
         q: "What languages does it support?",
-        a: "This site is in Japanese, English, Chinese, Korean, Vietnamese, French, German, Spanish, Russian, Italian, and Thai. The tray menu follows the Windows display language. The hover card remains in English.",
+        a: "This site is in Japanese, English, Simplified Chinese, Traditional Chinese, Korean, Vietnamese, French, German, Spanish, Russian, Italian, and Thai. The tray menu follows the Windows display language. The hover card remains in English.",
       },
       {
         q: "Is this the same as RunCat?",
@@ -232,7 +233,7 @@ export const I18N = {
     faq: [
       {
         q: "支持哪些语言？",
-        a: "本介绍页支持日语、英语、中文、韩语、越南语、法语、德语、西班牙语、俄语、意大利语和泰语。右键菜单跟随 Windows 显示语言。悬停卡片上的文字为英语。",
+        a: "本介绍页支持日语、英语、简体中文、繁体中文、韩语、越南语、法语、德语、西班牙语、俄语、意大利语和泰语。右键菜单跟随 Windows 显示语言。悬停卡片上的文字为英语。",
       },
       {
         q: "和 RunCat 是同一个软件吗？",
@@ -267,6 +268,91 @@ export const I18N = {
       "启动时只会向 GitHub Releases 检查一次是否有新版本。下载和安装仅在你从菜单明确选择时进行。",
       "如果使用 Claude Code 或 Codex CLI，可能会读取其主目录中的日志，并用本机已有的凭据查询厂商限额 API。令牌不会提供给第三方。",
       "不包含广告、分析或崩溃报告 SDK。",
+      "This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.",
+    ],
+  },
+  "zh-TW": {
+    title: "RunDog",
+    description: "要不要在通知區域養一隻小狗？跑得越快，代表 Windows 的 CPU 越忙。",
+    tagline: "要不要在通知區域養一隻小狗？",
+    lead: "小狗跑得越快，代表 Windows 的 CPU 越忙。用 Rust 最佳化，常駐時幾乎不佔用 CPU 和記憶體。",
+    download: "下載 Windows 版",
+    requirement: "Windows 10 / 11（64 位元）",
+    viewGithub: "在 GitHub 上查看",
+    altTaskbar: "在通知區域奔跑的 RunDog",
+    altFlyout: "懸停時的 RunDog 卡片",
+    featuresTitle: "特點",
+    features: [
+      {
+        title: "幾乎無負擔",
+        body: "Rust 直接呼叫 Win32，沒有 GUI 框架，也沒有多餘執行緒。發行版用 LTO 最佳化，把閒置時的 CPU 和記憶體壓到最小。",
+      },
+      {
+        title: "一眼看出負載",
+        body: "CPU 越忙，狗跑得越快；空閒時就慢慢走。不用讀數字，看它跑就行。",
+      },
+      {
+        title: "卡片裡的系統資訊",
+        body: "CPU、記憶體、GPU、儲存，從通知區域就能確認。",
+      },
+      {
+        title: "也照看 Claude 和 Codex",
+        body: "顯示訂閱限額和相當於 API 的費用，不必啟動 CLI。",
+      },
+    ],
+    metricsTitle: "懸停卡片",
+    metricsLead: "把指標放到小狗上，卡片就會打開。不必到處找數字。",
+    metrics: [
+      "CPU 使用率以及 System / User / Idle",
+      "記憶體用量",
+      "GPU 使用率及專用 / 共用顯示記憶體",
+      "儲存用量",
+      "Claude Code 的 5 小時和 7 天限額",
+      "Codex CLI 的限額和相當於 API 的費用",
+      "RunDog 自身的 CPU 和記憶體",
+    ],
+    usageTitle: "Claude Code 與 Codex",
+    usageBody:
+      "卡片會顯示 5 小時、7 天的訂閱限額，以及相當於 API 的費用。不會啟動 claude 或 codex，只讀取必要的紀錄。",
+    faqTitle: "常見問題",
+    faq: [
+      {
+        q: "支援哪些語言？",
+        a: "本介紹頁支援日文、英文、簡體中文、繁體中文、韓文、越南文、法文、德文、西班牙文、俄文、義大利文和泰文。右鍵選單會跟隨 Windows 顯示語言。懸停卡片上的文字為英文。",
+      },
+      {
+        q: "和 RunCat 是同一個軟體嗎？",
+        a: "不是。RunDog 是為 Windows 新寫的獨立應用，不是 RunCat 的替代品，只是向「用奔跑的寵物表示負載」這個想法致敬。",
+      },
+      {
+        q: "會很佔資源嗎？",
+        a: "不會。用 Rust 直接呼叫 Win32，沒有 GUI 框架，也沒有多餘執行緒。發行版經過 LTO 最佳化，閒置時整機 CPU 往往低於 0.1%，私用記憶體只有幾 MiB。",
+      },
+      {
+        q: "會把資料傳送到外部嗎？",
+        a: "啟動時會向 GitHub Releases 檢查一次更新。僅在使用 Claude 或 Codex 時，才會用本機既有的認證資料查詢各公司的限額 API。沒有廣告或分析 SDK。",
+      },
+      {
+        q: "SmartScreen 會警告嗎？",
+        a: "正在申請 SignPath Foundation 的程式碼簽署。獲准之前沒有 Authenticode 簽章，因此可能會出現警告。安裝套件帶有 SHA-256 核對。請從專案的 GitHub 存放庫安裝。",
+      },
+      {
+        q: "如何解除安裝？",
+        a: "在 Windows「應用程式」中刪除 RunDog。開始功能表捷徑和選用的開機啟動項目會一併移除。",
+      },
+      {
+        q: "執行環境是什麼？",
+        a: "64 位元 Windows 10 或 11。",
+      },
+    ],
+    privacy: "隱私權",
+    privacyTitle: "隱私權",
+    back: "返回 RunDog",
+    privacyBody: [
+      "RunDog 不建立帳戶。CPU、記憶體、GPU 和儲存只透過 Windows API 在本機讀取。設定保存在目前使用者的登錄檔中。",
+      "啟動時只會向 GitHub Releases 檢查一次是否有新版本。下載和安裝僅在你從選單明確選擇時進行。",
+      "如果使用 Claude Code 或 Codex CLI，可能會讀取其主目錄中的紀錄，並用本機既有的認證資料查詢廠商限額 API。權杖不會提供給第三方。",
+      "不包含廣告、分析或當機回報 SDK。",
       "This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.",
     ],
   },

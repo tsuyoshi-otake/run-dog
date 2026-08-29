@@ -3,27 +3,65 @@ import { I18N, LANGS } from "./i18n.js";
 const STORAGE_KEY = "rundog-lang";
 const FONTS = {
   zh: "https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;600;700&display=swap",
+  "zh-TW":
+    "https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;600;700&display=swap",
   ko: "https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;600;700&display=swap",
   vi: "https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;600;700&display=swap",
   ru: "https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;600;700&display=swap",
   th: "https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@400;600;700&display=swap",
 };
 
+function resolveLang(raw) {
+  if (!raw) {
+    return null;
+  }
+  if (I18N[raw]) {
+    return raw;
+  }
+  const lower = String(raw).toLowerCase().replaceAll("_", "-");
+  if (
+    lower === "zh-tw" ||
+    lower === "zh-hant" ||
+    lower.startsWith("zh-hant-") ||
+    lower === "zh-hk" ||
+    lower.startsWith("zh-hk-") ||
+    lower === "zh-mo" ||
+    lower.startsWith("zh-mo-")
+  ) {
+    return "zh-TW";
+  }
+  if (
+    lower === "zh" ||
+    lower.startsWith("zh-cn") ||
+    lower.startsWith("zh-sg") ||
+    lower.startsWith("zh-hans")
+  ) {
+    return "zh";
+  }
+  const exact = Object.keys(I18N).find((id) => id.toLowerCase() === lower);
+  if (exact) {
+    return exact;
+  }
+  const two = lower.slice(0, 2);
+  return I18N[two] ? two : null;
+}
+
 function detectLang() {
   const query = new URLSearchParams(location.search).get("lang");
-  if (query && I18N[query]) {
-    return query;
+  const fromQuery = resolveLang(query);
+  if (fromQuery) {
+    return fromQuery;
   }
   try {
     const stored = localStorage.getItem(STORAGE_KEY);
-    if (stored && I18N[stored]) {
-      return stored;
+    const fromStored = resolveLang(stored);
+    if (fromStored) {
+      return fromStored;
     }
   } catch {
     /* ignore */
   }
-  const nav = (navigator.language || "ja").slice(0, 2).toLowerCase();
-  return I18N[nav] ? nav : "ja";
+  return resolveLang(navigator.language || "ja") ?? "ja";
 }
 
 function hrefFor(lang) {
