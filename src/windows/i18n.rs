@@ -17,9 +17,11 @@ pub enum UiLanguage {
     English,
     Korean,
     Chinese,
+    ChineseTraditional,
     Vietnamese,
     French,
     German,
+    Spanish,
     Russian,
     Italian,
     Thai,
@@ -29,6 +31,11 @@ impl UiLanguage {
     /// Maps a Win32 LANGID to a supported menu language. Unknown IDs use English.
     #[must_use]
     pub const fn from_langid(langid: u16) -> Self {
+        // Traditional Chinese: Taiwan, Hong Kong, Macau.
+        match langid {
+            0x0404 | 0x0C04 | 0x1404 => return Self::ChineseTraditional,
+            _ => {}
+        }
         match primary_langid(langid) {
             0x11 => Self::Japanese,
             0x12 => Self::Korean,
@@ -36,6 +43,7 @@ impl UiLanguage {
             0x2A => Self::Vietnamese,
             0x0C => Self::French,
             0x07 => Self::German,
+            0x0A => Self::Spanish,
             0x19 => Self::Russian,
             0x10 => Self::Italian,
             0x1E => Self::Thai,
@@ -51,9 +59,11 @@ impl UiLanguage {
             Self::English => "en",
             Self::Korean => "ko",
             Self::Chinese => "zh",
+            Self::ChineseTraditional => "zh-TW",
             Self::Vietnamese => "vi",
             Self::French => "fr",
             Self::German => "de",
+            Self::Spanish => "es",
             Self::Russian => "ru",
             Self::Italian => "it",
             Self::Thai => "th",
@@ -75,9 +85,11 @@ impl UiLanguage {
             Self::English => EN,
             Self::Korean => KO,
             Self::Chinese => ZH,
+            Self::ChineseTraditional => ZH_HANT,
             Self::Vietnamese => VI,
             Self::French => FR,
             Self::German => DE,
+            Self::Spanish => ES,
             Self::Russian => RU,
             Self::Italian => IT,
             Self::Thai => TH,
@@ -318,6 +330,41 @@ const ZH: MenuText = MenuText {
     balloon_check_failed: "无法检查更新。",
 };
 
+const ZH_HANT: MenuText = MenuText {
+    theme: "主題",
+    theme_system: "系統",
+    theme_light: "淺色",
+    theme_dark: "深色",
+    animation_speed: "動畫速度上限",
+    fps_10: "10 FPS",
+    fps_20: "20 FPS",
+    fps_30: "30 FPS",
+    fps_40: "40 FPS",
+    startup_on: "開機啟動: 開",
+    startup_off: "開機啟動: 關",
+    pin_on: "固定監視卡片: 開",
+    pin_off: "固定監視卡片: 關",
+    rescan_month: "完整掃描本月用量",
+    check_updates: "檢查更新",
+    checking_updates: "正在檢查更新...",
+    up_to_date: "已是最新版本",
+    install_update: "安裝 RunDog v{version}",
+    check_again: "再次檢查",
+    downloading: "正在下載 RunDog v{version}...",
+    starting_installer: "正在啟動安裝程式...",
+    retry_update: "重試檢查更新",
+    update_failed: "無法完成更新",
+    about: "關於",
+    exit: "結束",
+    balloon_startup_on: "開機啟動已打開。",
+    balloon_startup_off: "開機啟動已關閉。",
+    balloon_rescan_started: "已開始完整掃描本月用量。",
+    balloon_rescan_finished: "本月用量掃描已完成。",
+    balloon_up_to_date: "RunDog 已是最新版本。",
+    balloon_available: "RunDog v{version} 可供安裝。",
+    balloon_check_failed: "無法檢查更新。",
+};
+
 const VI: MenuText = MenuText {
     theme: "Giao diện",
     theme_system: "Hệ thống",
@@ -421,6 +468,41 @@ const DE: MenuText = MenuText {
     balloon_up_to_date: "RunDog ist aktuell.",
     balloon_available: "RunDog v{version} ist verfügbar.",
     balloon_check_failed: "Updates konnten nicht geprüft werden.",
+};
+
+const ES: MenuText = MenuText {
+    theme: "Tema",
+    theme_system: "Sistema",
+    theme_light: "Claro",
+    theme_dark: "Oscuro",
+    animation_speed: "Velocidad máxima de animación",
+    fps_10: "10 FPS",
+    fps_20: "20 FPS",
+    fps_30: "30 FPS",
+    fps_40: "40 FPS",
+    startup_on: "Iniciar con Windows: activado",
+    startup_off: "Iniciar con Windows: desactivado",
+    pin_on: "Fijar tarjeta del monitor: activado",
+    pin_off: "Fijar tarjeta del monitor: desactivado",
+    rescan_month: "Escaneo completo del uso de este mes",
+    check_updates: "Buscar actualizaciones",
+    checking_updates: "Buscando actualizaciones...",
+    up_to_date: "RunDog está actualizado",
+    install_update: "Instalar RunDog v{version}",
+    check_again: "Volver a comprobar",
+    downloading: "Descargando RunDog v{version}...",
+    starting_installer: "Iniciando el instalador...",
+    retry_update: "Reintentar la búsqueda",
+    update_failed: "No se pudo completar la actualización",
+    about: "Acerca de",
+    exit: "Salir",
+    balloon_startup_on: "El inicio con Windows está activado.",
+    balloon_startup_off: "El inicio con Windows está desactivado.",
+    balloon_rescan_started: "Se inició el escaneo completo del uso de este mes.",
+    balloon_rescan_finished: "El escaneo del uso de este mes ha terminado.",
+    balloon_up_to_date: "RunDog está actualizado.",
+    balloon_available: "RunDog v{version} está disponible.",
+    balloon_check_failed: "No se pudieron buscar actualizaciones.",
 };
 
 const RU: MenuText = MenuText {
@@ -539,14 +621,26 @@ mod tests {
         assert_eq!(UiLanguage::from_langid(0x0809), UiLanguage::English);
         assert_eq!(UiLanguage::from_langid(0x0412), UiLanguage::Korean);
         assert_eq!(UiLanguage::from_langid(0x0804), UiLanguage::Chinese);
-        assert_eq!(UiLanguage::from_langid(0x0404), UiLanguage::Chinese);
+        assert_eq!(
+            UiLanguage::from_langid(0x0404),
+            UiLanguage::ChineseTraditional
+        );
+        assert_eq!(
+            UiLanguage::from_langid(0x0C04),
+            UiLanguage::ChineseTraditional
+        );
+        assert_eq!(
+            UiLanguage::from_langid(0x1404),
+            UiLanguage::ChineseTraditional
+        );
         assert_eq!(UiLanguage::from_langid(0x042A), UiLanguage::Vietnamese);
         assert_eq!(UiLanguage::from_langid(0x040C), UiLanguage::French);
         assert_eq!(UiLanguage::from_langid(0x0407), UiLanguage::German);
         assert_eq!(UiLanguage::from_langid(0x0419), UiLanguage::Russian);
         assert_eq!(UiLanguage::from_langid(0x0410), UiLanguage::Italian);
         assert_eq!(UiLanguage::from_langid(0x041E), UiLanguage::Thai);
-        assert_eq!(UiLanguage::from_langid(0x040A), UiLanguage::English);
+        assert_eq!(UiLanguage::from_langid(0x040A), UiLanguage::Spanish);
+        assert_eq!(UiLanguage::from_langid(0x080A), UiLanguage::Spanish);
         assert_eq!(UiLanguage::from_langid(0), UiLanguage::English);
         assert_eq!(primary_langid(0x0411), 0x11);
     }
@@ -566,6 +660,10 @@ mod tests {
         assert_eq!(UiLanguage::Thai.menu().exit, "ออก");
         assert_eq!(UiLanguage::Russian.menu().theme, "Тема");
         assert_eq!(UiLanguage::Italian.menu().about, "Informazioni");
+        assert_eq!(UiLanguage::Spanish.menu().about, "Acerca de");
+        assert_eq!(UiLanguage::Spanish.pages_code(), "es");
+        assert_eq!(UiLanguage::ChineseTraditional.menu().about, "關於");
+        assert_eq!(UiLanguage::ChineseTraditional.pages_code(), "zh-TW");
     }
 
     #[test]
@@ -579,6 +677,14 @@ mod tests {
             UiLanguage::Korean.about_url(),
             format!("{ABOUT_PAGE_URL}?lang=ko")
         );
+        assert_eq!(
+            UiLanguage::Spanish.about_url(),
+            format!("{ABOUT_PAGE_URL}?lang=es")
+        );
+        assert_eq!(
+            UiLanguage::ChineseTraditional.about_url(),
+            format!("{ABOUT_PAGE_URL}?lang=zh-TW")
+        );
     }
 
     #[test]
@@ -588,9 +694,11 @@ mod tests {
             UiLanguage::English,
             UiLanguage::Korean,
             UiLanguage::Chinese,
+            UiLanguage::ChineseTraditional,
             UiLanguage::Vietnamese,
             UiLanguage::French,
             UiLanguage::German,
+            UiLanguage::Spanish,
             UiLanguage::Russian,
             UiLanguage::Italian,
             UiLanguage::Thai,
