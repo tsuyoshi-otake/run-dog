@@ -41,6 +41,7 @@ pub const COMMAND_TOGGLE_PINNED_FLYOUT: u32 = 1_021;
 pub const COMMAND_CHECK_FOR_UPDATES: u32 = 1_030;
 pub const COMMAND_INSTALL_UPDATE: u32 = 1_031;
 pub const COMMAND_RESCAN_MONTH_USAGE: u32 = 1_032;
+pub const COMMAND_ABOUT: u32 = 1_040;
 pub const COMMAND_EXIT: u32 = 1_099;
 
 /// Converts a menu command to a pure application event.
@@ -120,14 +121,17 @@ impl TrayAdapter {
             Effect::SetThemeMenu(theme) => self.theme = *theme,
             Effect::SetFpsMenu(limit) => self.fps_limit = *limit,
             Effect::SetStartupMenu(enabled) => self.startup_enabled = *enabled,
-            Effect::NotifyStartupChanged(enabled) => self.show_balloon(
-                "RunDog",
-                if *enabled {
-                    "Launch at startup is on."
-                } else {
-                    "Launch at startup is off."
-                },
-            ),
+            Effect::NotifyStartupChanged(enabled) => {
+                let text = super::i18n::current().menu();
+                self.show_balloon(
+                    "RunDog",
+                    if *enabled {
+                        text.balloon_startup_on
+                    } else {
+                        text.balloon_startup_off
+                    },
+                );
+            }
             Effect::SetTimer { .. }
             | Effect::KillTimer(TimerKind::CpuSampling | TimerKind::Animation)
             | Effect::SaveSettings(_)
@@ -159,73 +163,71 @@ impl TrayAdapter {
             return;
         }
 
+        let text = super::i18n::current().menu();
         append_checked(
             theme_menu,
             COMMAND_THEME_SYSTEM,
-            "System",
+            text.theme_system,
             self.theme == ThemePreference::System,
         );
         append_checked(
             theme_menu,
             COMMAND_THEME_LIGHT,
-            "Light",
+            text.theme_light,
             self.theme == ThemePreference::Light,
         );
         append_checked(
             theme_menu,
             COMMAND_THEME_DARK,
-            "Dark",
+            text.theme_dark,
             self.theme == ThemePreference::Dark,
         );
         append_checked(
             speed_menu,
             COMMAND_FPS_10,
-            "10 FPS",
+            text.fps_10,
             self.fps_limit == FpsLimit::Fps10,
         );
         append_checked(
             speed_menu,
             COMMAND_FPS_20,
-            "20 FPS",
+            text.fps_20,
             self.fps_limit == FpsLimit::Fps20,
         );
         append_checked(
             speed_menu,
             COMMAND_FPS_30,
-            "30 FPS",
+            text.fps_30,
             self.fps_limit == FpsLimit::Fps30,
         );
         append_checked(
             speed_menu,
             COMMAND_FPS_40,
-            "40 FPS",
+            text.fps_40,
             self.fps_limit == FpsLimit::Fps40,
         );
 
-        append_submenu(root, theme_menu, "Theme");
-        append_submenu(root, speed_menu, "Maximum animation speed");
+        append_submenu(root, theme_menu, text.theme);
+        append_submenu(root, speed_menu, text.animation_speed);
         let _ = unsafe { AppendMenuW(root, MF_SEPARATOR, 0, ptr::null()) };
         append_checked(
             root,
             COMMAND_TOGGLE_STARTUP,
-            startup_menu_label(self.startup_enabled),
+            text.startup(self.startup_enabled),
             self.startup_enabled,
         );
         append_checked(
             root,
             COMMAND_TOGGLE_PINNED_FLYOUT,
-            pinned_flyout_menu_label(self.flyout_pinned),
+            text.pinned_flyout(self.flyout_pinned),
             self.flyout_pinned,
         );
         let _ = unsafe { AppendMenuW(root, MF_SEPARATOR, 0, ptr::null()) };
-        append_action(
-            root,
-            COMMAND_RESCAN_MONTH_USAGE,
-            "Full scan: current month usage",
-        );
-        append_update_menu(root, update_state);
+        append_action(root, COMMAND_RESCAN_MONTH_USAGE, text.rescan_month);
+        append_update_menu(root, update_state, text);
         let _ = unsafe { AppendMenuW(root, MF_SEPARATOR, 0, ptr::null()) };
-        append_checked(root, COMMAND_EXIT, "Exit", false);
+        append_action(root, COMMAND_ABOUT, text.about);
+        append_checked(root, COMMAND_EXIT, text.exit, false);
 
         let mut point = POINT::default();
         if unsafe { GetCursorPos(&mut point) } != 0 {
@@ -428,17 +430,22 @@ impl TrayAdapter {
     }
 
     pub fn notify_update_result(&mut self, state: &UpdateMenuState, notify_always: bool) {
-        if let Some(body) = update_balloon_text(state, notify_always) {
+        if let Some(body) = update_balloon_text(super::i18n::current().menu(), state, notify_always)
+        {
             self.show_balloon("RunDog", &body);
         }
     }
 
     pub fn notify_month_rescan_started(&mut self) {
-        self.show_balloon("RunDog", "Full scan of current month usage started.");
+        let text = super::i18n::current().menu();
+        self.show_balloon("RunDog", text.balloon_rescan_started);
     }
 
     pub fn notify_month_rescan_finished(&mut self) {
-        self.show_balloon("RunDog", "Current month usage scan complete.");
+        self.show_balloon(
+            "RunDog",
+            super::i18n::current().menu().balloon_rescan_finished,
+        );
     }
 
     fn show_balloon(&self, title: &str, body: &str) {
@@ -495,35 +502,35 @@ fn append_checked(menu: HMENU, command: u32, label: &str, checked: bool) {
     let _ = unsafe { AppendMenuW(menu, flags, command as usize, label.as_ptr()) };
 }
 
-fn append_update_menu(menu: HMENU, state: &UpdateMenuState) {
+fn append_update_menu(menu: HMENU, state: &UpdateMenuState, text: super::i18n::MenuText) {
     match state {
         UpdateMenuState::Idle => {
-            append_action(menu, COMMAND_CHECK_FOR_UPDATES, "Check for updates");
+            append_action(menu, COMMAND_CHECK_FOR_UPDATES, text.check_updates);
         }
         UpdateMenuState::Checking => {
-            append_disabled(menu, "Checking for updates...");
+            append_disabled(menu, text.checking_updates);
         }
         UpdateMenuState::Current => {
-            append_action(menu, COMMAND_CHECK_FOR_UPDATES, "Check for updates");
-            append_disabled(menu, "RunDog is up to date");
+            append_action(menu, COMMAND_CHECK_FOR_UPDATES, text.check_updates);
+            append_disabled(menu, text.up_to_date);
         }
         UpdateMenuState::Available { version } => {
             append_action(
                 menu,
                 COMMAND_INSTALL_UPDATE,
-                &format!("Install RunDog v{version}"),
+                &text.with_version(text.install_update, version),
             );
-            append_action(menu, COMMAND_CHECK_FOR_UPDATES, "Check again");
+            append_action(menu, COMMAND_CHECK_FOR_UPDATES, text.check_again);
         }
         UpdateMenuState::Downloading { version } => {
-            append_disabled(menu, &format!("Downloading RunDog v{version}..."));
+            append_disabled(menu, &text.with_version(text.downloading, version));
         }
         UpdateMenuState::Launching => {
-            append_disabled(menu, "Starting installer...");
+            append_disabled(menu, text.starting_installer);
         }
         UpdateMenuState::Failed => {
-            append_action(menu, COMMAND_CHECK_FOR_UPDATES, "Retry update check");
-            append_disabled(menu, "Update could not be completed");
+            append_action(menu, COMMAND_CHECK_FOR_UPDATES, text.retry_update);
+            append_disabled(menu, text.update_failed);
         }
     }
 }
@@ -539,28 +546,17 @@ fn append_disabled(menu: HMENU, label: &str) {
 }
 
 #[must_use]
-fn startup_menu_label(enabled: bool) -> &'static str {
-    if enabled {
-        "Launch at startup: On"
-    } else {
-        "Launch at startup: Off"
-    }
-}
-
-fn pinned_flyout_menu_label(enabled: bool) -> &'static str {
-    if enabled {
-        "Pin monitor card: On"
-    } else {
-        "Pin monitor card: Off"
-    }
-}
-
-#[must_use]
-fn update_balloon_text(state: &UpdateMenuState, notify_always: bool) -> Option<String> {
+fn update_balloon_text(
+    text: super::i18n::MenuText,
+    state: &UpdateMenuState,
+    notify_always: bool,
+) -> Option<String> {
     match state {
-        UpdateMenuState::Current if notify_always => Some("RunDog is up to date.".to_owned()),
-        UpdateMenuState::Available { version } => Some(format!("RunDog v{version} is available.")),
-        UpdateMenuState::Failed if notify_always => Some("Could not check for updates.".to_owned()),
+        UpdateMenuState::Current if notify_always => Some(text.balloon_up_to_date.to_owned()),
+        UpdateMenuState::Available { version } => {
+            Some(text.with_version(text.balloon_available, version))
+        }
+        UpdateMenuState::Failed if notify_always => Some(text.balloon_check_failed.to_owned()),
         _ => None,
     }
 }
@@ -584,13 +580,14 @@ fn wide(value: &str) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::{
-        event_for_command, pinned_flyout_menu_label, startup_menu_label, update_balloon_text,
-        TrayAdapter, UpdateMenuState, COMMAND_CHECK_FOR_UPDATES, COMMAND_EXIT, COMMAND_FPS_40,
-        COMMAND_THEME_DARK, COMMAND_TOGGLE_STARTUP,
+        event_for_command, update_balloon_text, TrayAdapter, UpdateMenuState, COMMAND_ABOUT,
+        COMMAND_CHECK_FOR_UPDATES, COMMAND_EXIT, COMMAND_FPS_40, COMMAND_THEME_DARK,
+        COMMAND_TOGGLE_STARTUP,
     };
     use crate::{
         application::Event,
         core::{FpsLimit, ThemePreference},
+        windows::i18n::UiLanguage,
     };
     use windows_sys::Win32::UI::Shell::NIN_SELECT;
     use windows_sys::Win32::UI::WindowsAndMessaging::{WM_CONTEXTMENU, WM_RBUTTONUP};
@@ -611,6 +608,7 @@ mod tests {
         );
         assert_eq!(event_for_command(COMMAND_EXIT), Some(Event::ExitRequested));
         assert_eq!(event_for_command(COMMAND_CHECK_FOR_UPDATES), None);
+        assert_eq!(event_for_command(COMMAND_ABOUT), None);
         assert_eq!(event_for_command(0), None);
     }
 
@@ -631,18 +629,24 @@ mod tests {
     }
 
     #[test]
-    fn component_startup_label_and_update_balloons_cover_user_visible_states() {
-        assert_eq!(startup_menu_label(true), "Launch at startup: On");
-        assert_eq!(startup_menu_label(false), "Launch at startup: Off");
-        assert_eq!(pinned_flyout_menu_label(true), "Pin monitor card: On");
-        assert_eq!(pinned_flyout_menu_label(false), "Pin monitor card: Off");
+    fn component_english_menu_copy_and_update_balloons_cover_user_visible_states() {
+        let en = UiLanguage::English.menu();
+        assert_eq!(en.startup(true), "Launch at startup: On");
+        assert_eq!(en.startup(false), "Launch at startup: Off");
+        assert_eq!(en.pinned_flyout(true), "Pin monitor card: On");
+        assert_eq!(en.pinned_flyout(false), "Pin monitor card: Off");
+        assert_eq!(en.about, "About");
         assert_eq!(
-            update_balloon_text(&UpdateMenuState::Current, true).as_deref(),
+            update_balloon_text(en, &UpdateMenuState::Current, true).as_deref(),
             Some("RunDog is up to date.")
         );
-        assert_eq!(update_balloon_text(&UpdateMenuState::Current, false), None);
+        assert_eq!(
+            update_balloon_text(en, &UpdateMenuState::Current, false),
+            None
+        );
         assert_eq!(
             update_balloon_text(
+                en,
                 &UpdateMenuState::Available {
                     version: "1.1.1".to_owned()
                 },
@@ -652,9 +656,9 @@ mod tests {
             Some("RunDog v1.1.1 is available.")
         );
         assert_eq!(
-            update_balloon_text(&UpdateMenuState::Failed, true).as_deref(),
+            update_balloon_text(en, &UpdateMenuState::Failed, true).as_deref(),
             Some("Could not check for updates.")
         );
-        assert_eq!(update_balloon_text(&UpdateMenuState::Idle, true), None);
+        assert_eq!(update_balloon_text(en, &UpdateMenuState::Idle, true), None);
     }
 }

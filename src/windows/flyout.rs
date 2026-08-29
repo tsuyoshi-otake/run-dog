@@ -283,7 +283,8 @@ fn visible_usage_count(usage: UsageSnapshot) -> usize {
     if usage.month_scan_in_progress {
         2
     } else {
-        usize::from(usage.claude.has_month_activity()) + usize::from(usage.codex.has_month_activity())
+        usize::from(usage.claude.has_month_activity())
+            + usize::from(usage.codex.has_month_activity())
     }
 }
 
@@ -1005,9 +1006,8 @@ fn paint_usage_row(
 }
 
 fn format_month_usage(usage: ProviderUsage, scanning: bool) -> String {
-    let has_totals = usage.month_cents > 0
-        || usage.month_input_tokens > 0
-        || usage.month_output_tokens > 0;
+    let has_totals =
+        usage.month_cents > 0 || usage.month_input_tokens > 0 || usage.month_output_tokens > 0;
     if scanning && !has_totals {
         return "Month: Scanning...".to_owned();
     }

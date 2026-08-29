@@ -12,13 +12,13 @@
   <img src="assets/rundog-flyout.png" alt="ホバー時の RunDog カード" width="320">
 </p>
 
-`RunDog` は、Windows の通知領域で CPU 使用率に応じて犬の 3 フレーム・アニメーションを表示する、Rust 製の常駐アプリケーションです。GUI フレームワークもランタイムも余分なスレッドもなく、リリースは LTO で最適化しているので、常駐しても CPU もメモリもほとんど使いません。犬にポインターを重ねると、CPU / メモリ / GPU / ストレージ、Claude Code / Codex CLI の利用状況、RunDog 自身の CPU とメモリがカードで開きます。
+`RunDog` は、Windows の通知領域で CPU 使用率に応じて犬の 3 フレーム・アニメーションを表示する、Rust 製の常駐アプリケーションです。GUI フレームワークもランタイムも余分なスレッドもなく、リリースは LTO で最適化しているので、常駐しても CPU もメモリもほとんど使いません。犬にポインターを重ねると、CPU / メモリ / GPU / ストレージ、Claude Code / Codex CLI の利用状況、RunDog 自身の CPU とメモリがカードで開きます。右クリックメニューは Windows の表示言語に合わせ、日本語・英語・韓国語・中国語・ベトナム語・フランス語・ドイツ語・ロシア語・イタリア語・タイ語を出します。`RunDog について` から [紹介ページ](https://tsuyoshi-otake.github.io/run-dog/) が開きます。
 
 ## 機能
 
 - `GetSystemTimes` の累積値差分による全体 CPU 使用率と、`GlobalMemoryStatusEx` によるメモリ使用率、システムボリュームの使用量、GPU エンジン使用率と専用 / 共有ビデオメモリ。ホバーで CPU / メモリ / GPU / ストレージのカードと直近 1 分のスパークライン、Claude Code / Codex CLI のサブスクリミットと API 相当利用料、RunDog 自身の CPU 割合とプライベートメモリを表示
-- CPU 使用率に応じた 5–40 FPS のアニメーション（既定の上限は 20 FPS）
-- System / Light / Dark テーマ、10 / 20 / 30 / 40 FPS 上限の右クリックメニュー
+- CPU 使用率に応じた 5–40 FPS のアニメーション（既定の上限は 40 FPS）
+- System / Light / Dark テーマ、アニメーション上限、スタートアップ、カード固定、更新確認、今月の利用状況の再スキャン、About、終了の右クリックメニュー（Windows の表示言語に追従）
 - Windows のスタートアップで起動、初回トレイ登録時の通知領域ピン留め（ユーザーが隠した場合は維持）、左クリックでモニターカードの常時表示と TOP 固定トグル、Explorer 再起動後の tray 再登録
 - GitHub Releases の stable release を起動時に一度だけ非同期確認し、検証済みの新版をサイレント導入
 - 単一インスタンス、単一 message-loop thread。GUI フレームワーク / GC / 常時ポーリングスレッドなし。リリースは `lto`・単一 codegen unit・`panic = "abort"` で最小化
@@ -33,7 +33,7 @@ Windows の MSVC Rust toolchain で実行します。
 cargo build --release
 ```
 
-成果物は `target\release\RunDog.exe` です。実行するとコンソールを表示せず、通知領域に常駐します。終了はアイコンの右クリックメニューから行います。
+成果物は `target\release\RunDog.exe` です。実行するとコンソールを表示せず、通知領域に常駐します。終了と About（GitHub Pages）はアイコンの右クリックメニューから行います。
 
 ## 自動更新と配布
 
@@ -109,7 +109,7 @@ cargo +nightly llvm-cov --all-targets --json --summary-only --output-path target
 
 ## 範囲
 
-初期版は、ローカルで解析した RunCat 2.0.0 と同じ CPU 表示・アニメーション・テーマ・速度上限・起動時実行・Task Manager 導線を対象とします。GPU/メモリ可視化、ゲーム、Runner 種別の拡張はこの版の対象外です。
+対象は Windows 10 / 11 64-bit の通知領域モニターです。CPU / メモリ / GPU / ストレージ、Claude Code / Codex の利用状況、トレイメニューの多言語化、GitHub Releases からの更新確認を含みます。ゲームや、犬以外の Runner 種別はこの対象外です。
 
 ## 謝辞
 

@@ -17,9 +17,9 @@ const HYSTERESIS_PERCENT: f32 = 2.0;
 #[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd, Hash)]
 pub enum FpsLimit {
     Fps10,
-    #[default]
     Fps20,
     Fps30,
+    #[default]
     Fps40,
 }
 
@@ -224,6 +224,7 @@ mod tests {
 
     #[test]
     fn c2_fps_persisted_parsing_covers_each_arm() {
+        assert_eq!(FpsLimit::default(), FpsLimit::Fps40);
         assert_eq!(FpsLimit::parse_persisted("10"), Some(FpsLimit::Fps10));
         assert_eq!(FpsLimit::parse_persisted("20"), Some(FpsLimit::Fps20));
         assert_eq!(FpsLimit::parse_persisted("30"), Some(FpsLimit::Fps30));

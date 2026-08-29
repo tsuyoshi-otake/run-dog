@@ -2306,14 +2306,19 @@ mod tests {
                 r#"{{"type":"assistant","timestamp":"{stamp}","requestId":"{id}","message":{{"id":"{id}","model":"claude-opus-5","usage":{{"input_tokens":1000000,"output_tokens":0}}}}}}"#
             )
         };
-        fs::write(project.join("older.jsonl"), format!("{}\n", event("old", &older_stamp)))
-            .expect("older jsonl");
+        fs::write(
+            project.join("older.jsonl"),
+            format!("{}\n", event("old", &older_stamp)),
+        )
+        .expect("older jsonl");
         std::thread::sleep(std::time::Duration::from_millis(20));
-        fs::write(project.join("newer.jsonl"), format!("{}\n", event("new", &newer_stamp)))
-            .expect("newer jsonl");
+        fs::write(
+            project.join("newer.jsonl"),
+            format!("{}\n", event("new", &newer_stamp)),
+        )
+        .expect("newer jsonl");
 
-        let mut collector =
-            UsageCollector::with_dirs(claude_dir, root.join("codex"), false);
+        let mut collector = UsageCollector::with_dirs(claude_dir, root.join("codex"), false);
         let mut last = UsageTick::MoreWork;
         for _ in 0..32 {
             last = collector.tick(ptr::null_mut());
@@ -2324,7 +2329,10 @@ mod tests {
         let cents = collector.snapshot().claude.month_cents;
         let _ = fs::remove_dir_all(&root);
         assert_eq!(last, UsageTick::Idle);
-        assert_eq!(cents, 1_000, "newer-first scan must still count older files");
+        assert_eq!(
+            cents, 1_000,
+            "newer-first scan must still count older files"
+        );
     }
 
     #[test]
@@ -2386,7 +2394,10 @@ mod tests {
         );
     }
 
-    fn run_until_scan_idle(collector: &mut UsageCollector, max_ticks: usize) -> crate::core::UsageSnapshot {
+    fn run_until_scan_idle(
+        collector: &mut UsageCollector,
+        max_ticks: usize,
+    ) -> crate::core::UsageSnapshot {
         let mut last = collector.snapshot();
         for tick in 0..max_ticks {
             let more = collector.tick(ptr::null_mut());
@@ -2394,9 +2405,7 @@ mod tests {
             if tick % 100 == 0 {
                 eprintln!(
                     "tick {tick}: catch_up={} claude_month={}c codex_month={}c",
-                    last.month_scan_in_progress,
-                    last.claude.month_cents,
-                    last.codex.month_cents,
+                    last.month_scan_in_progress, last.claude.month_cents, last.codex.month_cents,
                 );
             }
             if more == UsageTick::Idle && !last.month_scan_in_progress {

@@ -340,7 +340,7 @@ fn integration_cpu_sampling_changes_speed_without_rearming_an_unchanged_timer() 
     );
 
     rig.cpu_tick();
-    assert_eq!(rig.platform.timer_interval(TimerKind::Animation), Some(50));
+    assert_eq!(rig.platform.timer_interval(TimerKind::Animation), Some(25));
     assert_eq!(
         rig.platform.tray.as_ref().map(|tray| tray.tooltip.as_str()),
         Some("CPU: 100.0%\nMemory: 50.0%")
