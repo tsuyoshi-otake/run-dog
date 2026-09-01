@@ -269,6 +269,13 @@ fn entry_cached(key: &'static str, input: f64, cached: f64, output: f64) -> Mode
     pricing
 }
 
+fn entry_cache_read(key: &'static str, input: f64, cache_read: f64, output: f64) -> ModelPricing {
+    let mut pricing = entry(key, input, output);
+    pricing.cached_input = cache_read;
+    pricing.cache_read = cache_read;
+    pricing
+}
+
 fn entry_long_context(key: &'static str, input: f64, cached: f64, output: f64) -> ModelPricing {
     let mut pricing = entry_cached(key, input, cached, output);
     pricing.long_context_threshold = Some(272_000);
@@ -277,8 +284,10 @@ fn entry_long_context(key: &'static str, input: f64, cached: f64, output: f64) -
     pricing
 }
 
-fn pricing_table() -> [ModelPricing; 54] {
+fn pricing_table() -> [ModelPricing; 56] {
     [
+        entry_cache_read("claude-fable-5-1", 10.0, 0.25, 50.0),
+        entry_cache_read("claude-mythos-5-1", 10.0, 0.25, 50.0),
         entry("claude-fable-5", 10.0, 50.0),
         entry("claude-mythos-5", 10.0, 50.0),
         entry("claude-opus-5", 5.0, 25.0),
@@ -512,6 +521,9 @@ mod tests {
             ..TokenUsage::default()
         };
         assert_eq!(cost_cents("claude-opus-5", usage, None), Some(3_000));
+        assert_eq!(cost_cents("claude-fable-5", usage, None), Some(6_000));
+        assert_eq!(cost_cents("claude-fable-5-1", usage, None), Some(6_000));
+        assert_eq!(cost_cents("claude-mythos-5-1", usage, None), Some(6_000));
         assert_eq!(cost_cents("claude-opus-5-fast", usage, None), Some(6_000));
         assert_eq!(
             cost_cents("claude-opus-5-20260120-fast", usage, None),
@@ -544,6 +556,32 @@ mod tests {
         assert_eq!(resolve_codex_model("codex-auto-review"), "gpt-5.4");
         assert!(is_long_context_request("gpt-5.4", 272_001));
         assert!(!is_long_context_request("gpt-5.4", 272_000));
+    }
+
+    #[test]
+    fn component_fable_51_cache_hits_use_quarter_of_fable_5_rate() {
+        let cache_hits = TokenUsage {
+            cache_read: 1_000_000,
+            ..TokenUsage::default()
+        };
+        assert_eq!(cost_cents("claude-fable-5", cache_hits, None), Some(100));
+        assert_eq!(cost_cents("claude-mythos-5", cache_hits, None), Some(100));
+        assert_eq!(cost_cents("claude-fable-5-1", cache_hits, None), Some(25));
+        assert_eq!(cost_cents("claude-mythos-5-1", cache_hits, None), Some(25));
+        assert_eq!(
+            cost_cents("claude-fable-5-1-20260901", cache_hits, None),
+            Some(25)
+        );
+        let cache_write = TokenUsage {
+            cache_write_5m: 1_000_000,
+            cache_write_1h: 1_000_000,
+            ..TokenUsage::default()
+        };
+        assert_eq!(
+            cost_cents("claude-fable-5-1", cache_write, None),
+            Some(3_250)
+        );
+        assert_eq!(cost_cents("claude-fable-5", cache_write, None), Some(3_250));
     }
 
     #[test]
