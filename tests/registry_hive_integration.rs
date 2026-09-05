@@ -6,7 +6,10 @@
 
 #![cfg(windows)]
 
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+static SETTINGS_OVERRIDE_LOCK: Mutex<()> = Mutex::new(());
 
 use run_dog::{
     application::{CommitRequest, CommitStatus, DurableStore},
@@ -261,6 +264,9 @@ fn live_hive_clear_tombstone_allows_startup_commit_again() {
 
 #[test]
 fn live_hive_usage_checkpoint_migration_invalidates_stale_versions() {
+    let _lock = SETTINGS_OVERRIDE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     use run_dog::{
         core::{ProviderUsage, UsageCheckpoint, UsageSnapshot, USAGE_CHECKPOINT_MIGRATION_VERSION},
         windows::registry::{
@@ -310,6 +316,53 @@ fn live_hive_usage_checkpoint_migration_invalidates_stale_versions() {
             .claude
             .month_cents,
         12_345
+    );
+
+    let _ = clear_usage_checkpoint();
+    set_settings_key_override(None);
+}
+
+#[test]
+fn live_hive_usage_checkpoint_oversize_is_not_reported_durable() {
+    let _lock = SETTINGS_OVERRIDE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    use run_dog::{
+        core::{FileCheckpointCursor, FileCheckpointKey, UsageCheckpoint},
+        windows::registry::{
+            clear_usage_checkpoint, load_usage_checkpoint, registry_sz_utf16_bytes,
+            restore_usage_checkpoint, save_usage_checkpoint, set_settings_key_override,
+            test_hive_path, UsageCheckpointRestoreReason, MAX_REGISTRY_STRING_BYTES,
+        },
+    };
+
+    let suffix = unique_suffix("usage-checkpoint-oversize");
+    let path = test_hive_path(&suffix);
+    set_settings_key_override(Some(path));
+
+    let mut files = std::collections::HashMap::new();
+    files.insert(
+        FileCheckpointKey::Claude("p".repeat(6_000)),
+        FileCheckpointCursor { offset: 1, size: 1 },
+    );
+    let oversized = UsageCheckpoint {
+        month_start: 20_260_801,
+        today: 20_260_823,
+        last_collected_ms: 0,
+        catch_up_done: true,
+        snapshot: Default::default(),
+        files,
+    };
+    let encoded_bytes = registry_sz_utf16_bytes(&oversized.encode());
+    assert!(
+        encoded_bytes > MAX_REGISTRY_STRING_BYTES,
+        "oracle bytes {encoded_bytes} must exceed {MAX_REGISTRY_STRING_BYTES}"
+    );
+    assert!(!save_usage_checkpoint(&oversized));
+    assert!(load_usage_checkpoint().is_none());
+    assert_eq!(
+        restore_usage_checkpoint().reason,
+        UsageCheckpointRestoreReason::Missing
     );
 
     let _ = clear_usage_checkpoint();
