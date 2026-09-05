@@ -16,6 +16,8 @@ mod usage_diagnostics;
 mod usage_durable;
 mod usage_fetch;
 #[cfg(test)]
+mod usage_ingest_fuzz;
+#[cfg(test)]
 mod usage_ingest_pbt;
 mod usage_state;
 
@@ -54,6 +56,11 @@ pub use usage_fetch::{
     record_spawn_failure, reject_late_result, should_start_fetch, start_fetch, FetchApplyDecision,
     FetchErrorKind, FetchOutcome, LimitsFreshness, ProviderFetchKind, ProviderFetchState,
     FETCH_BACKOFF_INITIAL_MS, FETCH_BACKOFF_MAX_MS,
+};
+#[cfg(test)]
+pub use usage_ingest_fuzz::{
+    contains_forbidden_secret, fuzz_case_count, last_safe_complete_record_offset, mutate,
+    seed_corpus, XorShift, DEFAULT_FUZZ_CASES, FUZZ_SEED, MAX_FUZZ_INPUT,
 };
 pub use usage_state::{
     usage_store_root_is_forbidden, CursorKind, CursorRebuildReason, UsageAggregate, UsageCursor,
