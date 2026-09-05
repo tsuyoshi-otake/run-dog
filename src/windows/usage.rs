@@ -1344,6 +1344,7 @@ struct CodexRateLimits {
     primary: Option<CodexWindow>,
     secondary: Option<CodexWindow>,
     plan_type: Option<String>,
+    rate_limit_reset_credits: Option<ResetCredits>,
 }
 
 #[derive(Deserialize)]
@@ -1402,12 +1403,16 @@ fn parse_codex_limits_line(line: &str) -> Option<ProviderUsage> {
     let mut usage = ProviderUsage {
         primary: limits.primary.and_then(codex_window),
         secondary: limits.secondary.and_then(codex_window),
+        banked_reset_available: reset_credit_count(limits.rate_limit_reset_credits),
         ..ProviderUsage::default()
     };
     if let Some(plan) = limits.plan_type {
         usage.set_plan(&plan);
     }
-    if usage.primary.is_none() && usage.secondary.is_none() {
+    if usage.primary.is_none()
+        && usage.secondary.is_none()
+        && usage.banked_reset_available.is_none()
+    {
         None
     } else {
         Some(usage)
@@ -1487,9 +1492,41 @@ fn claude_token_expired(creds: &ClaudeCreds) -> bool {
 struct ClaudeUsageResponse {
     five_hour: Option<ClaudeUsageWindow>,
     seven_day: Option<ClaudeUsageWindow>,
+    seven_day_fable: Option<ClaudeUsageWindow>,
+    #[serde(default)]
+    model_scoped: Vec<ClaudeModelScoped>,
+    #[serde(default)]
+    limits: Vec<ClaudeScopedLimit>,
 }
 
 #[derive(Deserialize)]
+struct ClaudeModelScoped {
+    display_name: Option<String>,
+    utilization: Option<f64>,
+    percent: Option<f64>,
+    resets_at: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ClaudeScopedLimit {
+    kind: Option<String>,
+    percent: Option<f64>,
+    utilization: Option<f64>,
+    resets_at: Option<String>,
+    scope: Option<ClaudeLimitScope>,
+}
+
+#[derive(Deserialize)]
+struct ClaudeLimitScope {
+    model: Option<ClaudeLimitModel>,
+}
+
+#[derive(Deserialize)]
+struct ClaudeLimitModel {
+    display_name: Option<String>,
+}
+
+#[derive(Clone, Deserialize)]
 struct ClaudeUsageWindow {
     utilization: Option<f64>,
     resets_at: Option<String>,
@@ -1610,6 +1647,12 @@ struct CodexAuthTokens {
 struct WhamUsageResponse {
     plan_type: Option<String>,
     rate_limit: Option<WhamRateLimit>,
+    rate_limit_reset_credits: Option<ResetCredits>,
+}
+
+#[derive(Deserialize)]
+struct ResetCredits {
+    available_count: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -1651,20 +1694,30 @@ fn fetch_codex_wham_limits(codex_home: &Path) -> Option<ProviderUsage> {
 
 pub fn parse_wham_usage_response(body: &str) -> Option<ProviderUsage> {
     let parsed: WhamUsageResponse = serde_json::from_str(body).ok()?;
-    let rate = parsed.rate_limit?;
     let mut usage = ProviderUsage {
-        primary: rate.primary_window.and_then(wham_window),
-        secondary: rate.secondary_window.and_then(wham_window),
+        banked_reset_available: reset_credit_count(parsed.rate_limit_reset_credits),
         ..ProviderUsage::default()
     };
+    if let Some(rate) = parsed.rate_limit {
+        usage.primary = rate.primary_window.and_then(wham_window);
+        usage.secondary = rate.secondary_window.and_then(wham_window);
+    }
     if let Some(plan) = parsed.plan_type {
         usage.set_plan(&plan);
     }
-    if usage.primary.is_none() && usage.secondary.is_none() {
+    if usage.primary.is_none()
+        && usage.secondary.is_none()
+        && usage.banked_reset_available.is_none()
+    {
         None
     } else {
         Some(usage)
     }
+}
+
+fn reset_credit_count(credits: Option<ResetCredits>) -> Option<u16> {
+    let count = credits?.available_count?;
+    u16::try_from(count).ok()
 }
 
 fn wham_window(window: WhamWindow) -> Option<LimitWindow> {
@@ -1685,6 +1738,8 @@ fn wham_window(window: WhamWindow) -> Option<LimitWindow> {
 fn apply_provider_limits(target: &mut ProviderUsage, limits: ProviderUsage) {
     target.primary = limits.primary;
     target.secondary = limits.secondary;
+    target.fable = limits.fable;
+    target.banked_reset_available = limits.banked_reset_available;
     if limits.plan_len != 0 {
         target.plan = limits.plan;
         target.plan_len = limits.plan_len;
@@ -1700,19 +1755,80 @@ fn is_subscription_limits(usage: &ProviderUsage) -> bool {
 
 pub fn parse_claude_usage_response(body: &str, plan: Option<&str>) -> Option<ProviderUsage> {
     let parsed: ClaudeUsageResponse = serde_json::from_str(body).ok()?;
+    let fable = extract_fable_window(&parsed);
     let mut usage = ProviderUsage {
         primary: claude_window(parsed.five_hour, 300),
         secondary: claude_window(parsed.seven_day, 10_080),
+        fable,
         ..ProviderUsage::default()
     };
     if let Some(plan) = plan {
         usage.set_plan(plan);
     }
-    if usage.primary.is_none() && usage.secondary.is_none() {
+    if usage.primary.is_none() && usage.secondary.is_none() && usage.fable.is_none() {
         None
     } else {
         Some(usage)
     }
+}
+
+fn extract_fable_window(parsed: &ClaudeUsageResponse) -> Option<LimitWindow> {
+    if let Some(window) = claude_window(parsed.seven_day_fable.clone(), 10_080) {
+        return Some(window);
+    }
+    for scoped in &parsed.model_scoped {
+        if !is_fable_label(scoped.display_name.as_deref()) {
+            continue;
+        }
+        if let Some(window) = claude_scoped_window(
+            scoped.utilization,
+            scoped.percent,
+            scoped.resets_at.as_deref(),
+        ) {
+            return Some(window);
+        }
+    }
+    for limit in &parsed.limits {
+        if !limit
+            .kind
+            .as_deref()
+            .is_some_and(|kind| kind.eq_ignore_ascii_case("weekly_scoped"))
+        {
+            continue;
+        }
+        let name = limit
+            .scope
+            .as_ref()
+            .and_then(|scope| scope.model.as_ref())
+            .and_then(|model| model.display_name.as_deref());
+        if !is_fable_label(name) {
+            continue;
+        }
+        if let Some(window) =
+            claude_scoped_window(limit.utilization, limit.percent, limit.resets_at.as_deref())
+        {
+            return Some(window);
+        }
+    }
+    None
+}
+
+fn is_fable_label(name: Option<&str>) -> bool {
+    name.is_some_and(|label| label.to_ascii_lowercase().contains("fable"))
+}
+
+fn claude_scoped_window(
+    utilization: Option<f64>,
+    percent: Option<f64>,
+    resets_at: Option<&str>,
+) -> Option<LimitWindow> {
+    claude_window(
+        Some(ClaudeUsageWindow {
+            utilization: utilization.or(percent),
+            resets_at: resets_at.map(str::to_owned),
+        }),
+        10_080,
+    )
 }
 
 fn claude_window(window: Option<ClaudeUsageWindow>, minutes: u16) -> Option<LimitWindow> {
@@ -2032,6 +2148,55 @@ mod tests {
         )
         .expect("claude max 20x");
         assert_eq!(max_20x.plan_label().as_deref(), Some("Max 20x"));
+        assert!(max_20x.fable.is_none());
+    }
+
+    #[test]
+    fn component_claude_fable_model_scoped_is_not_the_weekly_all_models_window() {
+        let usage = parse_claude_usage_response(
+            r#"{"five_hour":{"utilization":61.0,"resets_at":"2026-08-16T07:39:00Z"},"seven_day":{"utilization":40.0,"resets_at":"2026-08-18T00:00:00Z"},"model_scoped":[{"display_name":"Fable","utilization":41.0,"resets_at":"2026-08-18T00:00:00Z"}]}"#,
+            Some("max"),
+        )
+        .expect("claude with fable");
+        assert_eq!(usage.secondary.unwrap().used_tenths, 400);
+        assert_eq!(usage.fable.unwrap().used_tenths, 410);
+        assert_eq!(usage.fable.unwrap().window_minutes, 10_080);
+        assert_eq!(
+            usage.fable.unwrap().resets_at_ms,
+            usage.secondary.unwrap().resets_at_ms
+        );
+    }
+
+    #[test]
+    fn component_claude_fable_weekly_scoped_limit_uses_percent() {
+        let usage = parse_claude_usage_response(
+            r#"{"five_hour":{"utilization":8.0},"seven_day":{"utilization":2.0},"limits":[{"kind":"weekly_scoped","percent":65.0,"resets_at":"2026-07-31T23:59:59Z","scope":{"model":{"display_name":"Fable"}},"is_active":true}]}"#,
+            None,
+        )
+        .expect("weekly_scoped fable");
+        assert_eq!(usage.fable.unwrap().used_tenths, 650);
+        assert_eq!(usage.secondary.unwrap().used_tenths, 20);
+    }
+
+    #[test]
+    fn component_claude_absent_fable_is_not_invented() {
+        let usage = parse_claude_usage_response(
+            r#"{"five_hour":{"utilization":10.0},"seven_day":{"utilization":20.0},"model_scoped":[{"display_name":"Opus","utilization":90.0}],"limits":[{"kind":"weekly_scoped","percent":12.0,"scope":{"model":{"display_name":"Sonnet"}}}]}"#,
+            None,
+        )
+        .expect("no fable");
+        assert!(usage.fable.is_none());
+        assert_eq!(usage.secondary.unwrap().used_tenths, 200);
+    }
+
+    #[test]
+    fn component_claude_seven_day_fable_field_is_accepted_when_present() {
+        let usage = parse_claude_usage_response(
+            r#"{"five_hour":{"utilization":1.0},"seven_day":{"utilization":2.0},"seven_day_fable":{"utilization":55.0,"resets_at":"2026-08-18T00:00:00Z"}}"#,
+            None,
+        )
+        .expect("seven_day_fable");
+        assert_eq!(usage.fable.unwrap().used_tenths, 550);
     }
 
     #[test]
@@ -2048,6 +2213,20 @@ mod tests {
     }
 
     #[test]
+    fn component_codex_jsonl_banked_reset_count_is_optional() {
+        let with_credits = parse_codex_limits_line(
+            r#"{"payload":{"rate_limits":{"plan_type":"plus","primary":{"used_percent":5.0,"window_minutes":300,"resets_at":1780000000},"secondary":{"used_percent":4.0,"window_minutes":10080,"resets_at":1780500000},"rate_limit_reset_credits":{"available_count":3}}}}"#,
+        )
+        .expect("jsonl banked");
+        assert_eq!(with_credits.banked_reset_available, Some(3));
+        let without = parse_codex_limits_line(
+            r#"{"payload":{"rate_limits":{"plan_type":"plus","primary":{"used_percent":5.0,"window_minutes":300,"resets_at":1780000000}}}}"#,
+        )
+        .expect("jsonl windows");
+        assert!(without.banked_reset_available.is_none());
+    }
+
+    #[test]
     fn component_chatgpt_wham_usage_maps_primary_and_weekly_windows() {
         let usage = parse_wham_usage_response(
             r#"{"plan_type":"pro","rate_limit":{"primary_window":{"used_percent":34,"limit_window_seconds":18000,"reset_at":1778091218},"secondary_window":{"used_percent":37,"limit_window_seconds":604800,"reset_at":1778605571}}}"#,
@@ -2058,6 +2237,36 @@ mod tests {
         assert_eq!(usage.primary.unwrap().used_tenths, 340);
         assert_eq!(usage.secondary.unwrap().window_minutes, 10_080);
         assert_eq!(usage.secondary.unwrap().used_tenths, 370);
+        assert!(usage.banked_reset_available.is_none());
+    }
+
+    #[test]
+    fn component_chatgpt_wham_usage_reads_banked_reset_count() {
+        let usage = parse_wham_usage_response(
+            r#"{"plan_type":"plus","rate_limit":{"primary_window":{"used_percent":27,"limit_window_seconds":18000,"reset_at":1782770922},"secondary_window":{"used_percent":4,"limit_window_seconds":604800,"reset_at":1783357722}},"rate_limit_reset_credits":{"available_count":2}}"#,
+        )
+        .expect("wham with banked resets");
+        assert_eq!(usage.banked_reset_available, Some(2));
+        assert_eq!(usage.primary.unwrap().used_tenths, 270);
+        assert_eq!(usage.secondary.unwrap().used_tenths, 40);
+    }
+
+    #[test]
+    fn component_chatgpt_wham_usage_does_not_invent_banked_reset() {
+        assert_eq!(
+            parse_wham_usage_response(
+                r#"{"plan_type":"plus","rate_limit":{"primary_window":{"used_percent":27,"limit_window_seconds":18000,"reset_at":1782770922}}}"#,
+            )
+            .expect("windows only")
+            .banked_reset_available,
+            None
+        );
+        assert_eq!(
+            parse_wham_usage_response(r#"{"rate_limit_reset_credits":{"available_count":0}}"#)
+                .expect("zero banked")
+                .banked_reset_available,
+            Some(0)
+        );
     }
 
     #[test]
