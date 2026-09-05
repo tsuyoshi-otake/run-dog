@@ -1,6 +1,6 @@
 //! Durable cursor for incremental Claude / Codex JSONL usage collection.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::{ProviderUsage, UsageSnapshot};
 
@@ -22,6 +22,8 @@ pub enum FileCheckpointKey {
 pub struct FileCheckpointCursor {
     pub offset: u64,
     pub size: u64,
+    pub prefix: u64,
+    pub has_prefix: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -32,6 +34,7 @@ pub struct UsageCheckpoint {
     pub catch_up_done: bool,
     pub snapshot: UsageSnapshot,
     pub files: HashMap<FileCheckpointKey, FileCheckpointCursor>,
+    pub claude_keys: HashSet<u64>,
 }
 
 impl UsageCheckpoint {
@@ -78,10 +81,22 @@ impl UsageCheckpoint {
             let path = match key {
                 FileCheckpointKey::Claude(path) | FileCheckpointKey::Codex(path) => path,
             };
-            out.push_str(&format!(
-                "file={prefix}\t{path}\t{}\t{}\n",
-                cursor.offset, cursor.size
-            ));
+            if cursor.has_prefix {
+                out.push_str(&format!(
+                    "file={prefix}\t{path}\t{}\t{}\t{}\n",
+                    cursor.offset, cursor.size, cursor.prefix
+                ));
+            } else {
+                out.push_str(&format!(
+                    "file={prefix}\t{path}\t{}\t{}\n",
+                    cursor.offset, cursor.size
+                ));
+            }
+        }
+        let mut keys: Vec<u64> = self.claude_keys.iter().copied().collect();
+        keys.sort_unstable();
+        for key in keys {
+            out.push_str(&format!("ckey={key}\n"));
         }
         out
     }
@@ -107,6 +122,7 @@ impl UsageCheckpoint {
         let mut codex_in = 0_u64;
         let mut codex_out = 0_u64;
         let mut files = HashMap::new();
+        let mut claude_keys = HashSet::new();
         for line in lines {
             if let Some(value) = line.strip_prefix("month=") {
                 month_start = value.parse().ok();
@@ -133,13 +149,17 @@ impl UsageCheckpoint {
             } else if let Some(value) = line.strip_prefix("codex_out=") {
                 codex_out = value.parse().ok()?;
             } else if let Some(value) = line.strip_prefix("file=") {
-                let (prefix, path, offset, size) = parse_file_line(value)?;
+                let (prefix, path, cursor) = parse_file_line(value)?;
                 let key = match prefix {
                     'c' => FileCheckpointKey::Claude(path.to_owned()),
                     'x' => FileCheckpointKey::Codex(path.to_owned()),
                     _ => return None,
                 };
-                files.insert(key, FileCheckpointCursor { offset, size });
+                files.insert(key, cursor);
+            } else if let Some(value) = line.strip_prefix("ckey=") {
+                if let Ok(key) = value.parse() {
+                    claude_keys.insert(key);
+                }
             }
         }
         if !catch_up_done {
@@ -168,6 +188,7 @@ impl UsageCheckpoint {
                 ..UsageSnapshot::default()
             },
             files,
+            claude_keys,
         })
     }
 }
@@ -179,13 +200,22 @@ fn file_key_sort_key(key: &FileCheckpointKey) -> (&'static str, &str) {
     }
 }
 
-fn parse_file_line(value: &str) -> Option<(char, &str, u64, u64)> {
+fn parse_file_line(value: &str) -> Option<(char, &str, FileCheckpointCursor)> {
     let mut parts = value.split('\t');
     let prefix = parts.next()?.chars().next()?;
     let path = parts.next()?;
     let offset = parts.next()?.parse().ok()?;
     let size = parts.next()?.parse().ok()?;
-    Some((prefix, path, offset, size))
+    let mut cursor = FileCheckpointCursor {
+        offset,
+        size,
+        ..FileCheckpointCursor::default()
+    };
+    if let Some(prefix_hash) = parts.next() {
+        cursor.prefix = prefix_hash.parse().ok()?;
+        cursor.has_prefix = true;
+    }
+    Some((prefix, path, cursor))
 }
 
 #[cfg(test)]
@@ -194,7 +224,7 @@ mod tests {
         FileCheckpointCursor, FileCheckpointKey, UsageCheckpoint, HEADER, HEADER_V1, HEADER_V2,
     };
     use crate::core::{ProviderUsage, UsageSnapshot};
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     #[test]
     fn component_usage_checkpoint_round_trips_costs_and_tokens() {
@@ -225,9 +255,11 @@ mod tests {
                 FileCheckpointCursor {
                     offset: 4096,
                     size: 4096,
+                    ..FileCheckpointCursor::default()
                 },
             )]
             .into(),
+            claude_keys: [0x1111_u64, 0x2222].into_iter().collect(),
         };
         let decoded = UsageCheckpoint::decode(&checkpoint.encode()).expect("checkpoint");
         assert_eq!(decoded, checkpoint);
@@ -237,6 +269,8 @@ mod tests {
             FileCheckpointCursor {
                 offset: 10,
                 size: 20,
+                prefix: 42,
+                has_prefix: true,
             },
         );
         assert_eq!(
@@ -254,6 +288,7 @@ mod tests {
             catch_up_done: true,
             snapshot: UsageSnapshot::default(),
             files: HashMap::new(),
+            claude_keys: HashSet::new(),
         };
         let mut v1_payload = complete.encode();
         v1_payload = v1_payload.replacen(HEADER, HEADER_V1, 1);
