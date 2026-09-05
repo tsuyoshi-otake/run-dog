@@ -28,6 +28,11 @@ ISCC.exe from Inno Setup 6 must be installed. The script builds the Rust
 release executable, creates dist\RunDog-Setup-x64.exe, and writes its sidecar
 checksum. It deliberately does not sign either artifact.
 
+Downloaded installers live in `%LOCALAPPDATA%\SystemExe\RunDog\updates` as
+`RunDog-Setup-<version>.exe`. The updater keeps at most two completed
+installers and deletes leftover `.part` / `.failed` files. It never deletes
+the installer it is about to launch.
+
 Uninstall (Windows Settings → Apps → RunDog) removes `{app}`, shortcuts, the
 HKCU Run value `RunDog`, `HKCU\Software\SystemExe\RunDog`, and
 `%LOCALAPPDATA%\SystemExe\RunDog`. It must not name or touch Claude or Codex

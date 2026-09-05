@@ -361,6 +361,7 @@ fn download_installer(
         github_release_download_path(repository, &candidate.installer_url, INSTALLER_ASSET_NAME)
             .map_err(|error| error.to_string())?;
     let directory = update_directory()?;
+    cleanup_update_cache(&directory, None);
     let installer_path = directory.join(format!("RunDog-Setup-{}.exe", candidate.version));
     let partial_path = installer_path.with_extension("exe.part");
     let _ = fs::remove_file(&partial_path);
@@ -403,6 +404,7 @@ fn download_installer(
         fs::remove_file(&installer_path).map_err(|error| error.to_string())?;
     }
     fs::rename(&partial_path, &installer_path).map_err(|error| error.to_string())?;
+    cleanup_update_cache(&directory, Some(&installer_path));
     Ok(installer_path)
 }
 
@@ -415,6 +417,88 @@ fn update_directory() -> Result<PathBuf, String> {
         .join("updates");
     fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
     Ok(directory)
+}
+
+/// Keep at most two completed installers. Delete leftover `.part` / failed
+/// files. Never delete `keep` (the installer about to launch or just finished).
+fn cleanup_update_cache(directory: &Path, keep: Option<&Path>) {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    let mut installers = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if is_update_cache_junk(name) {
+            if !paths_refer_to_same_file(&path, keep) {
+                let _ = fs::remove_file(&path);
+            }
+            continue;
+        }
+        if is_cached_installer_name(name) {
+            installers.push((cached_installer_rank(name), path));
+        }
+    }
+    installers.sort_by(|left, right| right.0.cmp(&left.0));
+    for (_, path) in installers.into_iter().skip(MAX_CACHED_INSTALLERS) {
+        if paths_refer_to_same_file(&path, keep) {
+            continue;
+        }
+        let _ = fs::remove_file(&path);
+    }
+}
+
+const MAX_CACHED_INSTALLERS: usize = 2;
+
+#[must_use]
+fn is_update_cache_junk(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".part") || lower.ends_with(".failed") || lower.contains(".failed.")
+}
+
+#[must_use]
+fn is_cached_installer_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.starts_with("rundog-setup-") && lower.ends_with(".exe") && !is_update_cache_junk(name)
+}
+
+#[must_use]
+fn cached_installer_rank(name: &str) -> (u8, crate::update::Version) {
+    let stem = name
+        .strip_prefix("RunDog-Setup-")
+        .or_else(|| name.strip_prefix("rundog-setup-"))
+        .and_then(|rest| rest.strip_suffix(".exe"));
+    if let Some(stem) = stem {
+        if let Ok(version) = crate::update::Version::parse(stem) {
+            return (1, version);
+        }
+    }
+    (
+        0,
+        crate::update::Version::parse("0.0.0").expect("zero version"),
+    )
+}
+
+#[must_use]
+fn paths_refer_to_same_file(path: &Path, keep: Option<&Path>) -> bool {
+    let Some(keep) = keep else {
+        return false;
+    };
+    if path == keep {
+        return true;
+    }
+    if path.file_name() == keep.file_name() {
+        return true;
+    }
+    match (fs::canonicalize(path), fs::canonicalize(keep)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
 }
 
 fn sha256_file(path: &Path) -> Result<String, String> {
@@ -441,6 +525,7 @@ fn sha256_reader(reader: &mut impl Read) -> Result<String, String> {
 
 fn launch_installer(path: &Path) -> Result<(), String> {
     let updates = update_directory()?;
+    cleanup_update_cache(&updates, Some(path));
     let canonical = fs::canonicalize(path).map_err(|error| error.to_string())?;
     let root = fs::canonicalize(&updates).map_err(|error| error.to_string())?;
     if !canonical.starts_with(root) {
@@ -902,10 +987,11 @@ mod tests {
     use crate::update::{UpdateCandidate, Version};
 
     use super::{
-        begin_check, github_redirect_allowed, is_cancelled, is_github_download_host,
-        latest_release_body_is_available, parse_https_location, sha256_reader, GitHubRelease,
-        UpdateState, INNO_SILENT_PARAMETERS,
+        begin_check, cleanup_update_cache, github_redirect_allowed, is_cancelled,
+        is_github_download_host, latest_release_body_is_available, parse_https_location,
+        sha256_reader, GitHubRelease, UpdateState, INNO_SILENT_PARAMETERS,
     };
+    use std::path::{Path, PathBuf};
 
     fn candidate() -> UpdateCandidate {
         UpdateCandidate {
@@ -1109,5 +1195,58 @@ mod tests {
             };
             let _ = select_update(&repository, &current, &release);
         }
+    }
+
+    fn cache_root(label: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "rundog-update-cache-{label}-{nanos}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("cache dir");
+        root
+    }
+
+    fn touch(path: &Path) {
+        std::fs::write(path, b"installer").expect("touch");
+    }
+
+    #[test]
+    fn component_update_cache_drops_parts_failed_and_old_installers() {
+        let root = cache_root("trim");
+        touch(&root.join("RunDog-Setup-1.0.0.exe"));
+        touch(&root.join("RunDog-Setup-1.1.0.exe"));
+        touch(&root.join("RunDog-Setup-1.1.21.exe"));
+        touch(&root.join("RunDog-Setup-1.2.0.exe.part"));
+        touch(&root.join("RunDog-Setup-1.1.20.exe.failed"));
+        touch(&root.join("notes.txt"));
+        cleanup_update_cache(&root, None);
+        assert!(!root.join("RunDog-Setup-1.0.0.exe").exists());
+        assert!(root.join("RunDog-Setup-1.1.0.exe").exists());
+        assert!(root.join("RunDog-Setup-1.1.21.exe").exists());
+        assert!(!root.join("RunDog-Setup-1.2.0.exe.part").exists());
+        assert!(!root.join("RunDog-Setup-1.1.20.exe.failed").exists());
+        assert!(root.join("notes.txt").exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn component_update_cache_never_deletes_the_in_use_installer() {
+        let root = cache_root("keep");
+        let keep = root.join("RunDog-Setup-1.0.0.exe");
+        touch(&keep);
+        touch(&root.join("RunDog-Setup-1.1.0.exe"));
+        touch(&root.join("RunDog-Setup-1.2.0.exe"));
+        touch(&root.join("RunDog-Setup-1.3.0.exe"));
+        cleanup_update_cache(&root, Some(&keep));
+        assert!(keep.exists(), "in-use installer must stay");
+        assert!(root.join("RunDog-Setup-1.3.0.exe").exists());
+        assert!(root.join("RunDog-Setup-1.2.0.exe").exists());
+        assert!(!root.join("RunDog-Setup-1.1.0.exe").exists());
+        let _ = std::fs::remove_dir_all(root);
     }
 }
