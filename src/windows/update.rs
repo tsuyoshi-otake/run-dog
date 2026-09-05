@@ -39,12 +39,7 @@ use crate::update::{
     UpdateCandidate, UpdateRepository, Version, CHECKSUM_ASSET_NAME, INSTALLER_ASSET_NAME,
 };
 
-/// Reserved application message used only after a verified installer has been
-/// handed to ShellExecute. The main thread then removes the tray icon before
-/// Inno Setup replaces the executable.
-pub const UPDATE_REQUEST_EXIT_MESSAGE: u32 = 0x8000 + 2;
-/// Posted when an update check worker reaches a terminal menu state.
-pub const UPDATE_CHECK_DONE_MESSAGE: u32 = 0x8000 + 4;
+pub use super::messages::{UPDATE_CHECK_DONE_MESSAGE, UPDATE_REQUEST_EXIT_MESSAGE};
 
 const API_HOST: &str = "api.github.com";
 const RELEASE_HOST: &str = "github.com";
