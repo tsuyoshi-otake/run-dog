@@ -3205,6 +3205,20 @@ mod tests {
         assert_eq!(event.usage.processed_output_tokens(), 407);
     }
 
+    #[test]
+    fn component_long_context_classification_does_not_inflate_measured_tokens() {
+        let event = parse_codex_usage_line(
+            r#"{"type":"event_msg","timestamp":"2026-08-16T01:02:03Z","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":272001,"cached_input_tokens":1,"output_tokens":10}}}}"#,
+            Some("gpt-5.4"),
+        )
+        .expect("token_count");
+        assert_eq!(event.usage.input, 272_000);
+        assert_eq!(event.usage.cached_input, 1);
+        assert_eq!(event.usage.long_context_input, 272_000);
+        assert_eq!(event.usage.processed_input_tokens(), 272_001);
+        assert_eq!(event.usage.processed_output_tokens(), 10);
+    }
+
     proptest::proptest! {
         #[test]
         fn pbt_codex_output_equals_output_tokens_not_output_plus_reasoning(

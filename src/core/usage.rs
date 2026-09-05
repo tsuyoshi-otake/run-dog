@@ -17,7 +17,8 @@ pub struct TokenUsage {
 }
 
 impl TokenUsage {
-    /// All input-side tokens seen while parsing provider JSONL.
+    /// Measured input-side tokens. `long_context_*` classify the same tokens
+    /// for pricing and must not be added again.
     #[must_use]
     pub const fn processed_input_tokens(self) -> u64 {
         self.input
@@ -25,14 +26,12 @@ impl TokenUsage {
             .saturating_add(self.cache_read)
             .saturating_add(self.cache_write_5m)
             .saturating_add(self.cache_write_1h)
-            .saturating_add(self.long_context_input)
-            .saturating_add(self.long_context_cached_input)
     }
 
-    /// All output-side tokens seen while parsing provider JSONL.
+    /// Measured output-side tokens. `long_context_output` is a pricing class.
     #[must_use]
     pub const fn processed_output_tokens(self) -> u64 {
-        self.output.saturating_add(self.long_context_output)
+        self.output
     }
 }
 
@@ -653,7 +652,7 @@ mod tests {
     }
 
     #[test]
-    fn component_processed_token_totals_include_cache_and_long_context_fields() {
+    fn component_processed_token_totals_are_measurement_not_pricing_class() {
         let usage = TokenUsage {
             input: 10,
             cached_input: 2,
@@ -661,12 +660,55 @@ mod tests {
             cache_write_5m: 4,
             cache_write_1h: 5,
             output: 7,
-            long_context_input: 11,
-            long_context_cached_input: 13,
-            long_context_output: 17,
+            long_context_input: 10,
+            long_context_cached_input: 2,
+            long_context_output: 7,
         };
-        assert_eq!(usage.processed_input_tokens(), 48);
-        assert_eq!(usage.processed_output_tokens(), 24);
+        assert_eq!(usage.processed_input_tokens(), 24);
+        assert_eq!(usage.processed_output_tokens(), 7);
+        let priced = TokenUsage {
+            input: 1_000_000,
+            output: 1_000_000,
+            long_context_input: 1_000_000,
+            long_context_output: 1_000_000,
+            ..TokenUsage::default()
+        };
+        let classified = cost_cents("gpt-5.4", priced, None).expect("priced");
+        let measurement_only = cost_cents(
+            "gpt-5.4",
+            TokenUsage {
+                long_context_input: 0,
+                long_context_output: 0,
+                ..priced
+            },
+            None,
+        )
+        .expect("base");
+        assert!(
+            classified > measurement_only,
+            "long-context copies still apply the pricing premium"
+        );
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn pbt_processed_tokens_ignore_long_context_copies(
+            input in 0u64..50_000u64,
+            cached in 0u64..50_000u64,
+            output in 0u64..10_000u64,
+        ) {
+            let usage = TokenUsage {
+                input,
+                cached_input: cached,
+                output,
+                long_context_input: input,
+                long_context_cached_input: cached,
+                long_context_output: output,
+                ..TokenUsage::default()
+            };
+            proptest::prop_assert_eq!(usage.processed_input_tokens(), input + cached);
+            proptest::prop_assert_eq!(usage.processed_output_tokens(), output);
+        }
     }
 
     #[test]
