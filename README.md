@@ -63,6 +63,10 @@ Windows SmartScreen 等の警告が出る可能性があります。SHA-256 side
 自体が侵害された場合の真正性保証ではありません。stable release の公開権限を保護し、
 利用者はこの制約を理解した上で導入してください。
 
+読むファイル、送信先、頻度、refresh の有無は [docs/PRIVACY.md](docs/PRIVACY.md) と
+[紹介ページのプライバシー](https://tsuyoshi-otake.github.io/run-dog/privacy.html) です。
+RunDog 自身のサーバーへは送りません。
+
 アンインストールは Windows の「アプリ」から RunDog を削除します。プログラム、ショートカット、スタートアップ登録、設定、利用状況ストア、更新キャッシュは削除します。Claude Code / Codex CLI のログ・認証情報・ホームは削除しません。項目ごとの delete / preserve は [docs/UNINSTALL.md](docs/UNINSTALL.md) です。実機 uninstall の fail-first 確認は未実施です。
 
 ローカルで unsigned installer を作るには Inno Setup 6 を導入してから次を実行します。
