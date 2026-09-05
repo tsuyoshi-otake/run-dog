@@ -63,6 +63,18 @@ impl DiagnosticRing {
         let start = if self.len == CAPACITY { self.next } else { 0 };
         (0..self.len).filter_map(move |offset| self.events[(start + offset) % CAPACITY])
     }
+
+    /// Privacy-safe copy for an explicit debug path. Kinds and counts only.
+    #[must_use]
+    pub fn snapshot(&self) -> Vec<DiagnosticEvent> {
+        self.iter().collect()
+    }
+}
+
+/// `RUNDOG_DIAGNOSTICS=1` enables the in-memory ring. Off by default.
+#[must_use]
+pub fn diagnostics_enabled() -> bool {
+    matches!(std::env::var("RUNDOG_DIAGNOSTICS"), Ok(value) if value == "1")
 }
 
 #[cfg(test)]
@@ -94,5 +106,8 @@ mod tests {
         assert!(!encoded.contains("Bearer"));
         assert!(!encoded.contains("eyJ"));
         assert!(!encoded.contains("\\\\Users\\\\"));
+        let snap = ring.snapshot();
+        assert_eq!(snap.len(), CAPACITY);
+        assert_eq!(snap[0].at_ms, 3);
     }
 }

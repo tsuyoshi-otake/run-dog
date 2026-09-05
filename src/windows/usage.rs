@@ -40,8 +40,9 @@ use windows_sys::Win32::{
 };
 
 use crate::core::{
-    cost_cents, local_ymd, ymd_iso, ymd_key, FileCheckpointCursor, FileCheckpointKey, LimitWindow,
-    ProviderUsage, TokenUsage, UsageCheckpoint, UsageSnapshot,
+    cost_cents, diagnostics_enabled, local_ymd, ymd_iso, ymd_key, DiagnosticEvent, DiagnosticKind,
+    DiagnosticRing, FileCheckpointCursor, FileCheckpointKey, LimitWindow, ProviderUsage,
+    TokenUsage, UsageCheckpoint, UsageSnapshot,
 };
 
 pub const USAGE_TIMER_ID: usize = 4;
@@ -130,6 +131,7 @@ pub struct UsageCollector {
     checkpoint_dirty: bool,
     persist_checkpoint: bool,
     month_rescan_notify: bool,
+    diagnostics: Option<DiagnosticRing>,
 }
 
 struct RemoteLimits {
@@ -188,6 +190,7 @@ impl UsageCollector {
             checkpoint_dirty: false,
             persist_checkpoint,
             month_rescan_notify: false,
+            diagnostics: diagnostics_enabled().then(DiagnosticRing::new),
         };
         if persist_checkpoint {
             collector.restore_checkpoint(day_window(unix_now_ms()));
@@ -209,6 +212,16 @@ impl UsageCollector {
             month_scan_in_progress: self.catch_up,
             ..self.snapshot
         }
+    }
+
+    /// Empty unless `RUNDOG_DIAGNOSTICS=1`. Kinds and counts only.
+    #[must_use]
+    #[allow(dead_code)]
+    pub fn diagnostics_snapshot(&self) -> Vec<DiagnosticEvent> {
+        self.diagnostics
+            .as_ref()
+            .map(DiagnosticRing::snapshot)
+            .unwrap_or_default()
     }
 
     #[must_use]
@@ -299,6 +312,15 @@ impl UsageCollector {
         };
         if matches!(tick, UsageTick::Idle) {
             self.persist_checkpoint_if_needed(window);
+        }
+        if let Some(ring) = &mut self.diagnostics {
+            ring.push(DiagnosticEvent {
+                at_ms: now_ms,
+                kind: DiagnosticKind::UsageTick {
+                    files_touched: u16::try_from(opens).unwrap_or(u16::MAX),
+                    more_work: matches!(tick, UsageTick::MoreWork),
+                },
+            });
         }
         tick
     }
@@ -2413,5 +2435,135 @@ mod tests {
             }
         }
         last
+    }
+
+    fn drain_collector(collector: &mut UsageCollector) -> crate::core::UsageSnapshot {
+        for _ in 0..64 {
+            if collector.tick(ptr::null_mut()) == UsageTick::Idle
+                && !collector.snapshot().month_scan_in_progress
+            {
+                break;
+            }
+        }
+        collector.snapshot()
+    }
+
+    fn claude_event_line(id: &str, timestamp: &str, input: u64) -> String {
+        format!(
+            r#"{{"type":"assistant","timestamp":"{timestamp}","requestId":"{id}","message":{{"id":"{id}","model":"claude-opus-5","usage":{{"input_tokens":{input},"output_tokens":0}}}}}}"#
+        )
+    }
+
+    #[test]
+    fn component_unknown_json_fields_do_not_change_known_usage() {
+        let base = r#"{"type":"assistant","timestamp":"2026-08-16T01:02:03Z","requestId":"r1","message":{"id":"m1","model":"claude-opus-5","usage":{"input_tokens":10,"output_tokens":4}}}"#;
+        let extra = r#"{"type":"assistant","timestamp":"2026-08-16T01:02:03Z","requestId":"r1","prompt":"do-not-store","message":{"id":"m1","model":"claude-opus-5","extra":true,"usage":{"input_tokens":10,"output_tokens":4,"mystery":99}}}"#;
+        let (left, _) = parse_claude_line(base).expect("base");
+        let (right, _) = parse_claude_line(extra).expect("extra");
+        assert_eq!(left.usage, right.usage);
+        assert_eq!(left.model, right.model);
+        assert!(!format!("{:?}", right.usage).contains("do-not-store"));
+    }
+
+    #[test]
+    fn mutation_claude_request_id_dedupe_prevents_double_count() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-usage-dedupe-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let project = root.join("claude").join("projects").join("p1");
+        fs::create_dir_all(&project).expect("temp project");
+        let now = unix_now_ms();
+        let (year, month, day) = local_ymd(now, 0);
+        let (hour, minute) = local_hms(now, 0);
+        let timestamp = format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:00Z");
+        let line = claude_event_line("same", &timestamp, 1_000_000);
+        fs::write(project.join("session.jsonl"), format!("{line}\n{line}\n")).expect("jsonl");
+        let mut collector =
+            UsageCollector::with_dirs(root.join("claude"), root.join("codex"), false);
+        let snap = drain_collector(&mut collector);
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(snap.claude.month_input_tokens, 1_000_000);
+        assert_eq!(snap.claude.month_cents, 500);
+    }
+
+    #[test]
+    fn component_diagnostics_snapshot_is_empty_without_debug_env() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-usage-diag-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        fs::create_dir_all(root.join("claude").join("projects")).expect("temp");
+        let collector = UsageCollector::with_dirs(root.join("claude"), root.join("codex"), false);
+        let snap = collector.diagnostics_snapshot();
+        let _ = fs::remove_dir_all(&root);
+        assert!(snap.is_empty());
+        assert!(!format!("{snap:?}").contains("Bearer"));
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config {
+            cases: 32,
+            failure_persistence: Some(Box::new(
+                proptest::test_runner::FileFailurePersistence::Direct(
+                    "verification/evidence/usage-pbt-counterexamples.regressions",
+                ),
+            )),
+            ..proptest::test_runner::Config::default()
+        })]
+
+        #[test]
+        fn pbt_jsonl_parsers_never_panic_on_arbitrary_lines(line in "\\PC{0,512}") {
+            let _ = parse_claude_line(&line);
+            let _ = parse_codex_usage_line(&line, Some("gpt-5.4"));
+            let _ = parse_codex_model(&line);
+            let _ = parse_codex_limits_line(&line);
+        }
+
+        #[test]
+        fn pbt_same_events_different_write_batches_same_cost(
+            first in 1_u64..8,
+            second in 1_u64..8,
+        ) {
+            let now = unix_now_ms();
+            let (year, month, day) = local_ymd(now, 0);
+            let (hour, minute) = local_hms(now, 0);
+            let timestamp = format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:00Z");
+            let suffix = format!("{}-{}-{}", std::process::id(), now, first * 10 + second);
+            let a = claude_event_line("a", &timestamp, first * 100_000);
+            let b = claude_event_line("b", &timestamp, second * 100_000);
+
+            let root = std::env::temp_dir().join(format!("run-dog-usage-batch-{suffix}"));
+            let project = root.join("claude").join("projects").join("p1");
+            fs::create_dir_all(&project).expect("temp project");
+            fs::write(project.join("session.jsonl"), format!("{a}\n{b}\n")).expect("batch");
+            let mut batch =
+                UsageCollector::with_dirs(root.join("claude"), root.join("codex"), false);
+            let batch_snap = drain_collector(&mut batch);
+
+            let root2 = std::env::temp_dir().join(format!("run-dog-usage-files-{suffix}"));
+            let project2 = root2.join("claude").join("projects").join("p1");
+            fs::create_dir_all(&project2).expect("temp project");
+            fs::write(project2.join("a.jsonl"), format!("{a}\n")).expect("file a");
+            fs::write(project2.join("b.jsonl"), format!("{b}\n")).expect("file b");
+            let mut split =
+                UsageCollector::with_dirs(root2.join("claude"), root2.join("codex"), false);
+            let split_snap = drain_collector(&mut split);
+            let reread = drain_collector(&mut split);
+
+            let _ = fs::remove_dir_all(&root);
+            let _ = fs::remove_dir_all(&root2);
+            proptest::prop_assert_eq!(batch_snap.claude.month_cents, split_snap.claude.month_cents);
+            proptest::prop_assert_eq!(
+                batch_snap.claude.month_input_tokens,
+                split_snap.claude.month_input_tokens
+            );
+            proptest::prop_assert_eq!(
+                split_snap.claude.month_input_tokens,
+                reread.claude.month_input_tokens
+            );
+        }
     }
 }

@@ -269,4 +269,78 @@ mod tests {
         };
         assert!(UsageCheckpoint::decode(&incomplete.encode()).is_none());
     }
+
+    #[test]
+    fn mutation_wrong_checkpoint_generation_is_rejected() {
+        let payload = UsageCheckpoint {
+            month_start: 20_260_801,
+            today: 20_260_823,
+            last_collected_ms: 1,
+            catch_up_done: true,
+            snapshot: UsageSnapshot::default(),
+            files: HashMap::new(),
+        }
+        .encode();
+        assert!(UsageCheckpoint::decode(&payload).is_some());
+        assert!(UsageCheckpoint::decode(&payload.replacen(HEADER, HEADER_V1, 1)).is_none());
+        assert!(UsageCheckpoint::decode(&payload.replacen(HEADER, HEADER_V2, 1)).is_none());
+        assert!(
+            UsageCheckpoint::decode(&payload.replacen(HEADER, "rundog-usage-checkpoint-9", 1))
+                .is_none()
+        );
+        assert!(UsageCheckpoint::decode("not-a-checkpoint\nmonth=1\n").is_none());
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config {
+            cases: 256,
+            failure_persistence: Some(Box::new(
+                proptest::test_runner::FileFailurePersistence::Direct(
+                    "verification/evidence/usage-pbt-counterexamples.regressions",
+                ),
+            )),
+            ..proptest::test_runner::Config::default()
+        })]
+
+        #[test]
+        fn pbt_checkpoint_round_trip_and_unknown_lines_do_not_change_known_fields(
+            today_cents in 0_u32..10_000,
+            month_cents in 0_u32..100_000,
+            input in 0_u64..1_000_000,
+            output in 0_u64..1_000_000,
+            extra in "[a-z]{0,8}",
+        ) {
+            let checkpoint = UsageCheckpoint {
+                month_start: 20_260_801,
+                today: 20_260_823,
+                last_collected_ms: 42,
+                catch_up_done: true,
+                snapshot: UsageSnapshot {
+                    claude: ProviderUsage {
+                        today_cents,
+                        month_cents,
+                        month_input_tokens: input,
+                        month_output_tokens: output,
+                        ..ProviderUsage::default()
+                    },
+                    ..UsageSnapshot::default()
+                },
+                files: HashMap::new(),
+            };
+            let encoded = checkpoint.encode();
+            let decoded = UsageCheckpoint::decode(&encoded);
+            proptest::prop_assert_eq!(decoded.as_ref(), Some(&checkpoint));
+            let with_unknown = format!("{encoded}mystery={extra}\n");
+            let decoded = UsageCheckpoint::decode(&with_unknown).expect("unknown lines ignored");
+            proptest::prop_assert_eq!(decoded.snapshot.claude.today_cents, today_cents);
+            proptest::prop_assert_eq!(decoded.snapshot.claude.month_cents, month_cents);
+            proptest::prop_assert_eq!(decoded.snapshot.claude.month_input_tokens, input);
+            proptest::prop_assert_eq!(decoded.snapshot.claude.month_output_tokens, output);
+        }
+
+        #[test]
+        fn pbt_checkpoint_decode_never_panics_on_arbitrary_payload(payload in "\\PC{0,256}") {
+            let _ = UsageCheckpoint::decode(&payload);
+        }
+    }
 }
