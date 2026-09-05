@@ -72,4 +72,6 @@ cargo test --all-targets
 cargo build --release
 ```
 
+GitHub Actions の Verify は上記を **独立した step** として実行する。1 つの `pwsh` ブロックへ連結すると、後続 `cargo` が成功したとき先行失敗が `$LASTEXITCODE = 0` に上書きされ得る。ローカル一括実行は `.\scripts\run-verification.ps1 -Stage baseline`（各コマンド後に `Assert-LastExitCode`）を使う。Release は Verify job の成功を `needs` してから publish する。
+
 実機の CPU / memory 測定はテストではなく、Release artifact を対象にした別の手動性能評価として扱う。
