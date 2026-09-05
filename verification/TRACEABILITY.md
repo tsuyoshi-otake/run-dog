@@ -18,5 +18,11 @@
 | exit/cancel 後に新たな installer を起動しない | launch-gate | cancel + launch_gate | update component tests | PASS（非ライブ） |
 | CPU usage 境界と EMA | closed-form oracle | `core/cpu.rs` | C2 + EMA PBT | PASS |
 | GitHub Release は strictly newer stable のみ | version oracle | `src/update.rs` | C2 + PBT | PASS |
+| JSONL 不完全レコードの先へ checkpoint しない | hold-until-newline oracle | `read_appended` committed offset | `component_reader_one_byte_*` / mid-JSON / mid-UTF8 / pre-newline / restart-partial / PBT | REPRODUCED → 修正 |
+| tick 予算を超えても `MAX_PARSE_LINE` 以下は数える | size-class oracle | 1 record を `MAX_PARSE_LINE` まで読む | `component_reader_record_over_tick_budget_*` / just-under-max | REPRODUCED → 修正 |
+| oversize は有界 discard、後続 good を落とさない | skip-until-newline | バッファ ≤ `MAX_PARSE_LINE`、skip ≤ `MAX_SKIP_PER_READ` | `component_reader_oversize_*` / 既存 oversized collector | 既存 PASS + 強化 |
+| malformed + CRLF/LF | parse-skip oracle | 行単位 | `component_reader_malformed_*` / `component_reader_crlf_*` | NOT_REPRODUCED as defect（既存で成立） |
+| truncate / replace / reread-0 で accepted usage を二重計上しない | file identity ≠ logical key | prefix fingerprint + `ckey=` | truncate / replace / rename / reread-0 | REPRODUCED → 修正 |
+| ディレクトリ year-month を usage month にしない | event timestamp oracle | 未着手 | — | NEEDS_CONTRACT / 未着手 |
 
 単一インスタンス mutex と generation / operation ID CAS により、通常経路の多数プロセス競合は抑止する。実 OS crash の瞬間耐久性は Registry の非揮発書込みに依存し、journal 回復で観測可能な分裂を解消する。

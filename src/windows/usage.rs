@@ -84,6 +84,8 @@ struct FileCursor {
     offset: u64,
     last_stat_ms: u64,
     last_model: Option<String>,
+    last_prefix: Option<u64>,
+    waiting_incomplete: bool,
     kind: SourceKind,
 }
 
@@ -323,6 +325,7 @@ impl UsageCollector {
         self.month_key = window.month_start;
         self.day_key = window.today;
         self.file_checkpoint = checkpoint.files;
+        self.claude_keys = checkpoint.claude_keys.iter().copied().collect();
         self.catch_up = false;
     }
 
@@ -339,6 +342,8 @@ impl UsageCollector {
                 FileCheckpointCursor {
                     offset: cursor.offset,
                     size: cursor.size,
+                    prefix: cursor.last_prefix.unwrap_or(0),
+                    has_prefix: cursor.last_prefix.is_some(),
                 },
             );
         }
@@ -349,6 +354,24 @@ impl UsageCollector {
             catch_up_done: true,
             snapshot: self.snapshot,
             files,
+            claude_keys: self.claude_keys.iter().copied().collect(),
+        }
+    }
+
+    #[cfg(test)]
+    fn test_checkpoint(&self, now_ms: u64) -> UsageCheckpoint {
+        self.build_checkpoint(day_window(now_ms))
+    }
+
+    #[cfg(test)]
+    fn test_file_offset(&self, path: &Path) -> Option<u64> {
+        self.files.get(path).map(|cursor| cursor.offset)
+    }
+
+    #[cfg(test)]
+    fn test_force_restat(&mut self) {
+        for cursor in self.files.values_mut() {
+            cursor.last_stat_ms = 0;
         }
     }
 
@@ -485,7 +508,7 @@ impl UsageCollector {
             };
             if let std::collections::hash_map::Entry::Vacant(entry) = self.files.entry(path.clone())
             {
-                let offset = restored_file_offset(
+                let mut offset = restored_file_offset(
                     &self.file_checkpoint,
                     path,
                     &self.claude_dir,
@@ -493,12 +516,25 @@ impl UsageCollector {
                     kind,
                     size,
                 );
+                let prefix = file_prefix_fingerprint(path);
+                if restored_prefix_changed(
+                    &self.file_checkpoint,
+                    path,
+                    &self.claude_dir,
+                    &self.codex_home,
+                    kind,
+                    prefix,
+                ) {
+                    offset = 0;
+                }
                 entry.insert(FileCursor {
                     size,
                     mtime_ms,
                     offset,
                     last_stat_ms: 0,
                     last_model: None,
+                    last_prefix: prefix,
+                    waiting_incomplete: false,
                     kind,
                 });
                 if size > offset {
@@ -520,13 +556,23 @@ impl UsageCollector {
                 return 0;
             };
             cursor.last_stat_ms = now_ms;
-            if size < cursor.offset {
+            let prefix = file_prefix_fingerprint(path);
+            let prefix_changed = match (cursor.last_prefix, prefix) {
+                (Some(previous), Some(current)) => previous != current,
+                _ => false,
+            };
+            if size < cursor.offset
+                || prefix_changed
+                || (size == cursor.offset && size == cursor.size && mtime_ms != cursor.mtime_ms)
+            {
                 cursor.offset = 0;
                 cursor.last_model = None;
             }
+            cursor.last_prefix = prefix;
             if size == cursor.offset {
                 cursor.size = size;
                 cursor.mtime_ms = mtime_ms;
+                cursor.waiting_incomplete = false;
                 return 0;
             }
             (cursor.kind, cursor.offset, cursor.last_model.clone())
@@ -588,6 +634,8 @@ impl UsageCollector {
             self.last_collected_ms = self.last_collected_ms.max(event.timestamp_ms);
             self.checkpoint_dirty = true;
         }
+        cursor.waiting_incomplete =
+            cursor.size > cursor.offset && chunk.consumed == 0 && chunk.new_offset == offset;
         chunk.consumed
     }
 
@@ -610,7 +658,7 @@ impl UsageCollector {
             if self
                 .files
                 .get(&path)
-                .is_some_and(|cursor| cursor.size != cursor.offset)
+                .is_some_and(|cursor| cursor.size != cursor.offset && !cursor.waiting_incomplete)
             {
                 self.pending.push_back(path);
             }
@@ -621,7 +669,7 @@ impl UsageCollector {
             let mut stated = 0_usize;
             let mut restat = Vec::new();
             for (path, cursor) in &self.files {
-                if cursor.size != cursor.offset {
+                if cursor.size != cursor.offset && !cursor.waiting_incomplete {
                     continue;
                 }
                 if !is_hot(cursor, now_ms) {
@@ -654,11 +702,9 @@ impl UsageCollector {
                 if consumed > 0 {
                     opens += 1;
                     bytes += consumed;
-                    if self
-                        .files
-                        .get(&path)
-                        .is_some_and(|cursor| cursor.size != cursor.offset)
-                    {
+                    if self.files.get(&path).is_some_and(|cursor| {
+                        cursor.size != cursor.offset && !cursor.waiting_incomplete
+                    }) {
                         self.pending.push_back(path);
                     }
                 }
@@ -1095,66 +1141,79 @@ fn read_appended(
     max_bytes: u64,
     buf: &mut Vec<u8>,
 ) -> AppendedChunk {
-    let empty = AppendedChunk {
+    let mut events = Vec::new();
+    let mut keys = Vec::new();
+    let mut limits = None;
+    let mut model = last_model.map(str::to_owned);
+    let empty = || AppendedChunk {
         new_offset: offset,
         consumed: 0,
         events: Vec::new(),
         dedupe: Vec::new(),
         limits: None,
-        last_model: last_model.map(str::to_owned),
+        last_model: model.clone(),
     };
-    let budget = (size - offset).min(max_bytes.max(1));
+    if size <= offset {
+        return empty();
+    }
     let Ok(mut file) = File::open(path) else {
-        return empty;
+        return empty();
     };
     if file.seek(SeekFrom::Start(offset)).is_err() {
-        return empty;
+        return empty();
     }
     buf.clear();
-    buf.resize(budget as usize, 0);
-    let Ok(read) = file.read(buf) else {
-        return empty;
-    };
-    buf.truncate(read);
-    let complete = buf.iter().rposition(|byte| *byte == b'\n');
-    let Some(end) = complete else {
-        return skip_incomplete_line(&mut file, offset, size, read as u64, last_model);
-    };
-    let consumed = (end + 1) as u64;
-    let text = String::from_utf8_lossy(&buf[..=end]);
-    let mut events = Vec::new();
-    let mut keys = Vec::new();
-    let mut limits = None;
-    let mut model = last_model.map(str::to_owned);
-    for line in text.lines() {
-        if line.is_empty() || line.len() > MAX_PARSE_LINE {
-            continue;
+    buf.resize(8192, 0);
+    let tick_limit = max_bytes.max(1);
+    let mut line = Vec::new();
+    let mut pos = offset;
+    let mut committed = offset;
+    let mut oversize = false;
+    while pos < size {
+        let want = (size - pos) as usize;
+        let cap = buf.len();
+        let n = match file.read(&mut buf[..want.min(cap)]) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        let mut stop = false;
+        for &byte in &buf[..n] {
+            pos += 1;
+            if byte == b'\n' {
+                if line.last() == Some(&b'\r') {
+                    line.pop();
+                }
+                if !oversize && !line.is_empty() && line.len() <= MAX_PARSE_LINE {
+                    take_jsonl_line(kind, &line, &mut model, &mut events, &mut keys, &mut limits);
+                }
+                line.clear();
+                oversize = false;
+                committed = pos;
+                if committed.saturating_sub(offset) >= tick_limit {
+                    stop = true;
+                    break;
+                }
+            } else if oversize {
+                committed = pos;
+                if committed.saturating_sub(offset) >= MAX_SKIP_PER_READ {
+                    stop = true;
+                    break;
+                }
+            } else if line.len() < MAX_PARSE_LINE {
+                line.push(byte);
+            } else {
+                line.clear();
+                oversize = true;
+                committed = pos;
+            }
         }
-        match kind {
-            SourceKind::Claude => {
-                if let Some((event, key)) = parse_claude_line(line) {
-                    events.push(event);
-                    keys.push(Some(key));
-                }
-            }
-            SourceKind::Codex => {
-                if let Some(next_model) = parse_codex_model(line) {
-                    model = Some(next_model);
-                    continue;
-                }
-                if let Some(found) = parse_codex_limits_line(line) {
-                    limits = Some(found);
-                }
-                if let Some(event) = parse_codex_usage_line(line, model.as_deref()) {
-                    events.push(event);
-                    keys.push(None);
-                }
-            }
+        if stop {
+            break;
         }
     }
     AppendedChunk {
-        new_offset: offset + consumed,
-        consumed,
+        new_offset: committed,
+        consumed: committed.saturating_sub(offset),
         events,
         dedupe: keys,
         limits,
@@ -1162,44 +1221,35 @@ fn read_appended(
     }
 }
 
-fn skip_incomplete_line(
-    file: &mut File,
-    offset: u64,
-    size: u64,
-    already_read: u64,
-    last_model: Option<&str>,
-) -> AppendedChunk {
-    let last_model = last_model.map(str::to_owned);
-    let mut scanned = already_read;
-    let limit = already_read.saturating_add(MAX_SKIP_PER_READ);
-    let mut tmp = [0_u8; 65_536];
-    let tmp_len = tmp.len();
-    while offset + scanned < size && scanned < limit {
-        let remaining = (size - offset - scanned) as usize;
-        let n = match file.read(&mut tmp[..remaining.min(tmp_len)]) {
-            Ok(0) | Err(_) => break,
-            Ok(n) => n,
-        };
-        if let Some(i) = tmp[..n].iter().position(|byte| *byte == b'\n') {
-            let new_offset = offset + scanned + i as u64 + 1;
-            return AppendedChunk {
-                new_offset,
-                consumed: new_offset - offset,
-                events: Vec::new(),
-                dedupe: Vec::new(),
-                limits: None,
-                last_model,
-            };
+fn take_jsonl_line(
+    kind: SourceKind,
+    line: &[u8],
+    model: &mut Option<String>,
+    events: &mut Vec<ParsedEvent>,
+    keys: &mut Vec<Option<u64>>,
+    limits: &mut Option<ProviderUsage>,
+) {
+    let text = String::from_utf8_lossy(line);
+    match kind {
+        SourceKind::Claude => {
+            if let Some((event, key)) = parse_claude_line(&text) {
+                events.push(event);
+                keys.push(Some(key));
+            }
         }
-        scanned += n as u64;
-    }
-    AppendedChunk {
-        new_offset: offset + scanned,
-        consumed: scanned,
-        events: Vec::new(),
-        dedupe: Vec::new(),
-        limits: None,
-        last_model,
+        SourceKind::Codex => {
+            if let Some(next_model) = parse_codex_model(&text) {
+                *model = Some(next_model);
+                return;
+            }
+            if let Some(found) = parse_codex_limits_line(&text) {
+                *limits = Some(found);
+            }
+            if let Some(event) = parse_codex_usage_line(&text, model.as_deref()) {
+                events.push(event);
+                keys.push(None);
+            }
+        }
     }
 }
 
@@ -1856,6 +1906,33 @@ fn restored_file_offset(
     cursor.offset.min(size)
 }
 
+fn file_prefix_fingerprint(path: &Path) -> Option<u64> {
+    let mut file = File::open(path).ok()?;
+    let mut buf = [0_u8; 64];
+    let n = file.read(&mut buf).ok()?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    n.hash(&mut hasher);
+    buf[..n].hash(&mut hasher);
+    Some(hasher.finish())
+}
+
+fn restored_prefix_changed(
+    checkpoint: &HashMap<FileCheckpointKey, FileCheckpointCursor>,
+    path: &Path,
+    claude_dir: &Path,
+    codex_home: &Path,
+    kind: SourceKind,
+    prefix: Option<u64>,
+) -> bool {
+    let Some(key) = file_checkpoint_key(path, claude_dir, codex_home, kind) else {
+        return false;
+    };
+    let Some(cursor) = checkpoint.get(&key) else {
+        return false;
+    };
+    cursor.has_prefix && prefix.is_some_and(|current| current != cursor.prefix)
+}
+
 fn path_mtime_ms(path: &Path) -> Option<u64> {
     let modified = fs::metadata(path).ok()?.modified().ok()?;
     Some(modified.duration_since(UNIX_EPOCH).ok()?.as_millis() as u64)
@@ -1881,7 +1958,12 @@ mod tests {
         read_claude_credentials, read_regular_file, unix_now_ms, UsageCollector, UsageTick,
     };
     use crate::core::{local_hms, local_ymd};
-    use std::{fs, ptr};
+    use std::{
+        fs,
+        io::Write,
+        path::{Path, PathBuf},
+        ptr,
+    };
 
     #[test]
     fn component_claude_assistant_line_extracts_tokens_and_fast_sku() {
@@ -2143,6 +2225,438 @@ mod tests {
         assert!(!collector.catch_up);
     }
 
+    fn current_stamp() -> String {
+        let now = unix_now_ms();
+        let (year, month, day) = local_ymd(now, 0);
+        let (hour, minute) = local_hms(now, 0);
+        format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:00Z")
+    }
+
+    fn claude_usage_line(id: &str, stamp: &str) -> String {
+        format!(
+            r#"{{"type":"assistant","timestamp":"{stamp}","requestId":"{id}","message":{{"id":"{id}","model":"claude-opus-5","usage":{{"input_tokens":1000000,"output_tokens":0}}}}}}"#
+        )
+    }
+
+    fn claude_usage_line_with_len(id: &str, stamp: &str, target: usize) -> String {
+        let prefix = format!(
+            r#"{{"type":"assistant","timestamp":"{stamp}","requestId":"{id}","message":{{"id":"{id}","model":"claude-opus-5","usage":{{"input_tokens":1000000,"output_tokens":0}}}},"pad":""#
+        );
+        let suffix = "\"}";
+        let pad = target.saturating_sub(prefix.len() + suffix.len());
+        format!("{prefix}{}{suffix}", "x".repeat(pad))
+    }
+
+    fn tick_idle(collector: &mut UsageCollector) -> UsageTick {
+        let mut last = UsageTick::MoreWork;
+        for _ in 0..64 {
+            last = collector.tick(ptr::null_mut());
+            if last == UsageTick::Idle && !collector.catch_up {
+                break;
+            }
+        }
+        last
+    }
+
+    fn new_claude_collector(root: &Path) -> UsageCollector {
+        UsageCollector::with_dirs(root.join("claude"), root.join("codex"), false)
+    }
+
+    fn claude_session(root: &Path) -> PathBuf {
+        let project = root.join("claude").join("projects").join("p1");
+        fs::create_dir_all(&project).expect("project");
+        project.join("session.jsonl")
+    }
+
+    fn read_chunk(path: &Path, offset: u64, max_bytes: u64) -> super::AppendedChunk {
+        let size = fs::metadata(path).expect("meta").len();
+        let mut buf = Vec::new();
+        super::read_appended(
+            path,
+            offset,
+            size,
+            super::SourceKind::Claude,
+            None,
+            max_bytes,
+            &mut buf,
+        )
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn pbt_reader_prefix_without_newline_never_advances(
+            cut in 1usize..80,
+        ) {
+            let root = std::env::temp_dir().join(format!(
+                "run-dog-jsonl-pbt-{}-{}-{cut}",
+                std::process::id(),
+                unix_now_ms()
+            ));
+            let session = claude_session(&root);
+            let line = claude_usage_line("pbt", &current_stamp());
+            let prefix = &line[..cut.min(line.len().saturating_sub(1)).max(1)];
+            fs::write(&session, prefix).expect("prefix");
+            let chunk = read_chunk(&session, 0, super::MAX_BYTES_PER_TICK);
+            let _ = fs::remove_dir_all(&root);
+            proptest::prop_assert_eq!(chunk.new_offset, 0);
+            proptest::prop_assert!(chunk.events.is_empty());
+        }
+    }
+
+    #[test]
+    fn component_reader_one_byte_at_a_time_does_not_commit_incomplete() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-jsonl-byte-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let session = claude_session(&root);
+        fs::write(&session, "").expect("empty");
+        let line = format!("{}\n", claude_usage_line("a", &current_stamp()));
+        let mut offset = 0_u64;
+        for (index, byte) in line.bytes().enumerate() {
+            fs::OpenOptions::new()
+                .append(true)
+                .open(&session)
+                .and_then(|mut file| file.write_all(&[byte]))
+                .expect("byte");
+            let chunk = read_chunk(&session, offset, super::MAX_BYTES_PER_TICK);
+            if index + 1 < line.len() {
+                assert_eq!(
+                    chunk.new_offset, offset,
+                    "incomplete byte {index} must not advance the cursor"
+                );
+                assert!(chunk.events.is_empty());
+            } else {
+                assert_eq!(chunk.events.len(), 1);
+                assert_eq!(chunk.new_offset, line.len() as u64);
+            }
+            offset = chunk.new_offset;
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn component_reader_mid_json_does_not_advance() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-jsonl-midjson-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let session = claude_session(&root);
+        let line = claude_usage_line("a", &current_stamp());
+        let mid = line.len() / 2;
+        fs::write(&session, &line[..mid]).expect("mid json");
+        let chunk = read_chunk(&session, 0, super::MAX_BYTES_PER_TICK);
+        assert_eq!(chunk.new_offset, 0);
+        assert!(chunk.events.is_empty());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn component_reader_mid_utf8_does_not_advance() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-jsonl-utf8-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let session = claude_session(&root);
+        let stamp = current_stamp();
+        let prefix =
+            format!(r#"{{"type":"assistant","timestamp":"{stamp}","requestId":"a","note":""#);
+        let mut bytes = prefix.into_bytes();
+        bytes.push(0xe7); // first byte of U+72AC 犬
+        fs::write(&session, &bytes).expect("mid utf8");
+        let chunk = read_chunk(&session, 0, super::MAX_BYTES_PER_TICK);
+        assert_eq!(chunk.new_offset, 0);
+        assert!(chunk.events.is_empty());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn component_reader_pre_newline_does_not_advance() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-jsonl-prenl-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let session = claude_session(&root);
+        let line = claude_usage_line("a", &current_stamp());
+        fs::write(&session, &line).expect("no newline");
+        let chunk = read_chunk(&session, 0, super::MAX_BYTES_PER_TICK);
+        assert_eq!(chunk.new_offset, 0);
+        assert!(chunk.events.is_empty());
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&session)
+            .and_then(|mut file| file.write_all(b"\n"))
+            .expect("newline");
+        let chunk = read_chunk(&session, chunk.new_offset, super::MAX_BYTES_PER_TICK);
+        assert_eq!(chunk.events.len(), 1);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn component_reader_record_over_tick_budget_is_still_parsed() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-jsonl-96k-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let session = claude_session(&root);
+        let stamp = current_stamp();
+        let line =
+            claude_usage_line_with_len("a", &stamp, super::MAX_BYTES_PER_TICK as usize + 4096);
+        fs::write(&session, format!("{line}\n")).expect("96k+");
+        let chunk = read_chunk(&session, 0, super::MAX_BYTES_PER_TICK);
+        assert_eq!(chunk.events.len(), 1);
+        assert_eq!(chunk.new_offset, line.len() as u64 + 1);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn component_reader_just_under_max_parse_line_is_counted() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-jsonl-undermax-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let session = claude_session(&root);
+        let line = claude_usage_line_with_len("a", &current_stamp(), super::MAX_PARSE_LINE);
+        assert_eq!(line.len(), super::MAX_PARSE_LINE);
+        fs::write(&session, format!("{line}\n")).expect("under max");
+        let chunk = read_chunk(&session, 0, super::MAX_BYTES_PER_TICK);
+        assert_eq!(chunk.events.len(), 1);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn component_reader_oversize_discards_without_losing_later_record() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-jsonl-oversize-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let session = claude_session(&root);
+        let stamp = current_stamp();
+        let huge = claude_usage_line_with_len("skip", &stamp, super::MAX_PARSE_LINE + 8);
+        let good = claude_usage_line("b", &stamp);
+        fs::write(&session, format!("{huge}\n{good}\n")).expect("oversize+good");
+        let mut offset = 0_u64;
+        let mut events = 0_usize;
+        for _ in 0..8 {
+            let chunk = read_chunk(&session, offset, super::MAX_BYTES_PER_TICK);
+            events += chunk.events.len();
+            if chunk.new_offset == offset {
+                break;
+            }
+            offset = chunk.new_offset;
+            if offset >= fs::metadata(&session).expect("meta").len() {
+                break;
+            }
+        }
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(events, 1);
+    }
+
+    #[test]
+    fn component_reader_malformed_then_good_counts_only_good() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-jsonl-bad-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let session = claude_session(&root);
+        let stamp = current_stamp();
+        fs::write(
+            &session,
+            format!("{{not-json\n{}\n", claude_usage_line("b", &stamp)),
+        )
+        .expect("malformed+good");
+        let chunk = read_chunk(&session, 0, super::MAX_BYTES_PER_TICK);
+        assert_eq!(chunk.events.len(), 1);
+        assert_eq!(chunk.events[0].model, "claude-opus-5");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn component_reader_crlf_and_lf_both_parse() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-jsonl-crlf-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let session = claude_session(&root);
+        let stamp = current_stamp();
+        let lf = claude_usage_line("lf", &stamp);
+        let crlf = claude_usage_line("crlf", &stamp);
+        fs::write(&session, format!("{lf}\n{crlf}\r\n")).expect("mixed endings");
+        let chunk = read_chunk(&session, 0, super::MAX_BYTES_PER_TICK);
+        assert_eq!(chunk.events.len(), 2);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn component_reader_restart_during_partial_does_not_checkpoint_past_record() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-jsonl-restart-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let session = claude_session(&root);
+        let now = unix_now_ms();
+        let line = claude_usage_line("a", &current_stamp());
+        fs::write(&session, &line[..line.len() / 2]).expect("partial");
+        let mut first = new_claude_collector(&root);
+        assert_eq!(tick_idle(&mut first), UsageTick::Idle);
+        assert_eq!(first.snapshot().claude.month_cents, 0);
+        assert_eq!(first.test_file_offset(&session), Some(0));
+        let checkpoint = first.test_checkpoint(now);
+        let key = super::file_checkpoint_key(
+            &session,
+            &root.join("claude"),
+            &root.join("codex"),
+            super::SourceKind::Claude,
+        );
+        if let Some(key) = key {
+            if let Some(cursor) = checkpoint.files.get(&key) {
+                assert_eq!(cursor.offset, 0, "must not persist a mid-record offset");
+            }
+        }
+        fs::write(&session, format!("{line}\n")).expect("complete");
+        let window = super::day_window(now);
+        let mut restored = new_claude_collector(&root);
+        restored.apply_checkpoint(window, checkpoint);
+        assert_eq!(tick_idle(&mut restored), UsageTick::Idle);
+        let cents = restored.snapshot().claude.month_cents;
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(cents, 500);
+    }
+
+    #[test]
+    fn component_reader_truncate_rereads_without_in_process_double_count() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-jsonl-trunc-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let session = claude_session(&root);
+        let stamp = current_stamp();
+        fs::write(&session, format!("{}\n", claude_usage_line("a", &stamp))).expect("a");
+        let mut collector = new_claude_collector(&root);
+        assert_eq!(tick_idle(&mut collector), UsageTick::Idle);
+        assert_eq!(collector.snapshot().claude.month_cents, 500);
+        fs::write(&session, "").expect("truncate");
+        collector.test_force_restat();
+        assert_eq!(tick_idle(&mut collector), UsageTick::Idle);
+        fs::write(&session, format!("{}\n", claude_usage_line("b", &stamp))).expect("b");
+        collector.test_force_restat();
+        assert_eq!(tick_idle(&mut collector), UsageTick::Idle);
+        let cents = collector.snapshot().claude.month_cents;
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(cents, 1_000);
+    }
+
+    #[test]
+    fn component_reader_same_path_replace_counts_new_ids() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-jsonl-replace-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let session = claude_session(&root);
+        let stamp = current_stamp();
+        let first = claude_usage_line_with_len("a", &stamp, 512);
+        let second = claude_usage_line_with_len("b", &stamp, 512);
+        assert_eq!(first.len(), second.len());
+        fs::write(&session, format!("{first}\n")).expect("a");
+        let mut collector = new_claude_collector(&root);
+        assert_eq!(tick_idle(&mut collector), UsageTick::Idle);
+        assert_eq!(collector.snapshot().claude.month_cents, 500);
+        fs::write(&session, format!("{second}\n")).expect("same-size b");
+        collector.test_force_restat();
+        assert_eq!(tick_idle(&mut collector), UsageTick::Idle);
+        let cents = collector.snapshot().claude.month_cents;
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(cents, 1_000);
+    }
+
+    #[test]
+    fn component_reader_larger_replace_counts_new_ids() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-jsonl-replace-big-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let session = claude_session(&root);
+        let stamp = current_stamp();
+        fs::write(&session, format!("{}\n", claude_usage_line("a", &stamp))).expect("a");
+        let mut collector = new_claude_collector(&root);
+        assert_eq!(tick_idle(&mut collector), UsageTick::Idle);
+        fs::write(
+            &session,
+            format!(
+                "{}\n{}\n",
+                claude_usage_line("a", &stamp),
+                claude_usage_line("b", &stamp)
+            ),
+        )
+        .expect("larger");
+        collector.test_force_restat();
+        assert_eq!(tick_idle(&mut collector), UsageTick::Idle);
+        let cents = collector.snapshot().claude.month_cents;
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(cents, 1_000);
+    }
+
+    #[test]
+    fn component_reader_rename_recreate_does_not_double_same_id() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-jsonl-rename-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let session = claude_session(&root);
+        let stamp = current_stamp();
+        fs::write(&session, format!("{}\n", claude_usage_line("a", &stamp))).expect("a");
+        let mut collector = new_claude_collector(&root);
+        assert_eq!(tick_idle(&mut collector), UsageTick::Idle);
+        let archived = session.with_file_name("archived.jsonl");
+        fs::rename(&session, &archived).expect("rename");
+        fs::write(&session, format!("{}\n", claude_usage_line("a", &stamp))).expect("recreate a");
+        collector.test_force_restat();
+        assert_eq!(tick_idle(&mut collector), UsageTick::Idle);
+        let cents = collector.snapshot().claude.month_cents;
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(cents, 500);
+    }
+
+    #[test]
+    fn component_reader_restart_reread_from_zero_does_not_double() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-jsonl-reread-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let session = claude_session(&root);
+        let now = unix_now_ms();
+        let stamp = current_stamp();
+        fs::write(&session, format!("{}\n", claude_usage_line("a", &stamp))).expect("a");
+        let mut first = new_claude_collector(&root);
+        assert_eq!(tick_idle(&mut first), UsageTick::Idle);
+        let mut checkpoint = first.test_checkpoint(now);
+        for cursor in checkpoint.files.values_mut() {
+            cursor.offset = 0;
+        }
+        let window = super::day_window(now);
+        let mut restored = new_claude_collector(&root);
+        restored.apply_checkpoint(window, checkpoint);
+        assert_eq!(tick_idle(&mut restored), UsageTick::Idle);
+        let cents = restored.snapshot().claude.month_cents;
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(cents, 500);
+    }
+
     #[test]
     fn component_checkpoint_restore_reads_only_appended_jsonl() {
         use super::{
@@ -2202,8 +2716,10 @@ mod tests {
                 FileCheckpointCursor {
                     offset: file_size,
                     size: file_size,
+                    ..FileCheckpointCursor::default()
                 },
             )]),
+            claude_keys: std::collections::HashSet::new(),
         };
 
         fs::OpenOptions::new()
