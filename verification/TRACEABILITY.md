@@ -18,5 +18,7 @@
 | exit/cancel 後に新たな installer を起動しない | launch-gate | cancel + launch_gate | update component tests | PASS（非ライブ） |
 | CPU usage 境界と EMA | closed-form oracle | `core/cpu.rs` | C2 + EMA PBT | PASS |
 | GitHub Release は strictly newer stable のみ | version oracle | `src/update.rs` | C2 + PBT | PASS |
+| Claude Fable 週次枠は欠落時に捏造しない | oauth `model_scoped` / `limits[]` / 任意の `seven_day_fable` | `ProviderUsage.fable` | `component_claude_fable_*` / `component_fable_label_*` | PASS（#25） |
+| Codex Banked Reset は回数。無いときは非表示 | wham `rate_limit_reset_credits.available_count` | `ProviderUsage.banked_reset_available` | `component_chatgpt_wham_usage_reads_banked_*` | PASS（#25） |
 
 単一インスタンス mutex と generation / operation ID CAS により、通常経路の多数プロセス競合は抑止する。実 OS crash の瞬間耐久性は Registry の非揮発書込みに依存し、journal 回復で観測可能な分裂を解消する。
