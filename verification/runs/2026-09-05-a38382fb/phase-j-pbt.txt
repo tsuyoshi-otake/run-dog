@@ -1,0 +1,34 @@
+PBT (fixed seeds + regression file)
+
+Seeds
+  0x5EED_2026_0905_0001  src/core/usage_ingest_pbt.rs  128 cases
+  0x5EED_2026_0905_0002  src/windows/usage.rs reader    64 cases
+Regression file
+  verification/evidence/usage-ingest-pbt.regressions
+  (Direct persistence; empty until a counterexample is stored)
+
+Focus
+  split/restart equivalence     decide_codex_event vs restart watermark
+  append batching               one-at-a-time vs batched totals
+  duplicate replay              IgnoreReplay, no second count
+  month rollover                retain_keys_for_month keeps month >= current
+  state encode/decode           re-encode equality; no file= / Authorization
+  migration roundtrip           from_registry_checkpoint twice; drops file=
+  partial-line prefix           no newline => not a record (reader PBT too)
+  replace/truncate recovery     spec_size_rebuild: shrink => offset 0, not a
+                                copy of restored_cursor_offset
+  generation swap               failed persist keeps prior generation
+
+Oracle notes
+  size-shrink uses an independent spec (new_size < offset or stored size).
+  Codex oracles use decide_codex_event (the published decision table), not
+  a copy of the collector loop.
+  encode/decode oracle is re-encode identity, not a hand-copied encoder.
+
+Result: cargo test --all-targets --offline  PASS
+  lib 212 passed, 1 ignored (live JSONL scan)
+  app_integration 5
+  persistence_protocol_verification 11
+  registry_hive_integration 8
+  state_machine_pbt 1
+  update_protocol_integration 3

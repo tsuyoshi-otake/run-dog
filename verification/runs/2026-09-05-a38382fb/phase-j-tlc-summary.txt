@@ -1,0 +1,33 @@
+TLC RunDogUsageIngest (reference model, not a Rust proof)
+
+PASS  formal/RunDogUsageIngest.cfg  Fault=0
+  14619733 states generated, 1091712 distinct, depth 24, 0 on queue
+  fingerprints collision estimate ~8.0E-7 optimistic / 5.8E-9 actual
+  workers=4  heap=3591MB
+  command: scripts/run-usage-ingest-tlc.ps1 -Mode pass
+
+FAIL (required) model mutations — if any stayed green the model is too weak
+  Fault=1 no_dedupe           NoDoubleCount                 FAIL
+  Fault=2 cursor_ahead        NoIncompleteRecordCommit      FAIL
+  Fault=3 incomplete_commit   NoIncompleteRecordCommit      FAIL
+  Fault=4 stale_overwrite     OnlyCompleteGenerationVisible FAIL
+
+Invariants checked on Fault=0
+  TypeOK, NoDoubleCount, NoSilentLoss, RestartEquivalence,
+  ReplayInvariance, CursorAndAggregateSameGeneration,
+  NoIncompleteRecordCommit, OnlyCompleteGenerationVisible,
+  CheckpointIsPrefix
+
+Temporal
+  MonthRolloverDoesNotRewindCursor
+  MigrationIdempotent
+  RebuildDoesNotDestroyLastGoodGeneration
+
+Actions covered
+  Replay(id), DuplicateAcrossFiles, AppendComplete, AppendPartial,
+  CompletePartial, ReadNext, CommitCheckpoint, Crash/Restart,
+  Truncate, Replace, MonthRollover, BeginRebuild, CommitRebuild,
+  Migrate, GenerationSwap, StaleOverwrite (Fault=4 only)
+
+Do not treat this PASS as implementation proof.
+Raw console: phase-j-tlc.txt

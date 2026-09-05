@@ -239,4 +239,54 @@ mod tests {
             other => panic!("expected blob recovery, got {other:?}"),
         }
     }
+
+    #[test]
+    fn component_recover_prior_walks_over_a_missing_gap() {
+        let mut store = MemoryBlobs::default();
+        assert!(matches!(
+            persist_usage_state(&mut store, &state_with_offset(8)),
+            PersistStatus::Applied { generation: 1 }
+        ));
+        assert!(matches!(
+            persist_usage_state(&mut store, &state_with_offset(16)),
+            PersistStatus::Applied { generation: 2 }
+        ));
+        assert!(matches!(
+            persist_usage_state(&mut store, &state_with_offset(24)),
+            PersistStatus::Applied { generation: 3 }
+        ));
+        store.blobs.remove(&2);
+        store.blobs.insert(3, b"truncated".to_vec());
+        match load_usage_state(&store) {
+            LoadStatus::RecoveredPrior { state, requested } => {
+                assert_eq!(requested, Some(3));
+                assert_eq!(state.generation, 1);
+                assert_eq!(state.cursors[0].offset, 8);
+            }
+            other => panic!("expected gap walk to generation 1, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn component_missing_current_prefers_highest_blob_not_generation_one() {
+        let mut store = MemoryBlobs::default();
+        assert!(matches!(
+            persist_usage_state(&mut store, &state_with_offset(8)),
+            PersistStatus::Applied { generation: 1 }
+        ));
+        assert!(matches!(
+            persist_usage_state(&mut store, &state_with_offset(16)),
+            PersistStatus::Applied { generation: 2 }
+        ));
+        store.current = None;
+        store.blobs.remove(&1);
+        match load_usage_state(&store) {
+            LoadStatus::RecoveredPrior { state, requested } => {
+                assert_eq!(requested, None);
+                assert_eq!(state.generation, 2);
+                assert_eq!(state.cursors[0].offset, 16);
+            }
+            other => panic!("expected highest blob 2, got {other:?}"),
+        }
+    }
 }

@@ -450,8 +450,17 @@ mod tests {
                 catch_up_done,
                 snapshot: UsageSnapshot {
                     claude: ProviderUsage {
+                        today_cents: 3,
                         month_cents: 12,
                         month_input_tokens: 100,
+                        month_output_tokens: 40,
+                        ..ProviderUsage::default()
+                    },
+                    codex: ProviderUsage {
+                        today_cents: 5,
+                        month_cents: 9,
+                        month_input_tokens: 80,
+                        month_output_tokens: 20,
                         ..ProviderUsage::default()
                     },
                     ..UsageSnapshot::default()
@@ -488,6 +497,66 @@ mod tests {
             }),
         });
         state
+    }
+
+    #[test]
+    fn component_encode_orders_claude_before_codex_then_logical_id() {
+        let mut state = sample_state(true);
+        state.cursors = vec![
+            UsageCursor {
+                kind: CursorKind::Codex,
+                logical_id: "sessions/z.jsonl".to_owned(),
+                offset: 1,
+                size: 1,
+                prefix: None,
+                last_model: None,
+                last_codex_total: None,
+            },
+            UsageCursor {
+                kind: CursorKind::Claude,
+                logical_id: "projects/z.jsonl".to_owned(),
+                offset: 2,
+                size: 2,
+                prefix: None,
+                last_model: None,
+                last_codex_total: None,
+            },
+            UsageCursor {
+                kind: CursorKind::Claude,
+                logical_id: "projects/a.jsonl".to_owned(),
+                offset: 3,
+                size: 3,
+                prefix: None,
+                last_model: None,
+                last_codex_total: None,
+            },
+        ];
+        let encoded = state.encode();
+        let claude_a = encoded
+            .find("cursor=c\tprojects/a.jsonl\t")
+            .expect("claude a");
+        let claude_z = encoded
+            .find("cursor=c\tprojects/z.jsonl\t")
+            .expect("claude z");
+        let codex_z = encoded
+            .find("cursor=x\tsessions/z.jsonl\t")
+            .expect("codex z");
+        assert!(
+            claude_a < claude_z && claude_z < codex_z,
+            "canonical cursor order is Claude then Codex, each by logical_id"
+        );
+    }
+
+    #[test]
+    fn component_unsafe_codex_model_is_not_persisted() {
+        let mut state = sample_codex_state();
+        state.cursors[1].last_model = Some("bad model".to_owned());
+        let encoded = state.encode();
+        assert!(!encoded.contains("codex_model="));
+        state.cursors[1].last_model = Some(String::new());
+        assert!(!state.encode().contains("codex_model="));
+        state.cursors[1].last_model = Some("x".repeat(65));
+        assert!(!state.encode().contains("codex_model="));
     }
 
     #[test]

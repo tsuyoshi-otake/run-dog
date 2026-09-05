@@ -4599,6 +4599,16 @@ mod tests {
     }
 
     proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig {
+            cases: 64,
+            rng_seed: proptest::test_runner::RngSeed::Fixed(0x5EED_2026_0905_0002),
+            failure_persistence: Some(Box::new(
+                proptest::test_runner::FileFailurePersistence::Direct(
+                    "verification/evidence/usage-ingest-pbt.regressions",
+                ),
+            )),
+            ..proptest::prelude::ProptestConfig::default()
+        })]
         #[test]
         fn pbt_reader_prefix_without_newline_never_advances(cut in 1usize..80) {
             let root = std::env::temp_dir().join(format!(
