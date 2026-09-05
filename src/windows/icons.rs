@@ -151,7 +151,7 @@ fn read_i32(bytes: &[u8], offset: usize) -> Result<i32, String> {
 }
 
 fn invert_visible_pixels(mut bitmap: BgraBitmap) -> BgraBitmap {
-    for pixel in bitmap.pixels.chunks_exact_mut(BYTES_PER_PIXEL) {
+    for pixel in bitmap.pixels.as_chunks_mut::<BYTES_PER_PIXEL>().0 {
         if pixel[3] != 0 {
             pixel[0] = 255 - pixel[0];
             pixel[1] = 255 - pixel[1];
@@ -284,8 +284,10 @@ mod tests {
         let light = invert_visible_pixels(original.clone());
         for (before, after) in original
             .pixels
-            .chunks_exact(4)
-            .zip(light.pixels.chunks_exact(4))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(light.pixels.as_chunks::<4>().0.iter())
         {
             assert_eq!(before[3], after[3]);
             if before[3] != 0 {
