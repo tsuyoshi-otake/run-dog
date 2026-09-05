@@ -18,5 +18,7 @@
 | exit/cancel 後に新たな installer を起動しない | launch-gate | cancel + launch_gate | update component tests | PASS（非ライブ） |
 | CPU usage 境界と EMA | closed-form oracle | `core/cpu.rs` | C2 + EMA PBT | PASS |
 | GitHub Release は strictly newer stable のみ | version oracle | `src/update.rs` | C2 + PBT | PASS |
+| RFC3339 offset は UTC instant。Today/Month は local | `parse_rfc3339_ms` / `windows_tz_bias_minutes` | `src/core/usage.rs` + `windows/usage.rs` | #19 fixtures | PASS（#19、main 未マージ） |
+| reset 後の rate-limit は 0% にしない。fetch 失敗は Expired/Unknown | `format_limit_label` / `LimitFreshness` | `LimitWindow` + flyout | `component_expired_limit_*` | REPRODUCED→PASS（#17 B） |
 
 単一インスタンス mutex と generation / operation ID CAS により、通常経路の多数プロセス競合は抑止する。実 OS crash の瞬間耐久性は Registry の非揮発書込みに依存し、journal 回復で観測可能な分裂を解消する。
