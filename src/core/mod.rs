@@ -19,6 +19,7 @@ mod usage_fetch;
 mod usage_ingest_fuzz;
 #[cfg(test)]
 mod usage_ingest_pbt;
+mod usage_perf;
 mod usage_state;
 
 pub use animation::{AnimationController, AnimationRateChange, FpsLimit, FrameCursor};
@@ -61,6 +62,10 @@ pub use usage_fetch::{
 pub use usage_ingest_fuzz::{
     contains_forbidden_secret, fuzz_case_count, last_safe_complete_record_offset, mutate,
     seed_corpus, XorShift, DEFAULT_FUZZ_CASES, FUZZ_SEED, MAX_FUZZ_INPUT,
+};
+pub use usage_perf::{
+    warm_restart_allows_auxiliary_io, warm_restart_does_not_reaggregate, PerfScenario,
+    ScenarioRunStatus, UsageWorkCounters,
 };
 pub use usage_state::{
     usage_store_root_is_forbidden, CursorKind, CursorRebuildReason, UsageAggregate, UsageCursor,

@@ -1,0 +1,25 @@
+Phase K harness  2026-09-05
+Stack: #40 9448f7c / feat/perf-instrumentation
+origin/main unchanged: a8e870c0f1cad7cf4e431f6d563c8670c5626868
+Old pin 2c0494c is not used.
+
+measure.ps1 now records avg/P95/max for:
+  Machine CPU, Working Set, Private Bytes, Handles, Threads,
+  GDI, USER, page faults, I/O read/write bytes and ops.
+Duration cap remains 3600s.
+
+Usage work is a separate block (from DiagnosticSnapshot), not folded into
+process I/O:
+  UsageParseBytes, IntegrityProbeBytes, LimitsTailBytes, CheckpointBytes,
+  StartupDurationMs, CatchUpDurationMs
+
+Warm restart oracle:
+  usage_parse_bytes == 0  (do not reaggregate already-read usage)
+  integrity / limits-tail MAY be non-zero
+  "payload bytes = 0" is NOT the sole check
+
+8h soak: NOT RUN (catalog only)
+Smoke: scripts/perf-scenarios.ps1 -Mode smoke -SmokeSeconds 8  PASS
+  (measure against the smoke shell PID; not a live RunDog 8h)
+
+Scenarios: see scripts/perf-scenarios.ps1 and src/core/usage_perf.rs
