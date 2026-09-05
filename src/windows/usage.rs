@@ -1336,6 +1336,8 @@ struct CodexTokens {
     input_tokens: Option<u64>,
     cached_input_tokens: Option<u64>,
     output_tokens: Option<u64>,
+    /// Breakdown of `output_tokens`. Kept so unknown extra fields stay typed.
+    #[allow(dead_code)]
     reasoning_output_tokens: Option<u64>,
 }
 
@@ -1378,10 +1380,9 @@ fn parse_codex_usage_line(line: &str, model: Option<&str>) -> Option<ParsedEvent
     let mut usage = TokenUsage {
         input: raw_input - cached,
         cached_input: cached,
-        output: last
-            .output_tokens
-            .unwrap_or(0)
-            .saturating_add(last.reasoning_output_tokens.unwrap_or(0)),
+        // Codex `reasoning_output_tokens` is a breakdown of `output_tokens`,
+        // not an extra billed bucket (`total_tokens == input + output`).
+        output: last.output_tokens.unwrap_or(0),
         ..TokenUsage::default()
     };
     if crate::core::is_long_context_request(model, raw_input) {
@@ -2005,6 +2006,36 @@ mod tests {
         )
         .expect("auto-review");
         assert_eq!(auto.model, "gpt-5.4");
+    }
+
+    #[test]
+    fn component_codex_reasoning_tokens_are_not_added_on_top_of_output() {
+        // Upstream Codex last_token_usage: total_tokens = input + output.
+        // reasoning_output_tokens is a breakdown of output, not an extra bucket.
+        // Fixture numbers from openai/codex#5276.
+        let event = parse_codex_usage_line(
+            r#"{"type":"event_msg","timestamp":"2025-10-17T05:54:20.209Z","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":6245,"cached_input_tokens":5376,"output_tokens":407,"reasoning_output_tokens":320,"total_tokens":6652}}}}"#,
+            Some("gpt-5.4"),
+        )
+        .expect("token_count");
+        assert_eq!(event.usage.input, 869);
+        assert_eq!(event.usage.cached_input, 5376);
+        assert_eq!(event.usage.output, 407);
+        assert_eq!(event.usage.processed_output_tokens(), 407);
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn pbt_codex_output_equals_output_tokens_not_output_plus_reasoning(
+            output in 0u64..1_000_000u64,
+            reasoning in 0u64..1_000_000u64,
+        ) {
+            let line = format!(
+                r#"{{"type":"event_msg","timestamp":"2026-08-16T01:02:03Z","payload":{{"type":"token_count","info":{{"last_token_usage":{{"input_tokens":20,"cached_input_tokens":0,"output_tokens":{output},"reasoning_output_tokens":{reasoning}}}}}}}}}"#
+            );
+            let event = parse_codex_usage_line(&line, Some("gpt-5.4")).expect("token_count");
+            proptest::prop_assert_eq!(event.usage.output, output);
+        }
     }
 
     #[test]
