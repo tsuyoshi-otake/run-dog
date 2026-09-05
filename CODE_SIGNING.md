@@ -70,5 +70,9 @@ registry value when the user enables launch at logon. Updates replace the same
 install path and may close a running `RunDog.exe`.
 
 Uninstall from Windows Settings → Apps → Installed apps → RunDog, or from
-Add or Remove Programs. That removes the program files, shortcuts, and the
-uninstaller entry.
+Add or Remove Programs. That removes the program files, shortcuts, the
+uninstaller entry, the startup Run value, HKCU settings, the usage store, and
+the update cache. Claude Code and Codex CLI logs, credentials, and homes are
+left untouched. Item-by-item delete / preserve is in
+[docs/UNINSTALL.md](docs/UNINSTALL.md). Live uninstall was **NOT RUN** for
+this revision.

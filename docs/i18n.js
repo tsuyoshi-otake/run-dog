@@ -82,7 +82,7 @@ export const I18N = {
       },
       {
         q: "アンインストールできますか？",
-        a: "できます。Windows の「アプリ」から RunDog を削除してください。スタートメニューのショートカットと、スタートアップ登録も一緒に外れます。",
+        a: "できます。Windows の「アプリ」から RunDog を削除してください。プログラム、ショートカット、スタートアップ、設定、利用状況、更新キャッシュは消えます。Claude と Codex のログ・認証情報・ホームは残します。",
       },
       {
         q: "動作環境は？",
@@ -168,7 +168,7 @@ export const I18N = {
       },
       {
         q: "How do I uninstall?",
-        a: "Windows Settings → Apps → RunDog. That also removes Start Menu shortcuts and the optional startup entry.",
+        a: "Windows Settings → Apps → RunDog. That removes the program, shortcuts, startup entry, settings, usage store, and update cache. Claude and Codex logs, credentials, and homes stay.",
       },
       {
         q: "What are the requirements?",
@@ -253,7 +253,7 @@ export const I18N = {
       },
       {
         q: "如何卸载？",
-        a: "在 Windows「应用」中删除 RunDog。开始菜单快捷方式和可选的开机启动项会一并移除。",
+        a: "在 Windows「应用」中删除 RunDog。程序、快捷方式、开机启动、设置、用量数据和更新缓存会删除。Claude 与 Codex 的日志、凭据和主目录会保留。",
       },
       {
         q: "运行环境是什么？",
@@ -338,7 +338,7 @@ export const I18N = {
       },
       {
         q: "如何解除安裝？",
-        a: "在 Windows「應用程式」中刪除 RunDog。開始功能表捷徑和選用的開機啟動項目會一併移除。",
+        a: "在 Windows「應用程式」中刪除 RunDog。程式、捷徑、開機啟動、設定、用量資料和更新快取會刪除。Claude 與 Codex 的紀錄、憑證和主目錄會保留。",
       },
       {
         q: "執行環境是什麼？",
@@ -423,7 +423,7 @@ export const I18N = {
       },
       {
         q: "어떻게 제거하나요?",
-        a: "Windows 설정 → 앱에서 RunDog를 제거하세요. 시작 메뉴 바로 가기와 선택적 시작 프로그램 등록도 함께 삭제됩니다.",
+        a: "Windows 설정 → 앱에서 RunDog를 제거하세요. 프로그램, 바로 가기, 시작 등록, 설정, 사용량, 업데이트 캐시는 삭제됩니다. Claude와 Codex의 로그, 자격 증명, 홈은 남습니다.",
       },
       {
         q: "동작 환경은?",
@@ -509,7 +509,7 @@ export const I18N = {
       },
       {
         q: "Gỡ cài đặt thế nào?",
-        a: "Windows Cài đặt → Ứng dụng → RunDog. Lối tắt menu Start và mục khởi động tùy chọn cũng bị xóa.",
+        a: "Windows Cài đặt → Ứng dụng → RunDog. Chương trình, lối tắt, khởi động, cài đặt, dữ liệu usage và cache cập nhật bị xóa. Nhật ký, thông tin đăng nhập và thư mục nhà của Claude/Codex được giữ lại.",
       },
       {
         q: "Yêu cầu hệ thống?",
@@ -595,7 +595,7 @@ export const I18N = {
       },
       {
         q: "Comment désinstaller ?",
-        a: "Paramètres Windows → Applications → RunDog. Les raccourcis du menu Démarrer et l'entrée de démarrage facultative sont aussi retirés.",
+        a: "Paramètres Windows → Applications → RunDog. Programme, raccourcis, démarrage, réglages, état d'usage et cache de mise à jour sont retirés. Journaux, identifiants et dossiers Claude/Codex restent.",
       },
       {
         q: "Quelle configuration ?",
@@ -681,7 +681,7 @@ export const I18N = {
       },
       {
         q: "Wie deinstalliere ich?",
-        a: "Windows-Einstellungen → Apps → RunDog. Startmenü-Verknüpfungen und der optionale Autostart-Eintrag werden mit entfernt.",
+        a: "Windows-Einstellungen → Apps → RunDog. Programm, Verknüpfungen, Autostart, Einstellungen, Nutzungsstand und Update-Cache werden entfernt. Claude- und Codex-Logs, Anmeldedaten und Home-Ordner bleiben.",
       },
       {
         q: "Welche Voraussetzungen?",
@@ -767,7 +767,7 @@ export const I18N = {
       },
       {
         q: "¿Cómo se desinstala?",
-        a: "Configuración de Windows → Aplicaciones → RunDog. También se quitan los accesos del menú Inicio y el inicio opcional.",
+        a: "Configuración de Windows → Aplicaciones → RunDog. Se eliminan el programa, accesos, inicio, ajustes, estado de uso y caché de actualizaciones. Los registros, credenciales y carpetas de Claude/Codex se conservan.",
       },
       {
         q: "¿Qué se necesita?",
@@ -853,7 +853,7 @@ export const I18N = {
       },
       {
         q: "Как удалить?",
-        a: "Параметры Windows → Приложения → RunDog. Ярлыки меню «Пуск» и необязательный автозапуск тоже снимаются.",
+        a: "Параметры Windows → Приложения → RunDog. Удаляются программа, ярлыки, автозапуск, настройки, состояние usage и кэш обновлений. Журналы, учётные данные и домашние папки Claude/Codex остаются.",
       },
       {
         q: "Какие требования?",
@@ -939,7 +939,7 @@ export const I18N = {
       },
       {
         q: "Come si disinstalla?",
-        a: "Impostazioni Windows → App → RunDog. Si rimuovono anche i collegamenti del menu Start e l'avvio opzionale.",
+        a: "Impostazioni Windows → App → RunDog. Si rimuovono programma, collegamenti, avvio, impostazioni, stato usage e cache degli aggiornamenti. Log, credenziali e home di Claude/Codex restano.",
       },
       {
         q: "Requisiti?",
@@ -1025,7 +1025,7 @@ export const I18N = {
       },
       {
         q: "ถอนการติดตั้งอย่างไร?",
-        a: "การตั้งค่า Windows → แอป → RunDog ทางลัดเมนูเริ่มต้นและรายการเริ่มอัตโนมัติแบบเลือกได้จะถูกลบด้วย",
+        a: "การตั้งค่า Windows → แอป → RunDog โปรแกรม ทางลัด การเริ่มอัตโนมัติ การตั้งค่า ข้อมูล usage และแคชอัปเดตจะถูกลบ บันทึก ข้อมูลรับรอง และโฟลเดอร์บ้านของ Claude/Codex จะคงไว้"
       },
       {
         q: "ความต้องการของระบบ?",

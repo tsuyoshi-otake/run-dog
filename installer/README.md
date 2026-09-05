@@ -27,3 +27,9 @@ Build it locally with PowerShell:
 ISCC.exe from Inno Setup 6 must be installed. The script builds the Rust
 release executable, creates dist\RunDog-Setup-x64.exe, and writes its sidecar
 checksum. It deliberately does not sign either artifact.
+
+Uninstall (Windows Settings → Apps → RunDog) removes `{app}`, shortcuts, the
+HKCU Run value `RunDog`, `HKCU\Software\SystemExe\RunDog`, and
+`%LOCALAPPDATA%\SystemExe\RunDog`. It must not name or touch Claude or Codex
+homes. The table is [docs/UNINSTALL.md](../docs/UNINSTALL.md). Live uninstall
+was not run for this contract revision.
