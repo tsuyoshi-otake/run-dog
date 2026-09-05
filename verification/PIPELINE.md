@@ -4,7 +4,7 @@
 
 | stage | CI の終了条件 | 推奨頻度 |
 | --- | --- | --- |
-| `baseline` | format、clippy、全通常テストが成功 | 各変更 |
+| `baseline` | format、clippy、全通常テストが成功 | 各変更。CI Verify は同等コマンドを独立 step で実行し、Release は Verify 成功を `needs` する |
 | `pbt-counterexample` | 原子性の**期待された反例**が縮小値付きで出る | 各変更 |
 | `coverage` | branch JSON が生成され、通常テストが成功 | 各変更または nightly |
 | `tlc` | 2 actor の参照モデルが PASS | 各変更 |
