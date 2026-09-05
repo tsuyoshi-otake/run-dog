@@ -73,6 +73,9 @@ const CODEX_LIMITS_FILES: usize = 5;
 const CLAUDE_LIMITS_PERIOD_MS: u64 = 5 * 60 * 1_000;
 const CODEX_LIMITS_PERIOD_MS: u64 = 60 * 1_000;
 const STAT_COOLDOWN_MS: u64 = 30 * 1_000;
+/// Known files that are not hot are still restatted this often. Cached
+/// mtime/size must not freeze a cursor forever.
+const COLD_RESTAT_MS: u64 = 10 * 60 * 1_000;
 const HOT_AGE_MS: u64 = 48 * 60 * 60 * 1_000;
 const REDISCOVER_MS: u64 = 30 * 60 * 1_000;
 const MAX_HEADER_VALUE_BYTES: usize = 8 * 1_024;
@@ -565,12 +568,22 @@ impl UsageCollector {
     fn queue_roots(&mut self) {
         self.discover.clear();
         self.discover.push_back(self.claude_dir.join("projects"));
-        let (year, month, _) = local_ymd(unix_now_ms(), day_window(unix_now_ms()).bias_minutes);
+        let now_ms = unix_now_ms();
+        let window = day_window(now_ms);
+        let (year, month, _) = local_ymd(now_ms, window.bias_minutes);
         self.discover
             .push_back(codex_month_dir(&self.codex_home, year, month));
         let (prev_year, prev_month) = previous_month(year, month);
         self.discover
             .push_back(codex_month_dir(&self.codex_home, prev_year, prev_month));
+        queue_recent_codex_month_dirs(
+            &mut self.discover,
+            &self.codex_home,
+            year,
+            now_ms,
+            HOT_AGE_MS,
+        );
+        self.reconcile_known_paths(window);
     }
 
     fn discover_dir(&mut self, dir: &Path, window: DayWindow, _now_ms: u64) {
@@ -606,65 +619,83 @@ impl UsageCollector {
             self.discover.push_back(child.clone());
         }
         for path in &files {
-            let Some((size, mtime_ms)) = path_size_mtime(path) else {
-                continue;
-            };
-            if ymd_key_from_unix(mtime_ms, window.bias_minutes) < previous_month_start(window) {
-                continue;
-            }
-            let kind = if path_is_under(path, &self.codex_home) {
-                SourceKind::Codex
-            } else if path_is_under(path, &self.claude_dir) {
-                SourceKind::Claude
-            } else {
-                continue;
-            };
-            if let std::collections::hash_map::Entry::Vacant(entry) = self.files.entry(path.clone())
-            {
-                let prefix = file_prefix_fingerprint(path);
-                let file_id = jsonl_file_id(path);
-                let (offset, rebuild) = restored_cursor_offset(
-                    &self.file_checkpoint,
-                    path,
-                    &self.claude_dir,
-                    &self.codex_home,
-                    kind,
-                    size,
-                    prefix,
-                );
-                if let Some(reason) = rebuild {
-                    self.last_rebuild_reason = Some(reason);
-                    self.checkpoint_dirty = true;
-                }
-                let stored = file_checkpoint_key(path, &self.claude_dir, &self.codex_home, kind)
-                    .and_then(|key| self.file_checkpoint.get(&key));
-                let (last_model, last_codex_total) = if rebuild.is_some() {
-                    (None, None)
-                } else {
-                    (
-                        stored.and_then(|cursor| cursor.last_model.clone()),
-                        stored.and_then(|cursor| cursor.last_codex_total),
-                    )
-                };
-                entry.insert(FileCursor {
-                    size,
-                    mtime_ms,
-                    offset,
-                    last_stat_ms: 0,
-                    last_model,
-                    last_codex_total,
-                    last_prefix: prefix,
-                    last_file_id: file_id,
-                    waiting_incomplete: false,
-                    kind,
-                });
-                if size > offset {
-                    self.enqueue_scan(path.clone(), mtime_ms, window);
-                }
-            }
+            self.register_jsonl_file(path, window, true);
         }
         self.dirs
             .insert(dir.to_path_buf(), DirListing { mtime_ms, dirs });
+    }
+
+    fn reconcile_known_paths(&mut self, window: DayWindow) {
+        let keys: Vec<FileCheckpointKey> = self.file_checkpoint.keys().cloned().collect();
+        for key in keys {
+            let path = checkpoint_disk_path(&self.claude_dir, &self.codex_home, &key);
+            if self.files.contains_key(&path) {
+                continue;
+            }
+            self.register_jsonl_file(&path, window, false);
+        }
+    }
+
+    fn register_jsonl_file(&mut self, path: &Path, window: DayWindow, require_recent_mtime: bool) {
+        let Some((size, mtime_ms)) = path_size_mtime(path) else {
+            return;
+        };
+        if require_recent_mtime
+            && ymd_key_from_unix(mtime_ms, window.bias_minutes) < previous_month_start(window)
+        {
+            return;
+        }
+        let kind = if path_is_under(path, &self.codex_home) {
+            SourceKind::Codex
+        } else if path_is_under(path, &self.claude_dir) {
+            SourceKind::Claude
+        } else {
+            return;
+        };
+        if let std::collections::hash_map::Entry::Vacant(entry) =
+            self.files.entry(path.to_path_buf())
+        {
+            let prefix = file_prefix_fingerprint(path);
+            let file_id = jsonl_file_id(path);
+            let (offset, rebuild) = restored_cursor_offset(
+                &self.file_checkpoint,
+                path,
+                &self.claude_dir,
+                &self.codex_home,
+                kind,
+                size,
+                prefix,
+            );
+            if let Some(reason) = rebuild {
+                self.last_rebuild_reason = Some(reason);
+                self.checkpoint_dirty = true;
+            }
+            let stored = file_checkpoint_key(path, &self.claude_dir, &self.codex_home, kind)
+                .and_then(|key| self.file_checkpoint.get(&key));
+            let (last_model, last_codex_total) = if rebuild.is_some() {
+                (None, None)
+            } else {
+                (
+                    stored.and_then(|cursor| cursor.last_model.clone()),
+                    stored.and_then(|cursor| cursor.last_codex_total),
+                )
+            };
+            entry.insert(FileCursor {
+                size,
+                mtime_ms,
+                offset,
+                last_stat_ms: 0,
+                last_model,
+                last_codex_total,
+                last_prefix: prefix,
+                last_file_id: file_id,
+                waiting_incomplete: false,
+                kind,
+            });
+            if size > offset {
+                self.enqueue_scan(path.to_path_buf(), mtime_ms, window);
+            }
+        }
     }
 
     fn scan_file(&mut self, path: &Path, window: DayWindow, now_ms: u64) -> u64 {
@@ -834,10 +865,12 @@ impl UsageCollector {
                 if cursor.size != cursor.offset && !cursor.waiting_incomplete {
                     continue;
                 }
-                if !is_hot(cursor, now_ms) {
-                    continue;
-                }
-                if now_ms.saturating_sub(cursor.last_stat_ms) < STAT_COOLDOWN_MS {
+                let cooldown = if is_hot(cursor, now_ms) {
+                    STAT_COOLDOWN_MS
+                } else {
+                    COLD_RESTAT_MS
+                };
+                if now_ms.saturating_sub(cursor.last_stat_ms) < cooldown {
                     continue;
                 }
                 if skipped < self.restat_skip {
@@ -2152,6 +2185,57 @@ fn codex_month_dir(home: &Path, year: i32, month: u8) -> PathBuf {
         .join(format!("{month:02}"))
 }
 
+/// Enqueue Codex `sessions/{year}/{month}` dirs touched within `hot_age_ms`.
+/// Walks the current and previous calendar years only — metadata, not a
+/// full-history JSONL scan.
+fn queue_recent_codex_month_dirs(
+    discover: &mut VecDeque<PathBuf>,
+    home: &Path,
+    year: i32,
+    now_ms: u64,
+    hot_age_ms: u64,
+) {
+    for walk_year in [year, year - 1] {
+        let year_dir = home.join("sessions").join(walk_year.to_string());
+        let Ok(entries) = fs::read_dir(&year_dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if !file_type.is_dir() {
+                continue;
+            }
+            let Some(mtime_ms) = path_mtime_ms(&path) else {
+                continue;
+            };
+            if now_ms.saturating_sub(mtime_ms) > hot_age_ms {
+                continue;
+            }
+            if !discover.contains(&path) {
+                discover.push_back(path);
+            }
+        }
+    }
+}
+
+fn checkpoint_disk_path(claude_dir: &Path, codex_home: &Path, key: &FileCheckpointKey) -> PathBuf {
+    let (root, logical_id) = match key {
+        FileCheckpointKey::Claude(id) => (claude_dir, id.as_str()),
+        FileCheckpointKey::Codex(id) => (codex_home, id.as_str()),
+    };
+    let mut path = root.to_path_buf();
+    for part in logical_id.split(['/', '\\']) {
+        if part.is_empty() || part == "." || part == ".." || part.contains(':') {
+            continue;
+        }
+        path.push(part);
+    }
+    path
+}
+
 fn file_logical_id(
     path: &Path,
     claude_dir: &Path,
@@ -2306,6 +2390,28 @@ mod tests {
                     .map(|total| (total.input, total.cached, total.output))
             })
         }
+
+        fn test_mark_file_cold(&mut self, path: &Path) {
+            if let Some(cursor) = self.files.get_mut(path) {
+                cursor.mtime_ms = 1;
+                cursor.last_stat_ms = 0;
+            }
+        }
+
+        fn test_remember_codex(&mut self, logical_id: &str) {
+            self.file_checkpoint.insert(
+                crate::core::FileCheckpointKey::Codex(logical_id.to_owned()),
+                crate::core::UsageCursor {
+                    kind: crate::core::CursorKind::Codex,
+                    logical_id: logical_id.to_owned(),
+                    offset: 0,
+                    size: 0,
+                    prefix: None,
+                    last_model: None,
+                    last_codex_total: None,
+                },
+            );
+        }
     }
 
     fn current_stamp() -> String {
@@ -2434,6 +2540,31 @@ mod tests {
         let mut collector = new_claude_collector(root);
         assert_eq!(tick_idle(&mut collector), UsageTick::Idle);
         collector.snapshot().codex
+    }
+
+    fn year_outside_walk_window() -> i32 {
+        let (year, _, _) = local_ymd(unix_now_ms(), 0);
+        year - 3
+    }
+
+    fn write_old_year_codex_session(
+        root: &Path,
+        year: i32,
+        name: &str,
+        lines: &[String],
+    ) -> PathBuf {
+        let dir = super::codex_month_dir(&root.join("codex"), year, 1);
+        fs::create_dir_all(&dir).expect("old year");
+        let session = dir.join(name);
+        let mut body = String::new();
+        body.push_str(TURN_CONTEXT);
+        body.push('\n');
+        for line in lines {
+            body.push_str(line);
+            body.push('\n');
+        }
+        fs::write(&session, body).expect("jsonl");
+        session
     }
 
     fn claude_session(root: &Path) -> PathBuf {
@@ -2852,6 +2983,178 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         assert_eq!(usage.month_input_tokens, 160);
         assert_eq!(usage.month_output_tokens, 10);
+    }
+
+    #[test]
+    fn component_codex_old_month_dir_with_today_event_is_still_counted() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-codex-oldmonth-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let now = unix_now_ms();
+        let window = super::day_window(now);
+        let (year, month, day) = local_ymd(now, window.bias_minutes);
+        let (hour, minute) = local_hms(now, window.bias_minutes);
+        let mut old_year = year;
+        let mut old_month = month;
+        for _ in 0..3 {
+            let (next_year, next_month) = super::previous_month(old_year, old_month);
+            old_year = next_year;
+            old_month = next_month;
+        }
+        let dir = super::codex_month_dir(&root.join("codex"), old_year, old_month);
+        fs::create_dir_all(&dir).expect("old month");
+        let stamp = format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:00Z");
+        fs::write(
+            dir.join("rollout.jsonl"),
+            format!(
+                "{TURN_CONTEXT}\n{}\n",
+                token_count_line(&stamp, 80, 20, 5, 80, 20, 5)
+            ),
+        )
+        .expect("jsonl");
+        let usage = collect_codex(&root);
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(usage.month_input_tokens, 80);
+        assert_eq!(usage.month_output_tokens, 5);
+    }
+
+    #[test]
+    fn component_codex_cold_month_dir_is_not_queued_for_history_scan() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-codex-cold-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let dir = super::codex_month_dir(&root, 2024, 1);
+        fs::create_dir_all(&dir).expect("cold month");
+        let mtime = super::path_mtime_ms(&dir).expect("mtime");
+        let mut discover = std::collections::VecDeque::new();
+        super::queue_recent_codex_month_dirs(
+            &mut discover,
+            &root,
+            2024,
+            mtime.saturating_add(super::HOT_AGE_MS + 1),
+            super::HOT_AGE_MS,
+        );
+        let _ = fs::remove_dir_all(&root);
+        assert!(!discover.iter().any(|path| path == &dir));
+    }
+
+    #[test]
+    fn component_codex_known_cold_file_append_is_restatted() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-codex-coldfile-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let stamp = current_stamp();
+        let session = write_codex_session(
+            &root,
+            "rollout.jsonl",
+            &[token_count_line(&stamp, 80, 20, 5, 80, 20, 5)],
+        );
+        let mut collector = new_claude_collector(&root);
+        assert_eq!(tick_idle(&mut collector), UsageTick::Idle);
+        assert_eq!(collector.snapshot().codex.month_input_tokens, 80);
+        collector.test_mark_file_cold(&session);
+        append_codex_lines(&session, &[token_count_line(&stamp, 40, 10, 2, 120, 30, 7)]);
+        assert_eq!(tick_idle(&mut collector), UsageTick::Idle);
+        let usage = collector.snapshot().codex;
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(usage.month_input_tokens, 120);
+        assert_eq!(usage.month_output_tokens, 7);
+    }
+
+    #[test]
+    fn component_checkpoint_path_rejects_parent_segments() {
+        let root = Path::new(r"C:\tmp\codex");
+        let escaped = super::checkpoint_disk_path(
+            Path::new(r"C:\tmp\claude"),
+            root,
+            &crate::core::FileCheckpointKey::Codex("../secret.jsonl".to_owned()),
+        );
+        assert_eq!(escaped, root.join("secret.jsonl"));
+        let slash_escape = super::checkpoint_disk_path(
+            Path::new(r"C:\tmp\claude"),
+            root,
+            &crate::core::FileCheckpointKey::Codex(r"..\..\Windows\secret.jsonl".to_owned()),
+        );
+        assert_eq!(slash_escape, root.join("Windows").join("secret.jsonl"));
+    }
+
+    #[test]
+    fn component_codex_year_before_walk_window_is_not_scanned() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-codex-oldyear-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let stamp = current_stamp();
+        write_old_year_codex_session(
+            &root,
+            year_outside_walk_window(),
+            "rollout.jsonl",
+            &[token_count_line(&stamp, 80, 20, 5, 80, 20, 5)],
+        );
+        let usage = collect_codex(&root);
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(usage.month_input_tokens, 0);
+        assert_eq!(usage.month_output_tokens, 0);
+    }
+
+    #[test]
+    fn component_codex_known_file_outside_walk_window_is_reconciled() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-codex-knownold-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let stamp = current_stamp();
+        let year = year_outside_walk_window();
+        write_old_year_codex_session(
+            &root,
+            year,
+            "rollout.jsonl",
+            &[token_count_line(&stamp, 80, 20, 5, 80, 20, 5)],
+        );
+        let mut collector = new_claude_collector(&root);
+        collector.test_remember_codex(&format!("sessions/{year}/01/rollout.jsonl"));
+        assert_eq!(tick_idle(&mut collector), UsageTick::Idle);
+        let usage = collector.snapshot().codex;
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(usage.month_input_tokens, 80);
+        assert_eq!(usage.month_output_tokens, 5);
+    }
+
+    #[test]
+    fn component_codex_known_old_session_restart_sees_append() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-codex-oldrestart-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let store_root = root.join("store");
+        let stamp = current_stamp();
+        let year = year_outside_walk_window();
+        let session = write_old_year_codex_session(
+            &root,
+            year,
+            "rollout.jsonl",
+            &[token_count_line(&stamp, 80, 20, 5, 80, 20, 5)],
+        );
+        let mut first = new_persisted_collector(&root, store_root.clone());
+        first.test_remember_codex(&format!("sessions/{year}/01/rollout.jsonl"));
+        assert_eq!(tick_idle(&mut first), UsageTick::Idle);
+        assert_eq!(first.snapshot().codex.month_input_tokens, 80);
+        append_codex_lines(&session, &[token_count_line(&stamp, 40, 10, 2, 120, 30, 7)]);
+        let mut restored = new_persisted_collector(&root, store_root);
+        assert_eq!(tick_idle(&mut restored), UsageTick::Idle);
+        let usage = restored.snapshot().codex;
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(usage.month_input_tokens, 120);
+        assert_eq!(usage.month_output_tokens, 7);
     }
 
     #[test]
