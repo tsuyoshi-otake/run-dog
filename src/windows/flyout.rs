@@ -3,7 +3,12 @@
 //! The shell tooltip is text-only, so `NIN_POPUPOPEN` owns a `WS_EX_NOACTIVATE`
 //! popup instead. All GDI objects live only for one paint.
 
-use std::{mem::size_of, ptr, sync::Once};
+use std::{
+    mem::size_of,
+    ptr,
+    sync::Once,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use windows_sys::{
     core::GUID,
@@ -39,9 +44,9 @@ use windows_sys::{
 use crate::{
     application::TrayIcon,
     core::{
-        format_compact_token_count, local_hms, local_ymd, GpuStatus, LimitWindow, MemoryStatus,
-        ProcessStatus, ProviderUsage, ResolvedTheme, Sparkline, StorageStatus, UsageSnapshot,
-        SPARKLINE_CAPACITY,
+        format_compact_token_count, format_limit_label, local_hms, local_ymd, GpuStatus,
+        LimitFreshness, LimitWindow, MemoryStatus, ProcessStatus, ProviderUsage, ResolvedTheme,
+        Sparkline, StorageStatus, UsageSnapshot, SPARKLINE_CAPACITY,
     },
 };
 
@@ -964,6 +969,7 @@ fn paint_usage_row(
 
     select_font(hdc, detail_font);
     let _ = unsafe { SetTextColor(hdc, palette.muted) };
+    let now_ms = unix_now_ms();
     let mut metric_top = row.top + layout.title_h + px(2, layout.dpi);
     metric_top = paint_limit_metric(
         hdc,
@@ -975,6 +981,7 @@ fn paint_usage_row(
         },
         "5h",
         usage.session_window(),
+        now_ms,
         palette,
         layout,
     );
@@ -988,6 +995,7 @@ fn paint_usage_row(
         },
         "7d",
         usage.weekly_window(),
+        now_ms,
         palette,
         layout,
     );
@@ -1062,20 +1070,12 @@ fn paint_limit_metric(
     rect: RECT,
     name: &str,
     window: Option<LimitWindow>,
+    now_ms: u64,
     palette: &Palette,
     layout: &Layout,
 ) -> i32 {
-    let label = match window {
-        Some(window) => {
-            let reset = format_reset(window);
-            if reset.is_empty() {
-                format!("{name}: {:.0}%", window.used_percent())
-            } else {
-                format!("{name}: {:.0}%  {reset}", window.used_percent())
-            }
-        }
-        None => format!("{name}: —"),
-    };
+    let label =
+        format_limit_metric_label(name, window, now_ms, super::usage::timezone_bias_minutes());
     let text_bottom = rect.top + layout.detail_h;
     draw_text(
         hdc,
@@ -1094,18 +1094,42 @@ fn paint_limit_metric(
         right: rect.right,
         bottom: text_bottom + px(1, layout.dpi) + layout.bar_h,
     };
-    draw_progress_bar(
-        hdc,
-        bar,
-        window.map(LimitWindow::used_percent).unwrap_or(0.0),
-        palette,
-        layout.dpi,
-    );
+    let percent = match window {
+        Some(window) if window.freshness(now_ms) == LimitFreshness::Current => {
+            window.used_percent()
+        }
+        _ => 0.0,
+    };
+    draw_progress_bar(hdc, bar, percent, palette, layout.dpi);
     bar.bottom + px(3, layout.dpi)
 }
 
-fn format_reset(window: LimitWindow) -> String {
-    format_reset_local(window, super::usage::timezone_bias_minutes())
+fn format_limit_metric_label(
+    name: &str,
+    window: Option<LimitWindow>,
+    now_ms: u64,
+    bias_minutes: i32,
+) -> String {
+    let label = format_limit_label(name, window, now_ms);
+    let Some(window) = window else {
+        return label;
+    };
+    if window.freshness(now_ms) != LimitFreshness::Current {
+        return label;
+    }
+    let reset = format_reset_local(window, bias_minutes);
+    if reset.is_empty() {
+        label
+    } else {
+        format!("{label}  {reset}")
+    }
+}
+
+fn unix_now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn format_reset_local(window: LimitWindow, bias_minutes: i32) -> String {
@@ -1579,9 +1603,9 @@ fn wide(value: &str) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::{
-        format_bytes, format_gpu_capacity, format_month_usage, format_percent, format_reset_local,
-        format_self_usage, gpu_details, visible_usage_count, window_size, CARD_GPU_BLOCK_HEIGHT,
-        CARD_HEIGHT, CARD_USAGE_BLOCK_HEIGHT, CARD_WIDTH,
+        format_bytes, format_gpu_capacity, format_limit_metric_label, format_month_usage,
+        format_percent, format_reset_local, format_self_usage, gpu_details, visible_usage_count,
+        window_size, CARD_GPU_BLOCK_HEIGHT, CARD_HEIGHT, CARD_USAGE_BLOCK_HEIGHT, CARD_WIDTH,
     };
     use crate::core::{CpuLoad, LimitWindow, ProcessStatus, ProviderUsage, UsageSnapshot};
 
@@ -1704,6 +1728,18 @@ mod tests {
         assert_eq!(format_reset_local(weekly, 480), "08-17 16:00");
         assert_eq!(format_reset_local(session, -540), "16:39");
         assert_eq!(format_reset_local(unknown, -540), "");
+        assert_eq!(
+            format_limit_metric_label("5h", Some(session), SESSION_UTC_MS - 1, -540),
+            "5h: 28%  16:39"
+        );
+        assert_eq!(
+            format_limit_metric_label("5h", Some(session), SESSION_UTC_MS, -540),
+            "5h: —"
+        );
+        assert_ne!(
+            format_limit_metric_label("5h", Some(session), SESSION_UTC_MS, -540),
+            "5h: 0%"
+        );
     }
 
     #[test]

@@ -52,7 +52,8 @@ impl LimitWindow {
         f32::from(self.used_tenths) / 10.0
     }
 
-    /// A window whose reset has already passed is treated as unused.
+    /// A window whose reset has already passed is unused **data**, not a
+    /// display instruction. Presentation must use [`LimitWindow::freshness`].
     #[must_use]
     pub fn effective(self, now_ms: u64) -> Self {
         if self.resets_at_ms != 0 && self.resets_at_ms <= now_ms {
@@ -64,6 +65,46 @@ impl LimitWindow {
         } else {
             self
         }
+    }
+
+    #[must_use]
+    pub fn freshness(self, now_ms: u64) -> LimitFreshness {
+        if self.resets_at_ms == 0 {
+            LimitFreshness::Unknown
+        } else if self.resets_at_ms <= now_ms {
+            LimitFreshness::Expired
+        } else {
+            LimitFreshness::Current
+        }
+    }
+}
+
+/// Whether a stored rate-limit window may be shown as a live percentage.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LimitFreshness {
+    Current,
+    Expired,
+    Unknown,
+}
+
+/// Where the last successful limit sample came from.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum LimitSource {
+    #[default]
+    Unknown,
+    LocalJsonl,
+    Remote,
+}
+
+/// Flyout / tooltip text. Expired and unknown are not rendered as 0%.
+#[must_use]
+pub fn format_limit_label(name: &str, window: Option<LimitWindow>, now_ms: u64) -> String {
+    let Some(window) = window else {
+        return format!("{name}: —");
+    };
+    match window.freshness(now_ms) {
+        LimitFreshness::Current => format!("{name}: {:.0}%", window.used_percent()),
+        LimitFreshness::Expired | LimitFreshness::Unknown => format!("{name}: —"),
     }
 }
 
@@ -77,6 +118,9 @@ pub struct ProviderUsage {
     pub plan_len: u8,
     pub primary: Option<LimitWindow>,
     pub secondary: Option<LimitWindow>,
+    pub limits_source: LimitSource,
+    pub limits_observed_at_ms: u64,
+    pub limits_last_error: bool,
 }
 
 impl ProviderUsage {
@@ -482,9 +526,9 @@ pub fn days_to_ymd(days: i64) -> (i32, u8, u8) {
 #[cfg(test)]
 mod tests {
     use super::{
-        cost_cents, days_to_ymd, format_compact_token_count, format_plan_label,
-        is_long_context_request, local_ymd, resolve_codex_model, ymd_key, LimitWindow,
-        ProviderUsage, TokenUsage,
+        cost_cents, days_to_ymd, format_compact_token_count, format_limit_label, format_plan_label,
+        is_long_context_request, local_ymd, resolve_codex_model, ymd_key, LimitFreshness,
+        LimitWindow, ProviderUsage, TokenUsage,
     };
 
     #[test]
@@ -601,6 +645,12 @@ mod tests {
         };
         assert_eq!(window.effective(999).used_tenths, 280);
         assert_eq!(window.effective(1_000).used_tenths, 0);
+        assert_eq!(window.freshness(999), LimitFreshness::Current);
+        assert_eq!(window.freshness(1_000), LimitFreshness::Expired);
+        assert_eq!(format_limit_label("5h", Some(window), 999), "5h: 28%");
+        assert_eq!(format_limit_label("5h", Some(window), 1_000), "5h: —");
+        assert_eq!(format_limit_label("5h", None, 1_000), "5h: —");
+        assert_ne!(format_limit_label("5h", Some(window), 1_000), "5h: 0%");
     }
 
     #[test]
