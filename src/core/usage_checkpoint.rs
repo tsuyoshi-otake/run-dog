@@ -2,15 +2,16 @@
 
 use std::collections::HashMap;
 
-use super::{ProviderUsage, UsageSnapshot};
+use super::{display_cents, ProviderUsage, UsageSnapshot, NANOS_PER_CENT};
 
 const HEADER_V1: &str = "rundog-usage-checkpoint-1";
 const HEADER_V2: &str = "rundog-usage-checkpoint-2";
-const HEADER: &str = "rundog-usage-checkpoint-3";
+const HEADER_V3: &str = "rundog-usage-checkpoint-3";
+const HEADER: &str = "rundog-usage-checkpoint-4";
 
 /// Registry migration epoch for `UsageCheckpoint`. Bump when on-disk layout or
 /// restore semantics change and stale checkpoints must be discarded.
-pub const USAGE_CHECKPOINT_MIGRATION_VERSION: u32 = 4;
+pub const USAGE_CHECKPOINT_MIGRATION_VERSION: u32 = 5;
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub enum FileCheckpointKey {
@@ -45,10 +46,14 @@ impl UsageCheckpoint {
                 "catch_up_done={}\n",
                 "claude_today={}\n",
                 "claude_month={}\n",
+                "claude_today_nanos={}\n",
+                "claude_month_nanos={}\n",
                 "claude_in={}\n",
                 "claude_out={}\n",
                 "codex_today={}\n",
                 "codex_month={}\n",
+                "codex_today_nanos={}\n",
+                "codex_month_nanos={}\n",
                 "codex_in={}\n",
                 "codex_out={}\n",
             ),
@@ -58,10 +63,26 @@ impl UsageCheckpoint {
             u32::from(self.catch_up_done),
             self.snapshot.claude.today_cents,
             self.snapshot.claude.month_cents,
+            persist_nanos(
+                self.snapshot.claude.today_cents,
+                self.snapshot.claude.today_cost_nanos,
+            ),
+            persist_nanos(
+                self.snapshot.claude.month_cents,
+                self.snapshot.claude.month_cost_nanos,
+            ),
             self.snapshot.claude.month_input_tokens,
             self.snapshot.claude.month_output_tokens,
             self.snapshot.codex.today_cents,
             self.snapshot.codex.month_cents,
+            persist_nanos(
+                self.snapshot.codex.today_cents,
+                self.snapshot.codex.today_cost_nanos,
+            ),
+            persist_nanos(
+                self.snapshot.codex.month_cents,
+                self.snapshot.codex.month_cost_nanos,
+            ),
             self.snapshot.codex.month_input_tokens,
             self.snapshot.codex.month_output_tokens,
         );
@@ -91,7 +112,7 @@ impl UsageCheckpoint {
         let mut lines = payload.lines();
         match lines.next()? {
             HEADER => {}
-            HEADER_V1 | HEADER_V2 => return None,
+            HEADER_V1 | HEADER_V2 | HEADER_V3 => return None,
             _ => return None,
         }
         let mut month_start = None;
@@ -100,10 +121,14 @@ impl UsageCheckpoint {
         let mut catch_up_done = false;
         let mut claude_today = 0_u32;
         let mut claude_month = 0_u32;
+        let mut claude_today_nanos = None;
+        let mut claude_month_nanos = None;
         let mut claude_in = 0_u64;
         let mut claude_out = 0_u64;
         let mut codex_today = 0_u32;
         let mut codex_month = 0_u32;
+        let mut codex_today_nanos = None;
+        let mut codex_month_nanos = None;
         let mut codex_in = 0_u64;
         let mut codex_out = 0_u64;
         let mut files = HashMap::new();
@@ -116,6 +141,10 @@ impl UsageCheckpoint {
                 last_collected_ms = value.parse().ok();
             } else if let Some(value) = line.strip_prefix("catch_up_done=") {
                 catch_up_done = value.parse::<u32>().ok()? != 0;
+            } else if let Some(value) = line.strip_prefix("claude_today_nanos=") {
+                claude_today_nanos = Some(value.parse().ok()?);
+            } else if let Some(value) = line.strip_prefix("claude_month_nanos=") {
+                claude_month_nanos = Some(value.parse().ok()?);
             } else if let Some(value) = line.strip_prefix("claude_today=") {
                 claude_today = value.parse().ok()?;
             } else if let Some(value) = line.strip_prefix("claude_month=") {
@@ -124,6 +153,10 @@ impl UsageCheckpoint {
                 claude_in = value.parse().ok()?;
             } else if let Some(value) = line.strip_prefix("claude_out=") {
                 claude_out = value.parse().ok()?;
+            } else if let Some(value) = line.strip_prefix("codex_today_nanos=") {
+                codex_today_nanos = Some(value.parse().ok()?);
+            } else if let Some(value) = line.strip_prefix("codex_month_nanos=") {
+                codex_month_nanos = Some(value.parse().ok()?);
             } else if let Some(value) = line.strip_prefix("codex_today=") {
                 codex_today = value.parse().ok()?;
             } else if let Some(value) = line.strip_prefix("codex_month=") {
@@ -151,24 +184,55 @@ impl UsageCheckpoint {
             last_collected_ms: last_collected_ms?,
             catch_up_done,
             snapshot: UsageSnapshot {
-                claude: ProviderUsage {
-                    today_cents: claude_today,
-                    month_cents: claude_month,
-                    month_input_tokens: claude_in,
-                    month_output_tokens: claude_out,
-                    ..ProviderUsage::default()
-                },
-                codex: ProviderUsage {
-                    today_cents: codex_today,
-                    month_cents: codex_month,
-                    month_input_tokens: codex_in,
-                    month_output_tokens: codex_out,
-                    ..ProviderUsage::default()
-                },
+                claude: restore_provider(
+                    claude_today,
+                    claude_month,
+                    claude_today_nanos,
+                    claude_month_nanos,
+                    claude_in,
+                    claude_out,
+                ),
+                codex: restore_provider(
+                    codex_today,
+                    codex_month,
+                    codex_today_nanos,
+                    codex_month_nanos,
+                    codex_in,
+                    codex_out,
+                ),
                 ..UsageSnapshot::default()
             },
             files,
         })
+    }
+}
+
+fn persist_nanos(cents: u32, nanos: u64) -> u64 {
+    if nanos == 0 && cents > 0 {
+        u64::from(cents).saturating_mul(NANOS_PER_CENT)
+    } else {
+        nanos
+    }
+}
+
+fn restore_provider(
+    today_cents: u32,
+    month_cents: u32,
+    today_nanos: Option<u64>,
+    month_nanos: Option<u64>,
+    month_input_tokens: u64,
+    month_output_tokens: u64,
+) -> ProviderUsage {
+    let today_cost_nanos = today_nanos.unwrap_or_else(|| u64::from(today_cents) * NANOS_PER_CENT);
+    let month_cost_nanos = month_nanos.unwrap_or_else(|| u64::from(month_cents) * NANOS_PER_CENT);
+    ProviderUsage {
+        today_cents: display_cents(today_cost_nanos),
+        month_cents: display_cents(month_cost_nanos),
+        today_cost_nanos,
+        month_cost_nanos,
+        month_input_tokens,
+        month_output_tokens,
+        ..ProviderUsage::default()
     }
 }
 
@@ -192,6 +256,7 @@ fn parse_file_line(value: &str) -> Option<(char, &str, u64, u64)> {
 mod tests {
     use super::{
         FileCheckpointCursor, FileCheckpointKey, UsageCheckpoint, HEADER, HEADER_V1, HEADER_V2,
+        HEADER_V3,
     };
     use crate::core::{ProviderUsage, UsageSnapshot};
     use std::collections::HashMap;
@@ -207,6 +272,8 @@ mod tests {
                 claude: ProviderUsage {
                     today_cents: 12,
                     month_cents: 28_449,
+                    today_cost_nanos: 12 * super::NANOS_PER_CENT,
+                    month_cost_nanos: 28_449 * super::NANOS_PER_CENT,
                     month_input_tokens: 142_500_000,
                     month_output_tokens: 3_200_000,
                     ..ProviderUsage::default()
@@ -214,6 +281,8 @@ mod tests {
                 codex: ProviderUsage {
                     today_cents: 56,
                     month_cents: 879_982,
+                    today_cost_nanos: 56 * super::NANOS_PER_CENT,
+                    month_cost_nanos: 879_982 * super::NANOS_PER_CENT,
                     month_input_tokens: 9_500_000,
                     month_output_tokens: 250_000,
                     ..ProviderUsage::default()
@@ -262,6 +331,10 @@ mod tests {
         let mut v2_payload = complete.encode();
         v2_payload = v2_payload.replacen(HEADER, HEADER_V2, 1);
         assert!(UsageCheckpoint::decode(&v2_payload).is_none());
+
+        let mut v3_payload = complete.encode();
+        v3_payload = v3_payload.replacen(HEADER, HEADER_V3, 1);
+        assert!(UsageCheckpoint::decode(&v3_payload).is_none());
 
         let incomplete = UsageCheckpoint {
             catch_up_done: false,
