@@ -1,18 +1,20 @@
-# Phase 5 quality infra（段階メモ）
+# Phase 5 quality infra
 
 親: #5 / 子: #23。ピン: `2c0494cdd7b69fe71234f5daf6c07fb98a5f22f5`。
 
-既存の `formal/` と `verification/C2_AND_MUTATION.md` を再利用する。新しい全履歴スキャンや Authenticode はここに含めない。
+実測の表は [`evidence/USAGE_GATES.md`](evidence/USAGE_GATES.md)。Authenticode は #1。全履歴 JSONL scanner はしない。
 
-## いまあるもの
+## いま回したもの
 
-| 手段 | 現状 | 次の対象（未実行は NOT RUN） |
+| 手段 | この session | 未実行 |
 | --- | --- | --- |
-| PBT | settings / CPU / update / storage ほか。seed 付き update 反例あり | usage: RFC3339 bucket、limit freshness、JSONL cursor 不変条件 |
-| C2 / mutation | `verification/C2_AND_MUTATION.md`。usage adapter は母集団外 | `core/usage.rs` の freshness / timestamp を独立 shard |
-| TLC | `formal/RunDogProtocol.tla`（settings commit） | usage SM は未モデル。**NOT RUN**。勝手に巨大 spec を足さない |
-| fuzz | なし | jsonl 1 行パーサ（本文を残さない）。**NOT RUN** |
+| PBT | usage / checkpoint / JSONL no-panic / バッチ等価。#9 #14 #16 を worktree で再実行 | 分割 event の cent 合計（#10）、RFC3339（#19）、freshness（#20）はこの tree に関数が無い |
+| Mutation | `usage_checkpoint.rs` 33 / 28 caught / 5 missed（等価） | usage.rs 全体、windows/usage.rs は時間が大きく **NOT RUN** |
+| TLC | `RunDogUsageIngest` MaxIds=2、26 distinct。実装証明ではない | MaxIds≥3 の全探索、settings 3-actor |
+| Fuzz | cargo-fuzz 無し。no-panic PBT で代替 | libFuzzer / AFL |
+| Coverage | **NOT RUN**（再測定していない） | MC/DC は従来どおり NOT RUN |
+| Soak | **NOT RUN** | 8h |
 
 ## diagnostics
 
-`core::diagnostics::DiagnosticRing` は kind + 計数 + UTC ms のみ。path / token / header / JSONL 本文は型で持てない。この increment では collector へ未配線（配線は次 PR）。
+`RUNDOG_DIAGNOSTICS=1` の明示パスだけ。常時 verbose は付けない。
