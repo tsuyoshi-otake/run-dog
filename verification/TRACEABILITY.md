@@ -18,5 +18,13 @@
 | exit/cancel 後に新たな installer を起動しない | launch-gate | cancel + launch_gate | update component tests | PASS（非ライブ） |
 | CPU usage 境界と EMA | closed-form oracle | `core/cpu.rs` | C2 + EMA PBT | PASS |
 | GitHub Release は strictly newer stable のみ | version oracle | `src/update.rs` | C2 + PBT | PASS |
+| Codex `token_count` の同一 snapshot / rate-limit 再通知は二重計上しない | `NoDoubleCount` / `decide_codex_event` | `src/core/codex_usage.rs` + collector watermark | `component_codex_identical_snapshot_*` / `component_codex_rate_limit_only_*` | REPRODUCED → 修正 |
+| Codex 累積 `total` は last だけ加算 | independent last/total fixture | `decide_codex_event` | `component_codex_cumulative_usage_*` | REPRODUCED → 修正 |
+| replay / resume 再通知は不変 | `ReplayInvariance` | previous `total` watermark | `component_codex_replay_*` / `component_codex_resume_*` / PBT | REPRODUCED → 修正 |
+| fork / subagent の inherited snapshot は baseline | ccusage / openai/codex#18023 | `IgnoreInheritedBaseline` | `component_codex_fork_*` | REPRODUCED → 修正 |
+| プロセス再起動後も続きの turn だけ加算 | `RestartEquivalence` | checkpoint optional `file=` totals | `component_codex_process_restart_*` / PBT | REPRODUCED → 修正 |
+| 同一 token tuple でも `total` が進む別 request は加算 | 非 tuple-dedupe oracle | `total` 比較のみ | `component_codex_same_tuple_*` | REPRODUCED（仕様通り二重ではない） |
+| `total` 欠落時は replay 保護を自称しない | incomplete identity | count `last` only | `component_codex_missing_total_*` | UNCERTAIN（書き換えない） |
+| 遅延・逆順の小さい `total` を replay として落とす | stale-snapshot oracle | なし（reset と区別不能） | `component_codex_out_of_order_*` | NOT_REPRODUCED as defect |
 
 単一インスタンス mutex と generation / operation ID CAS により、通常経路の多数プロセス競合は抑止する。実 OS crash の瞬間耐久性は Registry の非揮発書込みに依存し、journal 回復で観測可能な分裂を解消する。
