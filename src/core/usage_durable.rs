@@ -157,7 +157,9 @@ mod tests {
                 logical_id: "p/a.jsonl".to_owned(),
                 offset,
                 size: offset,
+                prefix: None,
             }],
+            claude_keys: std::collections::HashSet::new(),
         }
     }
 
