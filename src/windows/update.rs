@@ -1073,4 +1073,41 @@ mod tests {
             "githubusercontent.com.evil.example"
         ));
     }
+
+    #[test]
+    fn component_bounded_release_json_fuzz_stays_in_protocol() {
+        use crate::core::{
+            contains_forbidden_secret, fuzz_case_count, mutate, seed_corpus, XorShift, FUZZ_SEED,
+        };
+        use crate::update::{select_update, Release, ReleaseAsset, UpdateRepository, Version};
+
+        let repository = UpdateRepository::new("example-org/run-dog").expect("repo");
+        let current = Version::parse("1.1.21").expect("version");
+        let corpus = seed_corpus();
+        let mut rng = XorShift::new(FUZZ_SEED ^ 0xA11);
+        for _ in 0..fuzz_case_count() {
+            let seed = &corpus[rng.below(corpus.len())];
+            let input = mutate(&mut rng, seed);
+            if let Ok(text) = std::str::from_utf8(&input) {
+                assert!(!contains_forbidden_secret(text));
+            }
+            let Ok(parsed) = serde_json::from_slice::<GitHubRelease>(&input) else {
+                continue;
+            };
+            let release = Release {
+                tag_name: parsed.tag_name,
+                draft: parsed.draft,
+                prerelease: parsed.prerelease,
+                assets: parsed
+                    .assets
+                    .into_iter()
+                    .map(|asset| ReleaseAsset {
+                        name: asset.name,
+                        browser_download_url: asset.browser_download_url,
+                    })
+                    .collect(),
+            };
+            let _ = select_update(&repository, &current, &release);
+        }
+    }
 }

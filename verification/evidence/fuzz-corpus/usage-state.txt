@@ -1,0 +1,16 @@
+rundog-usage-state-1
+schema=1
+generation=1
+month=20260901
+day=20260905
+last_ms=1
+catch_up_done=1
+claude_today=0
+claude_month=0
+claude_in=0
+claude_out=0
+codex_today=0
+codex_month=0
+codex_in=0
+codex_out=0
+cursor=c	p/a.jsonl	0	0

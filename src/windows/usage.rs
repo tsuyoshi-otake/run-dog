@@ -2798,8 +2798,9 @@ mod tests {
     use super::{
         is_current_month, is_safe_header_value, is_subscription_limits, parse_claude_line,
         parse_claude_usage_response, parse_codex_limits_line, parse_codex_model,
-        parse_codex_usage_line, parse_wham_usage_response, persist_claude_credentials,
-        read_claude_credentials, read_regular_file, unix_now_ms, UsageCollector, UsageTick,
+        parse_codex_usage_line, parse_timestamp, parse_wham_usage_response,
+        persist_claude_credentials, read_claude_credentials, read_regular_file, unix_now_ms,
+        UsageCollector, UsageTick,
     };
     use crate::core::{local_hms, local_ymd, CursorRebuildReason};
     use std::{
@@ -4624,6 +4625,40 @@ mod tests {
             let _ = fs::remove_dir_all(&root);
             proptest::prop_assert_eq!(chunk.new_offset, 0);
             proptest::prop_assert!(chunk.events.is_empty());
+        }
+    }
+
+    #[test]
+    fn component_bounded_jsonl_timestamp_fuzz_never_passes_safe_record() {
+        use crate::core::{
+            contains_forbidden_secret, fuzz_case_count, last_safe_complete_record_offset, mutate,
+            seed_corpus, XorShift, FUZZ_SEED,
+        };
+
+        let corpus = seed_corpus();
+        let mut rng = XorShift::new(FUZZ_SEED ^ 0x51);
+        for _ in 0..fuzz_case_count() {
+            let seed = &corpus[rng.below(corpus.len())];
+            let input = mutate(&mut rng, seed);
+            let safe = last_safe_complete_record_offset(&input);
+            assert!(safe <= input.len() as u64);
+            if let Ok(text) = std::str::from_utf8(&input) {
+                assert!(!contains_forbidden_secret(text));
+                let _ = parse_timestamp(text.trim());
+                for line in text.split('\n') {
+                    let trimmed = line.trim_end_matches('\r');
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    let _ = parse_claude_line(trimmed);
+                    let _ = parse_codex_model(trimmed);
+                    let _ = parse_codex_usage_line(trimmed, Some("gpt-5.4"));
+                    let _ = parse_codex_limits_line(trimmed);
+                }
+            }
+            if !input.contains(&b'\n') {
+                assert_eq!(safe, 0);
+            }
         }
     }
 
