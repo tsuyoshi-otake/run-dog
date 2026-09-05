@@ -158,6 +158,8 @@ mod tests {
                 offset,
                 size: offset,
                 prefix: None,
+                last_model: None,
+                last_codex_total: None,
             }],
             claude_keys: std::collections::HashSet::new(),
         }

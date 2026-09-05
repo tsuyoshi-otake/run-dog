@@ -40,7 +40,8 @@ use windows_sys::Win32::{
 };
 
 use crate::core::{
-    cost_cents, local_ymd, ymd_iso, ymd_key, CursorKind, CursorRebuildReason, FileCheckpointKey,
+    cost_cents, decide_codex_event, is_long_context_request, local_ymd, ymd_iso, ymd_key,
+    CodexTokenTotals, CodexUsageDecision, CursorKind, CursorRebuildReason, FileCheckpointKey,
     LimitWindow, LoadStatus, PersistStatus, ProviderUsage, TokenUsage, UsageCursor, UsageSnapshot,
     UsageState,
 };
@@ -90,6 +91,7 @@ struct FileCursor {
     offset: u64,
     last_stat_ms: u64,
     last_model: Option<String>,
+    last_codex_total: Option<CodexTokenTotals>,
     last_prefix: Option<u64>,
     last_file_id: Option<FileId>,
     waiting_incomplete: bool,
@@ -420,6 +422,8 @@ impl UsageCollector {
                 offset: cursor.offset,
                 size: cursor.size,
                 prefix: cursor.last_prefix,
+                last_model: cursor.last_model.clone(),
+                last_codex_total: cursor.last_codex_total,
             });
         }
         for (key, cursor) in &self.file_checkpoint {
@@ -631,12 +635,23 @@ impl UsageCollector {
                     self.last_rebuild_reason = Some(reason);
                     self.checkpoint_dirty = true;
                 }
+                let stored = file_checkpoint_key(path, &self.claude_dir, &self.codex_home, kind)
+                    .and_then(|key| self.file_checkpoint.get(&key));
+                let (last_model, last_codex_total) = if rebuild.is_some() {
+                    (None, None)
+                } else {
+                    (
+                        stored.and_then(|cursor| cursor.last_model.clone()),
+                        stored.and_then(|cursor| cursor.last_codex_total),
+                    )
+                };
                 entry.insert(FileCursor {
                     size,
                     mtime_ms,
                     offset,
                     last_stat_ms: 0,
-                    last_model: None,
+                    last_model,
+                    last_codex_total,
                     last_prefix: prefix,
                     last_file_id: file_id,
                     waiting_incomplete: false,
@@ -667,6 +682,7 @@ impl UsageCollector {
             if rebuild.is_some() {
                 cursor.offset = 0;
                 cursor.last_model = None;
+                cursor.last_codex_total = None;
                 cursor.waiting_incomplete = false;
             }
             cursor.last_prefix = prefix;
@@ -700,12 +716,17 @@ impl UsageCollector {
         let Some(cursor) = self.files.get_mut(path) else {
             return chunk.consumed;
         };
+        let previous_model = cursor.last_model.clone();
+        let mut previous_codex_total = cursor.last_codex_total;
         cursor.offset = chunk.new_offset;
         cursor.size = size;
         cursor.mtime_ms = mtime_ms;
         cursor.last_model = chunk.last_model;
         cursor.waiting_incomplete =
             cursor.size > cursor.offset && chunk.consumed == 0 && chunk.new_offset == offset;
+        if cursor.last_model != previous_model {
+            self.checkpoint_dirty = true;
+        }
         if let Some(limits) = chunk.limits {
             if kind == SourceKind::Codex
                 && !self.codex_from_remote
@@ -716,10 +737,32 @@ impl UsageCollector {
         }
         // Count every in-month event. A global timestamp watermark would drop
         // older JSONL after a newer file is scanned first (Codex catch-up).
-        for (event, key) in chunk.events.into_iter().zip(chunk.dedupe) {
+        for (mut event, key) in chunk.events.into_iter().zip(chunk.dedupe) {
             if let Some(key) = key {
                 if !self.claude_keys.insert(key) {
                     continue;
+                }
+            }
+            if kind == SourceKind::Codex {
+                if let Some(last) = event.codex_last {
+                    let (decision, next) =
+                        decide_codex_event(previous_codex_total, last, event.codex_total);
+                    if next != previous_codex_total {
+                        self.checkpoint_dirty = true;
+                    }
+                    previous_codex_total = next;
+                    match decision {
+                        CodexUsageDecision::Count(mut usage) => {
+                            if is_long_context_request(&event.model, last.input) {
+                                usage.long_context_input = usage.input;
+                                usage.long_context_cached_input = usage.cached_input;
+                                usage.long_context_output = usage.output;
+                            }
+                            event.usage = usage;
+                        }
+                        CodexUsageDecision::IgnoreReplay
+                        | CodexUsageDecision::IgnoreInheritedBaseline => continue,
+                    }
                 }
             }
             let day = ymd_key_from_unix(event.timestamp_ms, window.bias_minutes);
@@ -746,6 +789,9 @@ impl UsageCollector {
             }
             self.last_collected_ms = self.last_collected_ms.max(event.timestamp_ms);
             self.checkpoint_dirty = true;
+        }
+        if let Some(cursor) = self.files.get_mut(path) {
+            cursor.last_codex_total = previous_codex_total;
         }
         chunk.consumed
     }
@@ -956,6 +1002,8 @@ struct ParsedEvent {
     model: String,
     timestamp_ms: u64,
     usage: TokenUsage,
+    codex_last: Option<CodexTokenTotals>,
+    codex_total: Option<CodexTokenTotals>,
 }
 
 fn is_hot(cursor: &FileCursor, now_ms: u64) -> bool {
@@ -1466,6 +1514,8 @@ fn parse_claude_line(line: &str) -> Option<(ParsedEvent, u64)> {
                 cache_write_1h,
                 ..TokenUsage::default()
             },
+            codex_last: None,
+            codex_total: None,
         },
         key,
     ))
@@ -1491,6 +1541,7 @@ struct CodexPayload {
 #[derive(Deserialize)]
 struct CodexInfo {
     last_token_usage: Option<CodexTokens>,
+    total_token_usage: Option<CodexTokens>,
 }
 
 #[derive(Deserialize)]
@@ -1535,19 +1586,12 @@ fn parse_codex_usage_line(line: &str, model: Option<&str>) -> Option<ParsedEvent
         return None;
     }
     let model = crate::core::resolve_codex_model(model?);
-    let last = payload.info?.last_token_usage?;
-    let raw_input = last.input_tokens.unwrap_or(0);
-    let cached = last.cached_input_tokens.unwrap_or(0).min(raw_input);
-    let mut usage = TokenUsage {
-        input: raw_input - cached,
-        cached_input: cached,
-        output: last
-            .output_tokens
-            .unwrap_or(0)
-            .saturating_add(last.reasoning_output_tokens.unwrap_or(0)),
-        ..TokenUsage::default()
-    };
-    if crate::core::is_long_context_request(model, raw_input) {
+    let info = payload.info?;
+    let last_tokens = info.last_token_usage?;
+    let last = codex_tokens_to_totals(&last_tokens);
+    let total = info.total_token_usage.as_ref().map(codex_tokens_to_totals);
+    let mut usage = last.to_usage();
+    if is_long_context_request(model, last.input) {
         usage.long_context_input = usage.input;
         usage.long_context_cached_input = usage.cached_input;
         usage.long_context_output = usage.output;
@@ -1556,7 +1600,20 @@ fn parse_codex_usage_line(line: &str, model: Option<&str>) -> Option<ParsedEvent
         model: model.to_owned(),
         timestamp_ms: parse_timestamp(rec.timestamp.as_deref()?)?,
         usage,
+        codex_last: Some(last),
+        codex_total: total,
     })
+}
+
+fn codex_tokens_to_totals(tokens: &CodexTokens) -> CodexTokenTotals {
+    CodexTokenTotals {
+        input: tokens.input_tokens.unwrap_or(0),
+        cached: tokens.cached_input_tokens.unwrap_or(0),
+        output: tokens
+            .output_tokens
+            .unwrap_or(0)
+            .saturating_add(tokens.reasoning_output_tokens.unwrap_or(0)),
+    }
 }
 
 fn parse_codex_limits_line(line: &str) -> Option<ProviderUsage> {
@@ -2237,6 +2294,20 @@ mod tests {
         fn test_store_root(&self) -> Option<PathBuf> {
             self.store.as_ref().map(|store| store.root().to_path_buf())
         }
+
+        fn test_last_model(&self, path: &Path) -> Option<String> {
+            self.files
+                .get(path)
+                .and_then(|cursor| cursor.last_model.clone())
+        }
+
+        fn test_codex_total(&self, path: &Path) -> Option<(u64, u64, u64)> {
+            self.files.get(path).and_then(|cursor| {
+                cursor
+                    .last_codex_total
+                    .map(|total| (total.input, total.cached, total.output))
+            })
+        }
     }
 
     fn current_stamp() -> String {
@@ -2282,6 +2353,89 @@ mod tests {
             root.join("codex"),
             Some(super::FileUsageStore::at(store_root)),
         )
+    }
+
+    const TURN_CONTEXT: &str = r#"{"type":"turn_context","payload":{"model":"gpt-5.4"}}"#;
+
+    fn current_codex_session(root: &Path, name: &str) -> PathBuf {
+        let now = unix_now_ms();
+        let (year, month, _) = local_ymd(now, 0);
+        let dir = root
+            .join("codex")
+            .join("sessions")
+            .join(year.to_string())
+            .join(format!("{month:02}"));
+        fs::create_dir_all(&dir).expect("codex month");
+        dir.join(name)
+    }
+
+    fn write_codex_session(root: &Path, name: &str, lines: &[String]) -> PathBuf {
+        let session = current_codex_session(root, name);
+        let mut body = String::new();
+        body.push_str(TURN_CONTEXT);
+        body.push('\n');
+        for line in lines {
+            body.push_str(line);
+            body.push('\n');
+        }
+        fs::write(&session, body).expect("jsonl");
+        session
+    }
+
+    fn append_codex_lines(session: &Path, lines: &[String]) {
+        use std::io::Write;
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(session)
+            .expect("append");
+        for line in lines {
+            writeln!(file, "{line}").expect("line");
+        }
+    }
+
+    fn token_count_line(
+        stamp: &str,
+        last_in: u64,
+        last_cached: u64,
+        last_out: u64,
+        total_in: u64,
+        total_cached: u64,
+        total_out: u64,
+    ) -> String {
+        format!(
+            r#"{{"type":"event_msg","timestamp":"{stamp}","payload":{{"type":"token_count","info":{{"last_token_usage":{{"input_tokens":{last_in},"cached_input_tokens":{last_cached},"output_tokens":{last_out}}},"total_token_usage":{{"input_tokens":{total_in},"cached_input_tokens":{total_cached},"output_tokens":{total_out}}}}}}}}}"#
+        )
+    }
+
+    fn token_count_line_no_total(
+        stamp: &str,
+        last_in: u64,
+        last_cached: u64,
+        last_out: u64,
+    ) -> String {
+        format!(
+            r#"{{"type":"event_msg","timestamp":"{stamp}","payload":{{"type":"token_count","info":{{"last_token_usage":{{"input_tokens":{last_in},"cached_input_tokens":{last_cached},"output_tokens":{last_out}}}}}}}}}"#
+        )
+    }
+
+    fn token_count_with_limits(
+        stamp: &str,
+        last_in: u64,
+        last_cached: u64,
+        last_out: u64,
+        total_in: u64,
+        total_cached: u64,
+        total_out: u64,
+    ) -> String {
+        format!(
+            r#"{{"type":"event_msg","timestamp":"{stamp}","payload":{{"type":"token_count","info":{{"last_token_usage":{{"input_tokens":{last_in},"cached_input_tokens":{last_cached},"output_tokens":{last_out}}},"total_token_usage":{{"input_tokens":{total_in},"cached_input_tokens":{total_cached},"output_tokens":{total_out}}}}},"rate_limits":{{"plan_type":"pro","primary":{{"used_percent":5.0,"resets_at":1780000000,"window_minutes":300}},"secondary":{{"used_percent":21.5,"resets_at":1780500000,"window_minutes":10080}}}}}}}}"#
+        )
+    }
+
+    fn collect_codex(root: &Path) -> crate::core::ProviderUsage {
+        let mut collector = new_claude_collector(root);
+        assert_eq!(tick_idle(&mut collector), UsageTick::Idle);
+        collector.snapshot().codex
     }
 
     fn claude_session(root: &Path) -> PathBuf {
@@ -2426,6 +2580,280 @@ mod tests {
         )
         .expect("auto-review");
         assert_eq!(auto.model, "gpt-5.4");
+    }
+
+    #[test]
+    fn component_codex_identical_snapshot_is_not_double_counted() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-codex-snap-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let stamp = current_stamp();
+        let turn = token_count_line(&stamp, 80, 20, 5, 80, 20, 5);
+        write_codex_session(&root, "rollout.jsonl", &[turn.clone(), turn]);
+        let usage = collect_codex(&root);
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(usage.month_input_tokens, 80);
+        assert_eq!(usage.month_output_tokens, 5);
+    }
+
+    #[test]
+    fn component_codex_rate_limit_only_renotify_is_not_counted() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-codex-limits-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let stamp = current_stamp();
+        write_codex_session(
+            &root,
+            "rollout.jsonl",
+            &[
+                token_count_line(&stamp, 80, 20, 5, 80, 20, 5),
+                token_count_with_limits(&stamp, 80, 20, 5, 80, 20, 5),
+            ],
+        );
+        let usage = collect_codex(&root);
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(usage.month_input_tokens, 80);
+        assert_eq!(usage.month_output_tokens, 5);
+    }
+
+    #[test]
+    fn component_codex_cumulative_usage_counts_last_turn_only() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-codex-cum-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let stamp = current_stamp();
+        write_codex_session(
+            &root,
+            "rollout.jsonl",
+            &[
+                token_count_line(&stamp, 80, 20, 5, 80, 20, 5),
+                token_count_line(&stamp, 40, 10, 2, 120, 30, 7),
+            ],
+        );
+        let usage = collect_codex(&root);
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(usage.month_input_tokens, 120);
+        assert_eq!(usage.month_output_tokens, 7);
+    }
+
+    #[test]
+    fn component_codex_replay_after_idle_does_not_add_tokens() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-codex-replay-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let stamp = current_stamp();
+        let session = write_codex_session(
+            &root,
+            "rollout.jsonl",
+            &[token_count_line(&stamp, 80, 20, 5, 80, 20, 5)],
+        );
+        let mut collector = new_claude_collector(&root);
+        assert_eq!(tick_idle(&mut collector), UsageTick::Idle);
+        assert_eq!(collector.snapshot().codex.month_input_tokens, 80);
+        append_codex_lines(&session, &[token_count_line(&stamp, 80, 20, 5, 80, 20, 5)]);
+        collector.test_force_restat();
+        assert_eq!(tick_idle(&mut collector), UsageTick::Idle);
+        let usage = collector.snapshot().codex;
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(usage.month_input_tokens, 80);
+        assert_eq!(usage.month_output_tokens, 5);
+    }
+
+    #[test]
+    fn component_codex_fork_inherited_snapshot_is_baseline_only() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-codex-fork-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let stamp = current_stamp();
+        write_codex_session(
+            &root,
+            "rollout.jsonl",
+            &[
+                token_count_line(&stamp, 80, 20, 5, 160, 40, 10),
+                token_count_line(&stamp, 40, 0, 3, 200, 40, 13),
+            ],
+        );
+        let usage = collect_codex(&root);
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(usage.month_input_tokens, 40);
+        assert_eq!(usage.month_output_tokens, 3);
+    }
+
+    #[test]
+    fn component_codex_resume_renotify_is_replay() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-codex-resume-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let stamp = current_stamp();
+        write_codex_session(
+            &root,
+            "rollout.jsonl",
+            &[
+                token_count_line(&stamp, 80, 20, 5, 80, 20, 5),
+                token_count_line(&stamp, 80, 20, 5, 80, 20, 5),
+            ],
+        );
+        let usage = collect_codex(&root);
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(usage.month_input_tokens, 80);
+        assert_eq!(usage.month_output_tokens, 5);
+    }
+
+    #[test]
+    fn component_codex_process_restart_keeps_watermark() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-codex-restart-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let store_root = root.join("store");
+        let stamp = current_stamp();
+        let session = write_codex_session(
+            &root,
+            "rollout.jsonl",
+            &[token_count_line(&stamp, 80, 20, 5, 80, 20, 5)],
+        );
+        let mut first = new_persisted_collector(&root, store_root.clone());
+        assert_eq!(tick_idle(&mut first), UsageTick::Idle);
+        assert_eq!(first.snapshot().codex.month_input_tokens, 80);
+        assert_eq!(first.test_last_model(&session).as_deref(), Some("gpt-5.4"));
+        assert_eq!(first.test_codex_total(&session), Some((80, 20, 5)));
+        append_codex_lines(&session, &[token_count_line(&stamp, 40, 10, 2, 120, 30, 7)]);
+        let mut restored = new_persisted_collector(&root, store_root);
+        assert_eq!(restored.snapshot().codex.month_input_tokens, 80);
+        assert_eq!(tick_idle(&mut restored), UsageTick::Idle);
+        let usage = restored.snapshot().codex;
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(usage.month_input_tokens, 120);
+        assert_eq!(usage.month_output_tokens, 7);
+    }
+
+    #[test]
+    fn component_codex_restart_between_turn_context_and_token_count_keeps_model() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-codex-gap-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let store_root = root.join("store");
+        let session = current_codex_session(&root, "rollout.jsonl");
+        fs::write(&session, format!("{TURN_CONTEXT}\n")).expect("turn only");
+        let mut first = new_persisted_collector(&root, store_root.clone());
+        assert_eq!(tick_idle(&mut first), UsageTick::Idle);
+        assert_eq!(first.snapshot().codex.month_input_tokens, 0);
+        assert_eq!(first.test_last_model(&session).as_deref(), Some("gpt-5.4"));
+        append_codex_lines(
+            &session,
+            &[token_count_line(&current_stamp(), 80, 20, 5, 80, 20, 5)],
+        );
+        let mut restored = new_persisted_collector(&root, store_root);
+        assert_eq!(tick_idle(&mut restored), UsageTick::Idle);
+        let usage = restored.snapshot().codex;
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(usage.month_input_tokens, 80);
+        assert_eq!(usage.month_output_tokens, 5);
+    }
+
+    #[test]
+    fn component_codex_out_of_order_snapshot_is_treated_as_reset_not_a_defect() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-codex-ooo-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let stamp = current_stamp();
+        write_codex_session(
+            &root,
+            "rollout.jsonl",
+            &[
+                token_count_line(&stamp, 80, 20, 5, 80, 20, 5),
+                token_count_line(&stamp, 40, 10, 2, 120, 30, 7),
+                token_count_line(&stamp, 80, 20, 5, 80, 20, 5),
+            ],
+        );
+        let usage = collect_codex(&root);
+        let _ = fs::remove_dir_all(&root);
+        // Smaller total after a larger one cannot be distinguished from a reset.
+        assert_eq!(usage.month_input_tokens, 200);
+        assert_eq!(usage.month_output_tokens, 12);
+    }
+
+    #[test]
+    fn component_codex_counter_reset_counts_new_epoch() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-codex-reset-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let stamp = current_stamp();
+        write_codex_session(
+            &root,
+            "rollout.jsonl",
+            &[
+                token_count_line(&stamp, 80, 0, 5, 80, 0, 5),
+                token_count_line(&stamp, 10, 0, 1, 10, 0, 1),
+            ],
+        );
+        let usage = collect_codex(&root);
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(usage.month_input_tokens, 90);
+        assert_eq!(usage.month_output_tokens, 6);
+    }
+
+    #[test]
+    fn component_codex_same_tuple_different_request_counts_twice() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-codex-tuple-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let stamp = current_stamp();
+        write_codex_session(
+            &root,
+            "rollout.jsonl",
+            &[
+                token_count_line(&stamp, 80, 20, 5, 80, 20, 5),
+                token_count_line(&stamp, 80, 20, 5, 160, 40, 10),
+            ],
+        );
+        let usage = collect_codex(&root);
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(usage.month_input_tokens, 160);
+        assert_eq!(usage.month_output_tokens, 10);
+    }
+
+    #[test]
+    fn component_codex_missing_total_counts_each_last_without_replay_claim() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-codex-nototal-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let stamp = current_stamp();
+        write_codex_session(
+            &root,
+            "rollout.jsonl",
+            &[
+                token_count_line_no_total(&stamp, 80, 20, 5),
+                token_count_line_no_total(&stamp, 80, 20, 5),
+            ],
+        );
+        let usage = collect_codex(&root);
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(usage.month_input_tokens, 160);
+        assert_eq!(usage.month_output_tokens, 10);
     }
 
     #[test]
