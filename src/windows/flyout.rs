@@ -311,15 +311,14 @@ fn position_near_icon(owner: HWND, width: i32, height: i32) -> (i32, i32) {
 }
 
 fn monitor_work_area(owner: HWND, origin: POINT) -> PixelRect {
-    let from_owner = if owner.is_null() {
-        ptr::null_mut()
-    } else {
+    // The tray icon / cursor lives in virtual-screen space. The hidden
+    // message window is usually on the primary, so owner-first would
+    // reintroduce the SM_CXSCREEN bug on a secondary display.
+    let from_point = unsafe { MonitorFromPoint(origin, MONITOR_DEFAULTTONEAREST) };
+    let monitor = if from_point.is_null() && !owner.is_null() {
         unsafe { MonitorFromWindow(owner, MONITOR_DEFAULTTONEAREST) }
-    };
-    let monitor = if from_owner.is_null() {
-        unsafe { MonitorFromPoint(origin, MONITOR_DEFAULTTONEAREST) }
     } else {
-        from_owner
+        from_point
     };
     let mut info = MONITORINFO {
         cbSize: size_of::<MONITORINFO>() as u32,
