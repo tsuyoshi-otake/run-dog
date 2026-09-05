@@ -12,7 +12,9 @@ mod storage;
 mod theme;
 mod usage;
 mod usage_checkpoint;
+mod usage_diagnostics;
 mod usage_durable;
+mod usage_fetch;
 mod usage_state;
 
 pub use animation::{AnimationController, AnimationRateChange, FpsLimit, FrameCursor};
@@ -36,9 +38,20 @@ pub use usage::{
 pub use usage_checkpoint::{
     FileCheckpointCursor, FileCheckpointKey, UsageCheckpoint, USAGE_CHECKPOINT_MIGRATION_VERSION,
 };
+pub use usage_diagnostics::{
+    fetch_result_code, persist_result_code, persist_result_detail, rebuild_reason_code,
+    CheckpointSource, DiagnosticEvent, DiagnosticKind, DiagnosticRing, DiagnosticSnapshot,
+    RebuildState, RescanReason, RestoreResult, StartupMode, DIAGNOSTIC_RING_CAP,
+};
 pub use usage_durable::{
     load_usage_state, persist_usage_state, GenerationBlobs, LoadStatus, MemoryBlobs, PersistStatus,
     MAX_PRIOR_GENERATIONS,
+};
+pub use usage_fetch::{
+    cancel_fetch, decide_apply, finish_fetch, freshness_after_failure, next_backoff_ms,
+    record_spawn_failure, reject_late_result, should_start_fetch, start_fetch, FetchApplyDecision,
+    FetchErrorKind, FetchOutcome, LimitsFreshness, ProviderFetchKind, ProviderFetchState,
+    FETCH_BACKOFF_INITIAL_MS, FETCH_BACKOFF_MAX_MS,
 };
 pub use usage_state::{
     usage_store_root_is_forbidden, CursorKind, CursorRebuildReason, UsageAggregate, UsageCursor,

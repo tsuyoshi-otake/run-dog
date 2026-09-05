@@ -245,6 +245,7 @@ impl WindowContext {
     fn dispatch(&mut self, event: Event) {
         if matches!(&event, Event::ExitRequested) {
             self.updater.cancel();
+            self.usage.cancel_remote_fetches();
             if !self.platform.hwnd.is_null() {
                 let _ = unsafe { KillTimer(self.platform.hwnd, USAGE_TIMER_ID) };
             }
