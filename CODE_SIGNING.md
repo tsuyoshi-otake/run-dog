@@ -38,6 +38,18 @@ submitted for signing.
 
 Repository access uses GitHub multi-factor authentication.
 
+## After approval (verification)
+
+SHA-256 sidecars stay mandatory. Signing is not a substitute for the
+checksum contract.
+
+When SignPath starts signing CI installers, run
+[`scripts/verify-authenticode.ps1`](scripts/verify-authenticode.ps1) on
+`dist\RunDog-Setup-x64.exe` and require `Get-AuthenticodeSignature`
+`Status = Valid` before `gh release create`. Do not add that gate to
+Verify or Release while assets are still unsigned. Toolchain and Inno
+pins: [`docs/REPRODUCIBILITY.md`](docs/REPRODUCIBILITY.md).
+
 ## Distribution
 
 - Homepage / download: <https://tsuyoshi-otake.github.io/run-dog/>
