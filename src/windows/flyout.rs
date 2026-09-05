@@ -39,9 +39,10 @@ use windows_sys::{
 use crate::{
     application::TrayIcon,
     core::{
-        format_banked_reset_label, format_compact_token_count, format_fable_limit_label, local_hms,
-        local_ymd, GpuStatus, LimitWindow, MemoryStatus, ProcessStatus, ProviderUsage,
-        ResolvedTheme, Sparkline, StorageStatus, UsageSnapshot, SPARKLINE_CAPACITY,
+        format_banked_reset_label, format_compact_token_count, format_fable_limit_label,
+        format_limit_label, local_hms, local_ymd, GpuStatus, LimitWindow, MemoryStatus,
+        ProcessStatus, ProviderUsage, ResolvedTheme, Sparkline, StorageStatus, UsageSnapshot,
+        SPARKLINE_CAPACITY,
     },
 };
 
@@ -975,6 +976,7 @@ fn paint_usage_row(
 
     select_font(hdc, detail_font);
     let _ = unsafe { SetTextColor(hdc, palette.muted) };
+    let now_ms = flyout_now_ms();
     let mut metric_top = row.top + layout.title_h + px(2, layout.dpi);
     metric_top = paint_limit_metric(
         hdc,
@@ -986,6 +988,7 @@ fn paint_usage_row(
         },
         "5h",
         usage.session_window(),
+        now_ms,
         palette,
         layout,
     );
@@ -999,6 +1002,7 @@ fn paint_usage_row(
         },
         "7d",
         usage.weekly_window(),
+        now_ms,
         palette,
         layout,
     );
@@ -1107,28 +1111,38 @@ fn paint_limit_metric(
     rect: RECT,
     name: &str,
     window: Option<LimitWindow>,
+    now_ms: u64,
     palette: &Palette,
     layout: &Layout,
 ) -> i32 {
-    let label = match window {
-        Some(window) => {
-            let reset = format_reset(window);
-            if reset.is_empty() {
-                format!("{name}: {:.0}%", window.used_percent())
-            } else {
-                format!("{name}: {:.0}%  {reset}", window.used_percent())
-            }
-        }
-        None => format!("{name}: —"),
+    let label =
+        format_limit_metric_label(name, window, now_ms, super::usage::timezone_bias_minutes());
+    let used = match window {
+        Some(window) if window.is_current(now_ms) => window.used_percent(),
+        _ => 0.0,
     };
-    paint_limit_label(
-        hdc,
-        rect,
-        &label,
-        window.map(LimitWindow::used_percent).unwrap_or(0.0),
-        palette,
-        layout,
-    )
+    paint_limit_label(hdc, rect, &label, used, palette, layout)
+}
+
+fn format_limit_metric_label(
+    name: &str,
+    window: Option<LimitWindow>,
+    now_ms: u64,
+    bias_minutes: i32,
+) -> String {
+    let label = format_limit_label(name, window, now_ms);
+    let Some(window) = window else {
+        return label;
+    };
+    if !window.is_current(now_ms) {
+        return label;
+    }
+    let reset = format_reset_local(window, bias_minutes);
+    if reset.is_empty() {
+        label
+    } else {
+        format!("{label}  {reset}")
+    }
 }
 
 fn paint_fable_metric(
@@ -1664,9 +1678,10 @@ fn wide(value: &str) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::{
-        extra_usage_block_units, format_bytes, format_gpu_capacity, format_month_usage,
-        format_percent, format_reset_local, format_self_usage, gpu_details, visible_usage_count,
-        window_size, CARD_GPU_BLOCK_HEIGHT, CARD_HEIGHT, CARD_USAGE_BLOCK_HEIGHT, CARD_WIDTH,
+        extra_usage_block_units, format_bytes, format_gpu_capacity, format_limit_metric_label,
+        format_month_usage, format_percent, format_reset_local, format_self_usage, gpu_details,
+        visible_usage_count, window_size, CARD_GPU_BLOCK_HEIGHT, CARD_HEIGHT,
+        CARD_USAGE_BLOCK_HEIGHT, CARD_WIDTH,
     };
     use crate::core::{
         format_banked_reset_label, format_fable_limit_label, CpuLoad, LimitWindow, ProcessStatus,
@@ -1792,6 +1807,26 @@ mod tests {
         assert_eq!(format_reset_local(weekly, 480), "08-17 16:00");
         assert_eq!(format_reset_local(session, -540), "16:39");
         assert_eq!(format_reset_local(unknown, -540), "");
+        assert_eq!(
+            format_limit_metric_label("5h", Some(session), SESSION_UTC_MS - 1, -540),
+            "5h: 28%  16:39"
+        );
+        assert_eq!(
+            format_limit_metric_label("5h", Some(session), SESSION_UTC_MS, -540),
+            "5h: —"
+        );
+        assert_eq!(
+            format_limit_metric_label("7d", Some(weekly), WEEKLY_UTC_MIDNIGHT_MS, -540),
+            "7d: —"
+        );
+        assert_eq!(
+            format_limit_metric_label("7d", Some(unknown), 1, -540),
+            "7d: —"
+        );
+        assert_ne!(
+            format_limit_metric_label("5h", Some(session), SESSION_UTC_MS, -540),
+            "5h: 0%"
+        );
     }
 
     #[test]
