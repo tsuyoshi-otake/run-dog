@@ -1,0 +1,65 @@
+src/core/usage_durable.rs:45:9: replace <impl GenerationBlobs for MemoryBlobs>::write_blob -> bool with true
+src/core/usage_durable.rs:53:9: replace <impl GenerationBlobs for MemoryBlobs>::read_blob -> Option<Vec<u8>> with None
+src/core/usage_durable.rs:53:9: replace <impl GenerationBlobs for MemoryBlobs>::read_blob -> Option<Vec<u8>> with Some(vec![])
+src/core/usage_durable.rs:53:9: replace <impl GenerationBlobs for MemoryBlobs>::read_blob -> Option<Vec<u8>> with Some(vec![0])
+src/core/usage_durable.rs:45:9: replace <impl GenerationBlobs for MemoryBlobs>::write_blob -> bool with false
+src/core/usage_durable.rs:53:9: replace <impl GenerationBlobs for MemoryBlobs>::read_blob -> Option<Vec<u8>> with Some(vec![1])
+src/core/usage_durable.rs:57:9: replace <impl GenerationBlobs for MemoryBlobs>::write_current -> bool with true
+src/core/usage_durable.rs:57:9: replace <impl GenerationBlobs for MemoryBlobs>::write_current -> bool with false
+src/core/usage_durable.rs:65:9: replace <impl GenerationBlobs for MemoryBlobs>::read_current -> Option<u64> with None
+src/core/usage_durable.rs:65:9: replace <impl GenerationBlobs for MemoryBlobs>::read_current -> Option<u64> with Some(0)
+src/core/usage_durable.rs:65:9: replace <impl GenerationBlobs for MemoryBlobs>::read_current -> Option<u64> with Some(1)
+src/core/usage_durable.rs:69:9: replace <impl GenerationBlobs for MemoryBlobs>::highest_blob_generation -> Option<u64> with None
+src/core/usage_durable.rs:69:9: replace <impl GenerationBlobs for MemoryBlobs>::highest_blob_generation -> Option<u64> with Some(0)
+src/core/usage_durable.rs:80:8: delete ! in persist_usage_state
+src/core/usage_durable.rs:83:8: delete ! in persist_usage_state
+src/core/usage_durable.rs:115:5: replace decode_blob -> Option<UsageState> with None
+src/core/usage_durable.rs:118:23: replace == with != in decode_blob
+src/core/usage_durable.rs:122:5: replace recover_prior -> Option<UsageState> with None
+src/core/usage_durable.rs:126:23: replace == with != in recover_prior
+src/core/usage_state.rs:107:9: replace UsageState::encode -> String with String::new()
+src/core/usage_state.rs:107:9: replace UsageState::encode -> String with "xyzzy".into()
+src/core/usage_state.rs:155:28: replace == with != in UsageState::encode
+src/core/usage_state.rs:186:9: replace UsageState::decode -> Option<Self> with None
+src/core/usage_state.rs:224:65: replace != with == in UsageState::decode
+src/core/usage_state.rs:187:26: replace != with == in UsageState::decode
+src/core/usage_state.rs:260:52: replace && with || in UsageState::decode
+src/core/usage_state.rs:260:44: replace == with != in UsageState::decode
+src/core/usage_state.rs:260:73: replace == with != in UsageState::decode
+src/core/usage_state.rs:268:52: replace && with || in UsageState::decode
+src/core/usage_state.rs:268:44: replace == with != in UsageState::decode
+src/core/usage_state.rs:268:73: replace == with != in UsageState::decode
+src/core/usage_state.rs:276:52: replace && with || in UsageState::decode
+src/core/usage_state.rs:276:44: replace == with != in UsageState::decode
+src/core/usage_state.rs:282:27: replace != with == in UsageState::decode
+src/core/usage_state.rs:276:73: replace == with != in UsageState::decode
+src/core/usage_state.rs:296:25: delete field month_cents from struct ProviderUsage expression in UsageState::decode
+src/core/usage_state.rs:297:25: delete field month_input_tokens from struct ProviderUsage expression in UsageState::decode
+src/core/usage_state.rs:304:25: delete field month_input_tokens from struct ProviderUsage expression in UsageState::decode
+src/core/usage_state.rs:305:25: delete field month_output_tokens from struct ProviderUsage expression in UsageState::decode
+src/core/usage_state.rs:317:9: replace UsageState::prune_claude_keys_before_month with ()
+src/core/usage_state.rs:330:5: replace parse_cursor_line -> Option<UsageCursor> with None
+src/core/usage_state.rs:331:20: replace != with == in parse_cursor_line
+src/core/usage_state.rs:335:9: delete match arm "c" in parse_cursor_line
+src/core/usage_state.rs:336:9: delete match arm "x" in parse_cursor_line
+src/core/usage_state.rs:354:5: replace parse_prefix_line -> Option<(CursorKind, String, u64)> with None
+src/core/usage_state.rs:355:20: replace != with == in parse_prefix_line
+src/core/usage_state.rs:359:9: delete match arm "c" in parse_prefix_line
+src/core/usage_state.rs:360:9: delete match arm "x" in parse_prefix_line
+src/core/usage_state.rs:367:5: replace parse_codex_model_line -> Option<(CursorKind, String, String)> with None
+src/core/usage_state.rs:368:20: replace != with == in parse_codex_model_line
+src/core/usage_state.rs:372:9: delete match arm "x" in parse_codex_model_line
+src/core/usage_state.rs:375:8: delete ! in parse_codex_model_line
+src/core/usage_state.rs:382:5: replace parse_codex_total_line -> Option<(CursorKind, String, CodexTokenTotals)> with None
+src/core/usage_state.rs:383:20: replace != with == in parse_codex_total_line
+src/core/usage_state.rs:387:9: delete match arm "x" in parse_codex_total_line
+src/core/usage_state.rs:402:5: replace parse_dkey_line -> Option<ClaudeDedupeKey> with None
+src/core/usage_state.rs:403:20: replace != with == in parse_dkey_line
+src/core/usage_state.rs:413:5: replace is_safe_codex_model -> bool with false
+src/core/usage_state.rs:413:5: delete ! in is_safe_codex_model
+src/core/usage_state.rs:414:24: replace <= with > in is_safe_codex_model
+src/core/usage_state.rs:417:50: replace || with && in is_safe_codex_model
+src/core/usage_state.rs:426:5: replace usage_store_root_is_forbidden -> bool with true
+src/core/usage_state.rs:426:5: replace usage_store_root_is_forbidden -> bool with false
+src/core/usage_state.rs:428:39: replace || with && in usage_store_root_is_forbidden
+src/core/usage_state.rs:428:28: replace == with != in usage_store_root_is_forbidden

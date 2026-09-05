@@ -15,6 +15,8 @@ mod usage_checkpoint;
 mod usage_diagnostics;
 mod usage_durable;
 mod usage_fetch;
+#[cfg(test)]
+mod usage_ingest_pbt;
 mod usage_state;
 
 pub use animation::{AnimationController, AnimationRateChange, FpsLimit, FrameCursor};

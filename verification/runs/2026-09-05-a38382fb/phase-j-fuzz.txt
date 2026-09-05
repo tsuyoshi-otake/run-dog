@@ -1,0 +1,15 @@
+Fuzz: NOT RUN
+
+No harness added in this PR. Deferred candidates (if a later PR lands them):
+  UsageState decode
+  legacy checkpoint
+  Claude JSONL
+  Codex JSONL
+  timestamp
+  checksum
+  update release JSON
+
+Oracle if added later: no panic, bounded memory, cursor never past a
+safe complete record. No secrets/tokens/prompts in fixtures.
+
+Command not run: cargo fuzz / libFuzzer

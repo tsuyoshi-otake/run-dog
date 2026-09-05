@@ -1,0 +1,15 @@
+src/core/usage_durable.rs:69:9: replace <impl GenerationBlobs for MemoryBlobs>::highest_blob_generation -> Option<u64> with Some(1)
+src/core/usage_durable.rs:132:23: replace <= with > in recover_prior
+src/core/usage_durable.rs:135:20: replace -= with += in recover_prior
+src/core/usage_durable.rs:135:20: replace -= with /= in recover_prior
+src/core/usage_state.rs:295:25: delete field today_cents from struct ProviderUsage expression in UsageState::decode
+src/core/usage_state.rs:298:25: delete field month_output_tokens from struct ProviderUsage expression in UsageState::decode
+src/core/usage_state.rs:302:25: delete field today_cents from struct ProviderUsage expression in UsageState::decode
+src/core/usage_state.rs:303:25: delete field month_cents from struct ProviderUsage expression in UsageState::decode
+src/core/usage_state.rs:322:5: replace cursor_sort_key -> (u8, &str) with (0, "")
+src/core/usage_state.rs:322:5: replace cursor_sort_key -> (u8, &str) with (0, "xyzzy")
+src/core/usage_state.rs:322:5: replace cursor_sort_key -> (u8, &str) with (1, "")
+src/core/usage_state.rs:322:5: replace cursor_sort_key -> (u8, &str) with (1, "xyzzy")
+src/core/usage_state.rs:413:5: replace is_safe_codex_model -> bool with true
+src/core/usage_state.rs:415:9: replace && with || in is_safe_codex_model
+src/core/usage_state.rs:414:9: replace && with || in is_safe_codex_model
