@@ -18,5 +18,7 @@
 | exit/cancel 後に新たな installer を起動しない | launch-gate | cancel + launch_gate | update component tests | PASS（非ライブ） |
 | CPU usage 境界と EMA | closed-form oracle | `core/cpu.rs` | C2 + EMA PBT | PASS |
 | GitHub Release は strictly newer stable のみ | version oracle | `src/update.rs` | C2 + PBT | PASS |
+| Codex ディレクトリ year-month ≠ usage month。直近 touch の旧月は拾う | event timestamp + dir mtime ≤ 48h | `queue_recent_codex_month_dirs`（当年/前年のみ） | `component_codex_old_month_dir_*` / `component_codex_cold_month_dir_*` | REPRODUCED → 修正 |
+| 48h 超で一度も discover していない冷ディレクトリ | 全履歴 scan しない | 対象外（意図） | cold-dir fixture | NOT_REPRODUCED as defect |
 
 単一インスタンス mutex と generation / operation ID CAS により、通常経路の多数プロセス競合は抑止する。実 OS crash の瞬間耐久性は Registry の非揮発書込みに依存し、journal 回復で観測可能な分裂を解消する。

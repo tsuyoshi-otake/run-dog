@@ -429,12 +429,21 @@ impl UsageCollector {
     fn queue_roots(&mut self) {
         self.discover.clear();
         self.discover.push_back(self.claude_dir.join("projects"));
-        let (year, month, _) = local_ymd(unix_now_ms(), day_window(unix_now_ms()).bias_minutes);
+        let now_ms = unix_now_ms();
+        let window = day_window(now_ms);
+        let (year, month, _) = local_ymd(now_ms, window.bias_minutes);
         self.discover
             .push_back(codex_month_dir(&self.codex_home, year, month));
         let (prev_year, prev_month) = previous_month(year, month);
         self.discover
             .push_back(codex_month_dir(&self.codex_home, prev_year, prev_month));
+        queue_recent_codex_month_dirs(
+            &mut self.discover,
+            &self.codex_home,
+            year,
+            now_ms,
+            HOT_AGE_MS,
+        );
     }
 
     fn discover_dir(&mut self, dir: &Path, window: DayWindow, _now_ms: u64) {
@@ -1819,6 +1828,41 @@ fn codex_month_dir(home: &Path, year: i32, month: u8) -> PathBuf {
         .join(format!("{month:02}"))
 }
 
+/// Enqueue Codex `sessions/{year}/{month}` dirs touched within `hot_age_ms`.
+/// Walks the current and previous calendar years only — not a full-history scan.
+fn queue_recent_codex_month_dirs(
+    discover: &mut VecDeque<PathBuf>,
+    home: &Path,
+    year: i32,
+    now_ms: u64,
+    hot_age_ms: u64,
+) {
+    for walk_year in [year, year - 1] {
+        let year_dir = home.join("sessions").join(walk_year.to_string());
+        let Ok(entries) = fs::read_dir(&year_dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if !file_type.is_dir() {
+                continue;
+            }
+            let Some(mtime_ms) = path_mtime_ms(&path) else {
+                continue;
+            };
+            if now_ms.saturating_sub(mtime_ms) > hot_age_ms {
+                continue;
+            }
+            if !discover.contains(&path) {
+                discover.push_back(path);
+            }
+        }
+    }
+}
+
 fn file_checkpoint_key(
     path: &Path,
     claude_dir: &Path,
@@ -2100,6 +2144,75 @@ mod tests {
         assert_eq!(collector.snapshot().claude.month_input_tokens, 1_000_000);
         assert_eq!(collector.snapshot().claude.month_output_tokens, 0);
         assert!(!collector.catch_up);
+    }
+
+    #[test]
+    fn component_codex_old_month_dir_with_today_event_is_still_counted() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-codex-oldmonth-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let now = unix_now_ms();
+        let window = super::day_window(now);
+        let (year, month, day) = local_ymd(now, window.bias_minutes);
+        let (hour, minute) = local_hms(now, window.bias_minutes);
+        let mut old_year = year;
+        let mut old_month = month;
+        for _ in 0..3 {
+            let (y, m) = super::previous_month(old_year, old_month);
+            old_year = y;
+            old_month = m;
+        }
+        let dir = super::codex_month_dir(&root, old_year, old_month);
+        fs::create_dir_all(&dir).expect("old month");
+        let stamp = format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:00Z");
+        let token_line = format!(
+            r#"{{"type":"event_msg","timestamp":"{stamp}","payload":{{"type":"token_count","info":{{"last_token_usage":{{"input_tokens":80,"cached_input_tokens":20,"output_tokens":5}}}}}}}}"#
+        );
+        let body = format!(
+            "{}\n{token_line}\n",
+            r#"{"type":"turn_context","payload":{"model":"gpt-5.4"}}"#,
+        );
+        fs::write(dir.join("rollout.jsonl"), body).expect("jsonl");
+
+        let mut collector =
+            UsageCollector::with_dirs(root.join("unused-claude"), root.clone(), false);
+        let mut last = UsageTick::MoreWork;
+        for _ in 0..32 {
+            last = collector.tick(ptr::null_mut());
+            if last == UsageTick::Idle && !collector.catch_up {
+                break;
+            }
+        }
+        let input = collector.snapshot().codex.month_input_tokens;
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(last, UsageTick::Idle);
+        assert_eq!(input, 80);
+    }
+
+    #[test]
+    fn component_codex_cold_month_dir_is_not_queued_for_history_scan() {
+        use std::collections::VecDeque;
+
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-codex-cold-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let dir = super::codex_month_dir(&root, 2024, 1);
+        fs::create_dir_all(&dir).expect("cold month");
+        let mtime = super::path_mtime_ms(&dir).expect("mtime");
+        let mut discover = VecDeque::new();
+        super::queue_recent_codex_month_dirs(
+            &mut discover,
+            &root,
+            2024,
+            mtime.saturating_add(super::HOT_AGE_MS + 1),
+            super::HOT_AGE_MS,
+        );
+        let _ = fs::remove_dir_all(&root);
+        assert!(!discover.iter().any(|path| path == &dir));
     }
 
     #[test]
