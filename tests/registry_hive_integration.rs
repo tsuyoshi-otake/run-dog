@@ -286,6 +286,7 @@ fn live_hive_usage_checkpoint_migration_invalidates_stale_versions() {
             ..UsageSnapshot::default()
         },
         files: Default::default(),
+        claude_keys: Default::default(),
     };
     assert!(save_usage_checkpoint(&checkpoint));
     assert_eq!(
