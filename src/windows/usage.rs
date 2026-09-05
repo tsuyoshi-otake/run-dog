@@ -1227,10 +1227,8 @@ impl UsageCollector {
             self.files_opened = self.files_opened.saturating_add(1);
             if let Some(limits) = read_codex_limits_tail(path, size) {
                 if is_subscription_limits(&limits) {
-                    self.snapshot.codex.primary =
-                        limits.primary.map(|window| window.effective(now_ms));
-                    self.snapshot.codex.secondary =
-                        limits.secondary.map(|window| window.effective(now_ms));
+                    self.snapshot.codex.primary = limits.primary;
+                    self.snapshot.codex.secondary = limits.secondary;
                     if limits.plan_len != 0 {
                         self.snapshot.codex.plan = limits.plan;
                         self.snapshot.codex.plan_len = limits.plan_len;
@@ -3708,6 +3706,26 @@ mod tests {
         assert_eq!(
             collector.test_fetch_freshness(crate::core::ProviderFetchKind::Codex),
             crate::core::LimitsFreshness::Current
+        );
+    }
+
+    #[test]
+    fn component_local_jsonl_limits_keep_expired_percent_for_presentation() {
+        let expired = crate::core::LimitWindow {
+            used_tenths: 280,
+            resets_at_ms: 1_000,
+            window_minutes: 300,
+        };
+        assert_eq!(expired.effective(2_000).used_tenths, 0);
+        assert_eq!(expired.used_tenths, 280);
+        assert!(!expired.is_current(2_000));
+        assert_eq!(
+            crate::core::format_limit_label("5h", Some(expired), 2_000),
+            "5h: —"
+        );
+        assert_ne!(
+            crate::core::format_limit_label("5h", Some(expired), 2_000),
+            "5h: 0%"
         );
     }
 

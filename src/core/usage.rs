@@ -51,7 +51,7 @@ impl LimitWindow {
         f32::from(self.used_tenths) / 10.0
     }
 
-    /// A window whose reset has already passed is treated as unused.
+    /// Expired data, not a display instruction. Flyout text uses [`is_current`].
     #[must_use]
     pub fn effective(self, now_ms: u64) -> Self {
         if self.resets_at_ms != 0 && self.resets_at_ms <= now_ms {
@@ -75,16 +75,26 @@ impl LimitWindow {
     }
 }
 
-/// Flyout label for the Claude Fable weekly bucket.
+/// Flyout label for a rate-limit window.
 ///
 /// Expired / unknown reset times are "—" — never a fabricated 0%.
+/// Missing windows use the same dash so a failed fetch cannot look unused.
+#[must_use]
+pub fn format_limit_label(name: &str, window: Option<LimitWindow>, now_ms: u64) -> String {
+    match window {
+        Some(window) if window.is_current(now_ms) => {
+            format!("{name}: {:.0}%", window.used_percent())
+        }
+        _ => format!("{name}: —"),
+    }
+}
+
+/// Flyout label for the Claude Fable weekly bucket.
+///
+/// Same freshness contract as [`format_limit_label`].
 #[must_use]
 pub fn format_fable_limit_label(window: LimitWindow, now_ms: u64) -> String {
-    if window.is_current(now_ms) {
-        format!("Fable: {:.0}%", window.used_percent())
-    } else {
-        "Fable: —".to_owned()
-    }
+    format_limit_label("Fable", Some(window), now_ms)
 }
 
 /// Codex banked reset count. Hidden when the field is absent or zero.
@@ -637,9 +647,9 @@ pub fn days_to_ymd(days: i64) -> (i32, u8, u8) {
 mod tests {
     use super::{
         cost_cents, days_to_ymd, format_banked_reset_label, format_compact_token_count,
-        format_fable_limit_label, format_plan_label, is_long_context_request, local_ymd,
-        parse_rfc3339_ms, resolve_codex_model, windows_tz_bias_minutes, ymd_iso, ymd_key,
-        LimitWindow, ProviderUsage, TokenUsage,
+        format_fable_limit_label, format_limit_label, format_plan_label, is_long_context_request,
+        local_ymd, parse_rfc3339_ms, resolve_codex_model, windows_tz_bias_minutes, ymd_iso,
+        ymd_key, LimitWindow, ProviderUsage, TokenUsage,
     };
 
     #[test]
@@ -818,6 +828,16 @@ mod tests {
         assert_eq!(format_fable_limit_label(unknown, 1), "Fable: —");
         assert!(!format_fable_limit_label(window, 1_000).contains("0%"));
         assert!(!format_fable_limit_label(unknown, 1).contains("0%"));
+        assert_eq!(format_limit_label("5h", Some(window), 999), "5h: 41%");
+        assert_eq!(format_limit_label("5h", Some(window), 1_000), "5h: —");
+        assert_eq!(format_limit_label("7d", Some(unknown), 1), "7d: —");
+        assert_eq!(format_limit_label("5h", None, 1), "5h: —");
+        assert_ne!(format_limit_label("5h", Some(window), 1_000), "5h: 0%");
+        assert_ne!(format_limit_label("7d", Some(window), 1_000), "7d: 0%");
+        assert_eq!(
+            format_limit_label("Fable", Some(window), 1_000),
+            format_fable_limit_label(window, 1_000)
+        );
     }
 
     #[test]
