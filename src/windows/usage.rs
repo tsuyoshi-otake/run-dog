@@ -40,8 +40,9 @@ use windows_sys::Win32::{
 };
 
 use crate::core::{
-    cost_cents, local_ymd, ymd_iso, ymd_key, FileCheckpointCursor, FileCheckpointKey, LimitWindow,
-    ProviderUsage, TokenUsage, UsageCheckpoint, UsageSnapshot,
+    cost_cents, decide_codex_event, local_ymd, ymd_iso, ymd_key, CodexTokenTotals,
+    CodexUsageDecision, FileCheckpointCursor, FileCheckpointKey, LimitWindow, ProviderUsage,
+    TokenUsage, UsageCheckpoint, UsageSnapshot,
 };
 
 pub const USAGE_TIMER_ID: usize = 4;
@@ -84,6 +85,7 @@ struct FileCursor {
     offset: u64,
     last_stat_ms: u64,
     last_model: Option<String>,
+    last_codex_total: Option<CodexTokenTotals>,
     kind: SourceKind,
 }
 
@@ -334,13 +336,21 @@ impl UsageCollector {
             else {
                 continue;
             };
-            files.insert(
-                key,
-                FileCheckpointCursor {
-                    offset: cursor.offset,
-                    size: cursor.size,
-                },
-            );
+            let mut file_cursor = FileCheckpointCursor {
+                offset: cursor.offset,
+                size: cursor.size,
+                ..FileCheckpointCursor::default()
+            };
+            if let Some(total) = cursor.last_codex_total {
+                file_cursor.has_codex_total = true;
+                file_cursor.codex_total_input = total.input;
+                file_cursor.codex_total_cached = total.cached;
+                file_cursor.codex_total_output = total.output;
+            }
+            if cursor.kind == SourceKind::Codex {
+                file_cursor.last_codex_model = cursor.last_model.clone();
+            }
+            files.insert(key, file_cursor);
         }
         UsageCheckpoint {
             month_start: window.month_start,
@@ -350,6 +360,11 @@ impl UsageCollector {
             snapshot: self.snapshot,
             files,
         }
+    }
+
+    #[cfg(test)]
+    fn test_checkpoint(&self, now_ms: u64) -> UsageCheckpoint {
+        self.build_checkpoint(day_window(now_ms))
     }
 
     fn persist_checkpoint_if_needed(&mut self, window: DayWindow) {
@@ -498,7 +513,22 @@ impl UsageCollector {
                     mtime_ms,
                     offset,
                     last_stat_ms: 0,
-                    last_model: None,
+                    last_model: restored_codex_model(
+                        &self.file_checkpoint,
+                        path,
+                        &self.claude_dir,
+                        &self.codex_home,
+                        kind,
+                        size,
+                    ),
+                    last_codex_total: restored_codex_total(
+                        &self.file_checkpoint,
+                        path,
+                        &self.claude_dir,
+                        &self.codex_home,
+                        kind,
+                        size,
+                    ),
                     kind,
                 });
                 if size > offset {
@@ -515,7 +545,7 @@ impl UsageCollector {
             return 0;
         };
         let max_bytes = self.byte_budget();
-        let (kind, offset, previous_model) = {
+        let (kind, offset, previous_model, mut previous_codex_total) = {
             let Some(cursor) = self.files.get_mut(path) else {
                 return 0;
             };
@@ -523,13 +553,19 @@ impl UsageCollector {
             if size < cursor.offset {
                 cursor.offset = 0;
                 cursor.last_model = None;
+                cursor.last_codex_total = None;
             }
             if size == cursor.offset {
                 cursor.size = size;
                 cursor.mtime_ms = mtime_ms;
                 return 0;
             }
-            (cursor.kind, cursor.offset, cursor.last_model.clone())
+            (
+                cursor.kind,
+                cursor.offset,
+                cursor.last_model.clone(),
+                cursor.last_codex_total,
+            )
         };
         let chunk = read_appended(
             path,
@@ -558,6 +594,18 @@ impl UsageCollector {
         // Count every in-month event. A global timestamp watermark would drop
         // older JSONL after a newer file is scanned first (Codex catch-up).
         for (event, key) in chunk.events.into_iter().zip(chunk.dedupe) {
+            if kind == SourceKind::Codex {
+                if let Some(last) = event.codex_last {
+                    let (decision, next) =
+                        decide_codex_event(previous_codex_total, last, event.codex_total);
+                    previous_codex_total = next;
+                    match decision {
+                        CodexUsageDecision::Count(_) => {}
+                        CodexUsageDecision::IgnoreReplay
+                        | CodexUsageDecision::IgnoreInheritedBaseline => continue,
+                    }
+                }
+            }
             if let Some(key) = key {
                 if !self.claude_keys.insert(key) {
                     continue;
@@ -588,6 +636,7 @@ impl UsageCollector {
             self.last_collected_ms = self.last_collected_ms.max(event.timestamp_ms);
             self.checkpoint_dirty = true;
         }
+        cursor.last_codex_total = previous_codex_total;
         chunk.consumed
     }
 
@@ -798,6 +847,8 @@ struct ParsedEvent {
     model: String,
     timestamp_ms: u64,
     usage: TokenUsage,
+    codex_last: Option<CodexTokenTotals>,
+    codex_total: Option<CodexTokenTotals>,
 }
 
 fn is_hot(cursor: &FileCursor, now_ms: u64) -> bool {
@@ -1304,6 +1355,8 @@ fn parse_claude_line(line: &str) -> Option<(ParsedEvent, u64)> {
                 cache_write_1h,
                 ..TokenUsage::default()
             },
+            codex_last: None,
+            codex_total: None,
         },
         key,
     ))
@@ -1329,6 +1382,20 @@ struct CodexPayload {
 #[derive(Deserialize)]
 struct CodexInfo {
     last_token_usage: Option<CodexTokens>,
+    total_token_usage: Option<CodexTokens>,
+}
+
+fn codex_tokens_to_totals(tokens: &CodexTokens) -> CodexTokenTotals {
+    let input = tokens.input_tokens.unwrap_or(0);
+    let cached = tokens.cached_input_tokens.unwrap_or(0).min(input);
+    CodexTokenTotals {
+        input,
+        cached,
+        output: tokens
+            .output_tokens
+            .unwrap_or(0)
+            .saturating_add(tokens.reasoning_output_tokens.unwrap_or(0)),
+    }
 }
 
 #[derive(Deserialize)]
@@ -1372,19 +1439,12 @@ fn parse_codex_usage_line(line: &str, model: Option<&str>) -> Option<ParsedEvent
         return None;
     }
     let model = crate::core::resolve_codex_model(model?);
-    let last = payload.info?.last_token_usage?;
-    let raw_input = last.input_tokens.unwrap_or(0);
-    let cached = last.cached_input_tokens.unwrap_or(0).min(raw_input);
-    let mut usage = TokenUsage {
-        input: raw_input - cached,
-        cached_input: cached,
-        output: last
-            .output_tokens
-            .unwrap_or(0)
-            .saturating_add(last.reasoning_output_tokens.unwrap_or(0)),
-        ..TokenUsage::default()
-    };
-    if crate::core::is_long_context_request(model, raw_input) {
+    let info = payload.info?;
+    let last = info.last_token_usage?;
+    let last_totals = codex_tokens_to_totals(&last);
+    let total_totals = info.total_token_usage.as_ref().map(codex_tokens_to_totals);
+    let mut usage = last_totals.to_usage();
+    if crate::core::is_long_context_request(model, last_totals.input) {
         usage.long_context_input = usage.input;
         usage.long_context_cached_input = usage.cached_input;
         usage.long_context_output = usage.output;
@@ -1393,6 +1453,8 @@ fn parse_codex_usage_line(line: &str, model: Option<&str>) -> Option<ParsedEvent
         model: model.to_owned(),
         timestamp_ms: parse_timestamp(rec.timestamp.as_deref()?)?,
         usage,
+        codex_last: Some(last_totals),
+        codex_total: total_totals,
     })
 }
 
@@ -1856,6 +1918,42 @@ fn restored_file_offset(
     cursor.offset.min(size)
 }
 
+fn restored_codex_model(
+    checkpoint: &HashMap<FileCheckpointKey, FileCheckpointCursor>,
+    path: &Path,
+    claude_dir: &Path,
+    codex_home: &Path,
+    kind: SourceKind,
+    size: u64,
+) -> Option<String> {
+    let key = file_checkpoint_key(path, claude_dir, codex_home, kind)?;
+    let cursor = checkpoint.get(&key)?;
+    if size < cursor.size {
+        return None;
+    }
+    cursor.last_codex_model.clone()
+}
+
+fn restored_codex_total(
+    checkpoint: &HashMap<FileCheckpointKey, FileCheckpointCursor>,
+    path: &Path,
+    claude_dir: &Path,
+    codex_home: &Path,
+    kind: SourceKind,
+    size: u64,
+) -> Option<CodexTokenTotals> {
+    let key = file_checkpoint_key(path, claude_dir, codex_home, kind)?;
+    let cursor = checkpoint.get(&key)?;
+    if !cursor.has_codex_total || size < cursor.size {
+        return None;
+    }
+    Some(CodexTokenTotals {
+        input: cursor.codex_total_input,
+        cached: cursor.codex_total_cached,
+        output: cursor.codex_total_output,
+    })
+}
+
 fn path_mtime_ms(path: &Path) -> Option<u64> {
     let modified = fs::metadata(path).ok()?.modified().ok()?;
     Some(modified.duration_since(UNIX_EPOCH).ok()?.as_millis() as u64)
@@ -1880,8 +1978,12 @@ mod tests {
         parse_codex_usage_line, parse_wham_usage_response, persist_claude_credentials,
         read_claude_credentials, read_regular_file, unix_now_ms, UsageCollector, UsageTick,
     };
-    use crate::core::{local_hms, local_ymd};
-    use std::{fs, ptr};
+    use crate::core::{local_hms, local_ymd, UsageCheckpoint};
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        ptr,
+    };
 
     #[test]
     fn component_claude_assistant_line_extracts_tokens_and_fast_sku() {
@@ -1981,6 +2083,376 @@ mod tests {
                 Some(sample_claude_credentials().as_str())
             );
         }
+    }
+
+    fn current_codex_session(home: &Path, name: &str) -> PathBuf {
+        let now = unix_now_ms();
+        let window = super::day_window(now);
+        let (year, month, _) = local_ymd(now, window.bias_minutes);
+        let dir = super::codex_month_dir(home, year, month);
+        fs::create_dir_all(&dir).expect("codex month");
+        dir.join(name)
+    }
+
+    fn current_stamp() -> String {
+        let now = unix_now_ms();
+        let (year, month, day) = local_ymd(now, 0);
+        let (hour, minute) = local_hms(now, 0);
+        format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:00Z")
+    }
+
+    fn token_count_line(
+        stamp: &str,
+        last_in: u64,
+        last_cached: u64,
+        last_out: u64,
+        total_in: u64,
+        total_cached: u64,
+        total_out: u64,
+    ) -> String {
+        format!(
+            r#"{{"type":"event_msg","timestamp":"{stamp}","payload":{{"type":"token_count","info":{{"last_token_usage":{{"input_tokens":{last_in},"cached_input_tokens":{last_cached},"output_tokens":{last_out}}},"total_token_usage":{{"input_tokens":{total_in},"cached_input_tokens":{total_cached},"output_tokens":{total_out}}}}}}}}}"#
+        )
+    }
+
+    fn token_count_line_no_total(
+        stamp: &str,
+        last_in: u64,
+        last_cached: u64,
+        last_out: u64,
+    ) -> String {
+        format!(
+            r#"{{"type":"event_msg","timestamp":"{stamp}","payload":{{"type":"token_count","info":{{"last_token_usage":{{"input_tokens":{last_in},"cached_input_tokens":{last_cached},"output_tokens":{last_out}}}}}}}}}"#
+        )
+    }
+
+    fn token_count_with_limits(
+        stamp: &str,
+        last_in: u64,
+        last_cached: u64,
+        last_out: u64,
+        total_in: u64,
+        total_cached: u64,
+        total_out: u64,
+    ) -> String {
+        format!(
+            r#"{{"type":"event_msg","timestamp":"{stamp}","payload":{{"type":"token_count","info":{{"last_token_usage":{{"input_tokens":{last_in},"cached_input_tokens":{last_cached},"output_tokens":{last_out}}},"total_token_usage":{{"input_tokens":{total_in},"cached_input_tokens":{total_cached},"output_tokens":{total_out}}}}},"rate_limits":{{"plan_type":"pro","primary":{{"used_percent":5.0,"resets_at":1780000000,"window_minutes":300}},"secondary":{{"used_percent":21.5,"resets_at":1780500000,"window_minutes":10080}}}}}}}}"#
+        )
+    }
+
+    const TURN_CONTEXT: &str = r#"{"type":"turn_context","payload":{"model":"gpt-5.4"}}"#;
+
+    fn write_session(home: &Path, name: &str, lines: &[String]) -> PathBuf {
+        let session = current_codex_session(home, name);
+        let mut body = String::new();
+        body.push_str(TURN_CONTEXT);
+        body.push('\n');
+        for line in lines {
+            body.push_str(line);
+            body.push('\n');
+        }
+        fs::write(&session, body).expect("jsonl");
+        session
+    }
+
+    fn append_lines(session: &Path, lines: &[String]) {
+        use std::io::Write;
+        fs::OpenOptions::new()
+            .append(true)
+            .open(session)
+            .and_then(|mut file| {
+                let mut body = String::new();
+                for line in lines {
+                    body.push_str(line);
+                    body.push('\n');
+                }
+                file.write_all(body.as_bytes())
+            })
+            .expect("append");
+    }
+
+    fn new_codex_collector(home: &Path) -> UsageCollector {
+        UsageCollector::with_dirs(home.join("unused-claude"), home.to_path_buf(), false)
+    }
+
+    fn tick_idle(collector: &mut UsageCollector) -> UsageTick {
+        let mut last = UsageTick::MoreWork;
+        for _ in 0..32 {
+            last = collector.tick(ptr::null_mut());
+            if last == UsageTick::Idle && !collector.catch_up {
+                break;
+            }
+        }
+        last
+    }
+
+    fn collect_codex(home: &Path) -> crate::core::ProviderUsage {
+        let mut collector =
+            UsageCollector::with_dirs(home.join("unused-claude"), home.to_path_buf(), false);
+        assert_eq!(tick_idle(&mut collector), UsageTick::Idle);
+        collector.snapshot().codex
+    }
+
+    #[test]
+    fn component_codex_identical_snapshot_is_not_double_counted() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-codex-snap-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let stamp = current_stamp();
+        let turn = token_count_line(&stamp, 80, 20, 5, 80, 20, 5);
+        write_session(&root, "rollout.jsonl", &[turn.clone(), turn]);
+        let usage = collect_codex(&root);
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(usage.month_input_tokens, 80);
+        assert_eq!(usage.month_output_tokens, 5);
+    }
+
+    #[test]
+    fn component_codex_rate_limit_only_renotify_is_not_counted() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-codex-limits-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let stamp = current_stamp();
+        write_session(
+            &root,
+            "rollout.jsonl",
+            &[
+                token_count_line(&stamp, 80, 20, 5, 80, 20, 5),
+                token_count_with_limits(&stamp, 80, 20, 5, 80, 20, 5),
+            ],
+        );
+        let usage = collect_codex(&root);
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(usage.month_input_tokens, 80);
+        assert_eq!(usage.month_output_tokens, 5);
+    }
+
+    #[test]
+    fn component_codex_cumulative_usage_counts_last_turn_only() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-codex-cum-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let stamp = current_stamp();
+        write_session(
+            &root,
+            "rollout.jsonl",
+            &[
+                token_count_line(&stamp, 80, 20, 5, 80, 20, 5),
+                token_count_line(&stamp, 40, 10, 2, 120, 30, 7),
+            ],
+        );
+        let usage = collect_codex(&root);
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(usage.month_input_tokens, 120);
+        assert_eq!(usage.month_output_tokens, 7);
+    }
+
+    #[test]
+    fn component_codex_replay_after_idle_does_not_add_tokens() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-codex-replay-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let stamp = current_stamp();
+        let session = write_session(
+            &root,
+            "rollout.jsonl",
+            &[token_count_line(&stamp, 80, 20, 5, 80, 20, 5)],
+        );
+        let mut collector = new_codex_collector(&root);
+        assert_eq!(tick_idle(&mut collector), UsageTick::Idle);
+        assert_eq!(collector.snapshot().codex.month_input_tokens, 80);
+        append_lines(&session, &[token_count_line(&stamp, 80, 20, 5, 80, 20, 5)]);
+        assert_eq!(tick_idle(&mut collector), UsageTick::Idle);
+        let usage = collector.snapshot().codex;
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(usage.month_input_tokens, 80);
+        assert_eq!(usage.month_output_tokens, 5);
+    }
+
+    #[test]
+    fn component_codex_fork_inherited_snapshot_is_baseline_only() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-codex-fork-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let stamp = current_stamp();
+        write_session(
+            &root,
+            "child.jsonl",
+            &[
+                token_count_line(&stamp, 80, 20, 5, 160, 40, 10),
+                token_count_line(&stamp, 40, 0, 3, 200, 40, 13),
+            ],
+        );
+        let usage = collect_codex(&root);
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(usage.month_input_tokens, 40);
+        assert_eq!(usage.month_output_tokens, 3);
+    }
+
+    #[test]
+    fn component_codex_resume_renotify_is_replay() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-codex-resume-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let stamp = current_stamp();
+        write_session(
+            &root,
+            "resumed.jsonl",
+            &[
+                token_count_line(&stamp, 80, 20, 5, 80, 20, 5),
+                token_count_line(&stamp, 80, 20, 5, 80, 20, 5),
+            ],
+        );
+        let usage = collect_codex(&root);
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(usage.month_input_tokens, 80);
+        assert_eq!(usage.month_output_tokens, 5);
+    }
+
+    #[test]
+    fn component_codex_process_restart_keeps_watermark() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-codex-restart-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let now = unix_now_ms();
+        let stamp = current_stamp();
+        let session = write_session(
+            &root,
+            "rollout.jsonl",
+            &[token_count_line(&stamp, 80, 20, 5, 80, 20, 5)],
+        );
+        let mut first = new_codex_collector(&root);
+        assert_eq!(tick_idle(&mut first), UsageTick::Idle);
+        assert_eq!(first.snapshot().codex.month_input_tokens, 80);
+        let checkpoint = first.test_checkpoint(now);
+        assert!(
+            checkpoint.files.values().any(|cursor| {
+                cursor.has_codex_total
+                    && cursor.codex_total_input == 80
+                    && cursor.last_codex_model.as_deref() == Some("gpt-5.4")
+            }),
+            "checkpoint files: {:?}",
+            checkpoint.files
+        );
+        let checkpoint =
+            UsageCheckpoint::decode(&checkpoint.encode()).expect("restart checkpoint text");
+        append_lines(&session, &[token_count_line(&stamp, 40, 10, 2, 120, 30, 7)]);
+        let window = super::day_window(now);
+        let mut restored = new_codex_collector(&root);
+        restored.apply_checkpoint(window, checkpoint);
+        assert_eq!(restored.snapshot().codex.month_input_tokens, 80);
+        assert_eq!(tick_idle(&mut restored), UsageTick::Idle);
+        let usage = restored.snapshot().codex;
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(usage.month_input_tokens, 120);
+        assert_eq!(usage.month_output_tokens, 7);
+    }
+
+    #[test]
+    fn component_codex_out_of_order_snapshot_is_treated_as_reset_not_a_defect() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-codex-ooo-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let stamp = current_stamp();
+        write_session(
+            &root,
+            "rollout.jsonl",
+            &[
+                token_count_line(&stamp, 80, 20, 5, 80, 20, 5),
+                token_count_line(&stamp, 40, 10, 2, 120, 30, 7),
+                token_count_line(&stamp, 80, 20, 5, 80, 20, 5),
+            ],
+        );
+        let usage = collect_codex(&root);
+        let _ = fs::remove_dir_all(&root);
+        // NOT_REPRODUCED as a distinct defect: a later smaller total cannot be
+        // distinguished from a counter reset, so it is counted as a new epoch.
+        // Codex is not known to emit delayed snapshots after a larger total.
+        assert_eq!(usage.month_input_tokens, 200);
+        assert_eq!(usage.month_output_tokens, 12);
+    }
+
+    #[test]
+    fn component_codex_counter_reset_counts_new_epoch() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-codex-reset-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let stamp = current_stamp();
+        write_session(
+            &root,
+            "rollout.jsonl",
+            &[
+                token_count_line(&stamp, 80, 0, 5, 80, 0, 5),
+                token_count_line(&stamp, 10, 0, 1, 10, 0, 1),
+            ],
+        );
+        let usage = collect_codex(&root);
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(usage.month_input_tokens, 90);
+        assert_eq!(usage.month_output_tokens, 6);
+    }
+
+    #[test]
+    fn component_codex_same_tuple_different_request_counts_twice() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-codex-tuple-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let stamp = current_stamp();
+        write_session(
+            &root,
+            "rollout.jsonl",
+            &[
+                token_count_line(&stamp, 80, 20, 5, 80, 20, 5),
+                token_count_line(&stamp, 80, 20, 5, 160, 40, 10),
+            ],
+        );
+        let usage = collect_codex(&root);
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(usage.month_input_tokens, 160);
+        assert_eq!(usage.month_output_tokens, 10);
+    }
+
+    #[test]
+    fn component_codex_missing_total_counts_each_last_without_replay_claim() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-codex-nototal-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let stamp = current_stamp();
+        write_session(
+            &root,
+            "rollout.jsonl",
+            &[
+                token_count_line_no_total(&stamp, 80, 20, 5),
+                token_count_line_no_total(&stamp, 80, 20, 5),
+            ],
+        );
+        let usage = collect_codex(&root);
+        let _ = fs::remove_dir_all(&root);
+        // Incomplete identity: do not invent a replay key from the last tuple.
+        assert_eq!(usage.month_input_tokens, 160);
+        assert_eq!(usage.month_output_tokens, 10);
     }
 
     #[test]
@@ -2202,6 +2674,7 @@ mod tests {
                 FileCheckpointCursor {
                     offset: file_size,
                     size: file_size,
+                    ..FileCheckpointCursor::default()
                 },
             )]),
         };
