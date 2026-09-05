@@ -39,9 +39,9 @@ use windows_sys::{
 use crate::{
     application::TrayIcon,
     core::{
-        format_compact_token_count, local_hms, local_ymd, GpuStatus, LimitWindow, MemoryStatus,
-        ProcessStatus, ProviderUsage, ResolvedTheme, Sparkline, StorageStatus, UsageSnapshot,
-        SPARKLINE_CAPACITY,
+        format_banked_reset_label, format_compact_token_count, format_fable_limit_label, local_hms,
+        local_ymd, GpuStatus, LimitWindow, MemoryStatus, ProcessStatus, ProviderUsage,
+        ResolvedTheme, Sparkline, StorageStatus, UsageSnapshot, SPARKLINE_CAPACITY,
     },
 };
 
@@ -272,11 +272,22 @@ fn position_near_icon(owner: HWND, width: i32, height: i32) -> (i32, i32) {
 
 fn window_size(dpi: i32, usage: Option<UsageSnapshot>, show_gpu: bool) -> (i32, i32) {
     let blocks = usage.map(visible_usage_count).unwrap_or(0) as i32;
+    let extra = usage.map(extra_usage_block_units).unwrap_or(0);
     let gpu = i32::from(show_gpu) * CARD_GPU_BLOCK_HEIGHT;
     (
         px(CARD_WIDTH, dpi),
-        px(CARD_HEIGHT + gpu + CARD_USAGE_BLOCK_HEIGHT * blocks, dpi),
+        px(
+            CARD_HEIGHT + gpu + CARD_USAGE_BLOCK_HEIGHT * blocks + extra,
+            dpi,
+        ),
     )
+}
+
+fn extra_usage_block_units(usage: UsageSnapshot) -> i32 {
+    const METRIC: i32 = 24;
+    const LINE: i32 = 15;
+    i32::from(usage.claude.fable.is_some()) * METRIC
+        + i32::from(usage.codex.shows_banked_reset()) * LINE
 }
 
 fn visible_usage_count(usage: UsageSnapshot) -> usize {
@@ -519,7 +530,7 @@ fn paint(hwnd: HWND) {
     let usage_rows = visible_usage_rows(state.usage);
     let last = usage_rows.len().saturating_sub(1);
     for (index, row) in usage_rows.iter().enumerate() {
-        let block_bottom = top + usage_block_height(&layout);
+        let block_bottom = top + usage_block_height(&layout, row.usage);
         paint_usage_row(
             hdc,
             RECT {
@@ -991,6 +1002,34 @@ fn paint_usage_row(
         palette,
         layout,
     );
+    if let Some(window) = usage.fable {
+        metric_top = paint_fable_metric(
+            hdc,
+            RECT {
+                left: content_left,
+                top: metric_top,
+                right: row.right,
+                bottom: metric_top + layout.detail_h + layout.bar_h,
+            },
+            window,
+            palette,
+            layout,
+        );
+    }
+    if let Some(label) = format_banked_reset_label(usage.banked_reset_available) {
+        draw_text(
+            hdc,
+            RECT {
+                left: content_left,
+                top: metric_top,
+                right: row.right,
+                bottom: metric_top + layout.detail_h,
+            },
+            &label,
+            0,
+        );
+        metric_top += layout.detail_h;
+    }
 
     draw_text(
         hdc,
@@ -1052,9 +1091,15 @@ fn format_self_usage(process: Option<ProcessStatus>) -> String {
     }
 }
 
-fn usage_block_height(layout: &Layout) -> i32 {
+fn usage_block_height(layout: &Layout, usage: ProviderUsage) -> i32 {
     let metric = layout.detail_h + layout.bar_h + px(3, layout.dpi);
-    layout.title_h + metric * 2 + layout.detail_h + px(2, layout.dpi)
+    let metrics = 2 + i32::from(usage.fable.is_some());
+    let banked = if usage.shows_banked_reset() {
+        layout.detail_h
+    } else {
+        0
+    };
+    layout.title_h + metric * metrics + banked + layout.detail_h + px(2, layout.dpi)
 }
 
 fn paint_limit_metric(
@@ -1076,6 +1121,45 @@ fn paint_limit_metric(
         }
         None => format!("{name}: —"),
     };
+    paint_limit_label(
+        hdc,
+        rect,
+        &label,
+        window.map(LimitWindow::used_percent).unwrap_or(0.0),
+        palette,
+        layout,
+    )
+}
+
+fn paint_fable_metric(
+    hdc: windows_sys::Win32::Graphics::Gdi::HDC,
+    rect: RECT,
+    window: LimitWindow,
+    palette: &Palette,
+    layout: &Layout,
+) -> i32 {
+    let now_ms = flyout_now_ms();
+    let mut label = format_fable_limit_label(window, now_ms);
+    let used = if window.is_current(now_ms) {
+        let reset = format_reset(window);
+        if !reset.is_empty() {
+            label = format!("{label}  {reset}");
+        }
+        window.used_percent()
+    } else {
+        0.0
+    };
+    paint_limit_label(hdc, rect, &label, used, palette, layout)
+}
+
+fn paint_limit_label(
+    hdc: windows_sys::Win32::Graphics::Gdi::HDC,
+    rect: RECT,
+    label: &str,
+    used_percent: f32,
+    palette: &Palette,
+    layout: &Layout,
+) -> i32 {
     let text_bottom = rect.top + layout.detail_h;
     draw_text(
         hdc,
@@ -1085,7 +1169,7 @@ fn paint_limit_metric(
             right: rect.right,
             bottom: text_bottom,
         },
-        &label,
+        label,
         0,
     );
     let bar = RECT {
@@ -1094,14 +1178,15 @@ fn paint_limit_metric(
         right: rect.right,
         bottom: text_bottom + px(1, layout.dpi) + layout.bar_h,
     };
-    draw_progress_bar(
-        hdc,
-        bar,
-        window.map(LimitWindow::used_percent).unwrap_or(0.0),
-        palette,
-        layout.dpi,
-    );
+    draw_progress_bar(hdc, bar, used_percent, palette, layout.dpi);
     bar.bottom + px(3, layout.dpi)
+}
+
+fn flyout_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn format_reset(window: LimitWindow) -> String {
@@ -1579,11 +1664,14 @@ fn wide(value: &str) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::{
-        format_bytes, format_gpu_capacity, format_month_usage, format_percent, format_reset_local,
-        format_self_usage, gpu_details, visible_usage_count, window_size, CARD_GPU_BLOCK_HEIGHT,
-        CARD_HEIGHT, CARD_USAGE_BLOCK_HEIGHT, CARD_WIDTH,
+        extra_usage_block_units, format_bytes, format_gpu_capacity, format_month_usage,
+        format_percent, format_reset_local, format_self_usage, gpu_details, visible_usage_count,
+        window_size, CARD_GPU_BLOCK_HEIGHT, CARD_HEIGHT, CARD_USAGE_BLOCK_HEIGHT, CARD_WIDTH,
     };
-    use crate::core::{CpuLoad, LimitWindow, ProcessStatus, ProviderUsage, UsageSnapshot};
+    use crate::core::{
+        format_banked_reset_label, format_fable_limit_label, CpuLoad, LimitWindow, ProcessStatus,
+        ProviderUsage, UsageSnapshot,
+    };
 
     #[test]
     fn component_flyout_formatters_cover_unknown_and_scaled_values() {
@@ -1747,5 +1835,47 @@ mod tests {
             window_size(96, Some(usage), false),
             (CARD_WIDTH, CARD_HEIGHT + CARD_USAGE_BLOCK_HEIGHT * 2)
         );
+    }
+
+    #[test]
+    fn component_flyout_grows_for_fable_and_banked_reset_rows() {
+        let usage = UsageSnapshot {
+            claude: ProviderUsage {
+                today_cents: 1,
+                fable: Some(LimitWindow {
+                    used_tenths: 410,
+                    resets_at_ms: 1_787_011_200_000,
+                    window_minutes: 10_080,
+                }),
+                ..ProviderUsage::default()
+            },
+            codex: ProviderUsage {
+                month_cents: 125,
+                banked_reset_available: Some(2),
+                ..ProviderUsage::default()
+            },
+            ..UsageSnapshot::default()
+        };
+        assert_eq!(extra_usage_block_units(usage), 24 + 15);
+        assert_eq!(
+            window_size(96, Some(usage), false),
+            (
+                CARD_WIDTH,
+                CARD_HEIGHT + CARD_USAGE_BLOCK_HEIGHT * 2 + 24 + 15
+            )
+        );
+        assert_eq!(
+            format_fable_limit_label(usage.claude.fable.unwrap(), 1_787_011_200_000),
+            "Fable: —"
+        );
+        assert_eq!(
+            format_fable_limit_label(usage.claude.fable.unwrap(), 1_787_011_199_999),
+            "Fable: 41%"
+        );
+        assert_eq!(
+            format_banked_reset_label(usage.codex.banked_reset_available).as_deref(),
+            Some("Banked Reset: 2")
+        );
+        assert_eq!(format_banked_reset_label(None), None);
     }
 }
