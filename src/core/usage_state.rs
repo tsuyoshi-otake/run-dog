@@ -5,7 +5,10 @@
 
 use std::collections::HashSet;
 
-use super::{CodexTokenTotals, FileCheckpointKey, ProviderUsage, UsageCheckpoint, UsageSnapshot};
+use super::{
+    hex_decode, retain_keys_for_month, ClaudeDedupeKey, CodexTokenTotals, FileCheckpointKey,
+    ProviderUsage, UsageCheckpoint, UsageSnapshot,
+};
 
 pub const USAGE_STATE_HEADER: &str = "rundog-usage-state-1";
 pub const USAGE_STATE_SCHEMA_VERSION: u32 = 1;
@@ -54,7 +57,7 @@ pub struct UsageState {
     pub schema_version: u32,
     pub aggregate: UsageAggregate,
     pub cursors: Vec<UsageCursor>,
-    pub claude_keys: HashSet<u64>,
+    pub claude_keys: HashSet<ClaudeDedupeKey>,
 }
 
 impl UsageState {
@@ -166,10 +169,14 @@ impl UsageState {
                 }
             }
         }
-        let mut keys: Vec<u64> = self.claude_keys.iter().copied().collect();
-        keys.sort_unstable();
+        let mut keys: Vec<ClaudeDedupeKey> = self.claude_keys.iter().copied().collect();
+        keys.sort_by(|left, right| {
+            left.digest
+                .cmp(&right.digest)
+                .then(left.month.cmp(&right.month))
+        });
         for key in keys {
-            out.push_str(&format!("ckey={key}\n"));
+            out.push_str(&format!("dkey={}\t{}\n", key.encode_hex(), key.month));
         }
         out
     }
@@ -239,8 +246,10 @@ impl UsageState {
                 models.push(parse_codex_model_line(value)?);
             } else if let Some(value) = line.strip_prefix("codex_total=") {
                 totals.push(parse_codex_total_line(value)?);
-            } else if let Some(value) = line.strip_prefix("ckey=") {
-                claude_keys.insert(value.parse().ok()?);
+            } else if let Some(value) = line.strip_prefix("dkey=") {
+                claude_keys.insert(parse_dkey_line(value)?);
+            } else if line.starts_with("ckey=") {
+                // Legacy DefaultHasher u64. Not a disk contract; ignore.
             } else if line.starts_with("file=") {
                 return None;
             }
@@ -302,6 +311,10 @@ impl UsageState {
             cursors,
             claude_keys,
         })
+    }
+
+    pub fn prune_claude_keys_before_month(&mut self, month_start: u32) {
+        self.claude_keys = retain_keys_for_month(&self.claude_keys, month_start);
     }
 }
 
@@ -385,6 +398,17 @@ fn parse_codex_total_line(value: &str) -> Option<(CursorKind, String, CodexToken
     ))
 }
 
+fn parse_dkey_line(value: &str) -> Option<ClaudeDedupeKey> {
+    let parts: Vec<&str> = value.split('\t').collect();
+    if parts.len() != 2 {
+        return None;
+    }
+    Some(ClaudeDedupeKey {
+        digest: hex_decode(parts[0])?,
+        month: parts[1].parse().ok()?,
+    })
+}
+
 fn is_safe_codex_model(model: &str) -> bool {
     !model.is_empty()
         && model.len() <= 64
@@ -410,8 +434,8 @@ mod tests {
         usage_store_root_is_forbidden, CursorKind, UsageCursor, UsageState, USAGE_STATE_HEADER,
     };
     use crate::core::{
-        CodexTokenTotals, FileCheckpointCursor, FileCheckpointKey, ProviderUsage, UsageCheckpoint,
-        UsageSnapshot,
+        ClaudeDedupeKey, CodexTokenTotals, FileCheckpointCursor, FileCheckpointKey, ProviderUsage,
+        UsageCheckpoint, UsageSnapshot,
     };
     use std::path::Path;
 
@@ -442,7 +466,9 @@ mod tests {
                 last_model: None,
                 last_codex_total: None,
             }],
-            claude_keys: [7].into_iter().collect(),
+            claude_keys: [ClaudeDedupeKey::new("m", "r", 20_260_901)]
+                .into_iter()
+                .collect(),
         }
     }
 
@@ -496,10 +522,49 @@ mod tests {
     #[test]
     fn component_usage_state_named_prefix_is_not_a_positional_file_column() {
         let encoded = sample_state(true).encode();
+        let key = ClaudeDedupeKey::new("m", "r", 20_260_901);
         assert!(encoded.contains("prefix=c\tprojects/p/session.jsonl\t9\n"));
         assert!(encoded.contains("cursor=c\tprojects/p/session.jsonl\t8\t16\n"));
-        assert!(encoded.contains("ckey=7\n"));
+        assert!(encoded.contains(&format!("dkey={}\t20260901\n", key.encode_hex())));
+        assert!(!encoded.contains("ckey="));
         assert!(!encoded.contains("file="));
+        assert!(!encoded.contains("requestId"));
+        assert!(!encoded.contains("\tm\t"));
+    }
+
+    #[test]
+    fn component_usage_state_ignores_legacy_defaulthasher_ckey() {
+        let mut payload = sample_state(true).encode();
+        payload.push_str("ckey=7\n");
+        let decoded = UsageState::decode(&payload).expect("legacy ckey ignored");
+        assert!(!decoded
+            .claude_keys
+            .iter()
+            .any(|key| key.encode_hex() == "0000000000000007"));
+    }
+
+    #[test]
+    fn component_usage_state_rejects_positional_extra_dkey_columns() {
+        let mut payload = sample_state(true).encode();
+        let key = ClaudeDedupeKey::new("m", "r", 20_260_901);
+        payload = payload.replace(
+            &format!("dkey={}\t20260901\n", key.encode_hex()),
+            &format!("dkey={}\t20260901\tm1\tr1\n", key.encode_hex()),
+        );
+        assert!(UsageState::decode(&payload).is_none());
+    }
+
+    #[test]
+    fn component_usage_state_month_rollover_keeps_current_month_dedupe() {
+        let mut state = sample_state(true);
+        state
+            .claude_keys
+            .insert(ClaudeDedupeKey::new("old", "old", 20_260_801));
+        state.prune_claude_keys_before_month(20_260_901);
+        assert_eq!(state.claude_keys.len(), 1);
+        assert!(state
+            .claude_keys
+            .contains(&ClaudeDedupeKey::new("m", "r", 20_260_901)));
     }
 
     #[test]

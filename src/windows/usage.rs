@@ -40,10 +40,10 @@ use windows_sys::Win32::{
 };
 
 use crate::core::{
-    cost_cents, decide_codex_event, is_long_context_request, local_ymd, ymd_iso, ymd_key,
-    CodexTokenTotals, CodexUsageDecision, CursorKind, CursorRebuildReason, FileCheckpointKey,
-    LimitWindow, LoadStatus, PersistStatus, ProviderUsage, TokenUsage, UsageCursor, UsageSnapshot,
-    UsageState,
+    claude_dedupe_digest, cost_cents, decide_codex_event, is_long_context_request, local_ymd,
+    retain_keys_for_month, ymd_iso, ymd_key, ClaudeDedupeKey, CodexTokenTotals, CodexUsageDecision,
+    CursorKind, CursorRebuildReason, FileCheckpointKey, LimitWindow, LoadStatus, PersistStatus,
+    ProviderUsage, TokenUsage, UsageCursor, UsageSnapshot, UsageState,
 };
 
 #[cfg(test)]
@@ -122,7 +122,7 @@ pub struct UsageCollector {
     files: HashMap<PathBuf, FileCursor>,
     dirs: HashMap<PathBuf, DirListing>,
     discover: VecDeque<PathBuf>,
-    claude_keys: HashSet<u64>,
+    claude_keys: HashSet<ClaudeDedupeKey>,
     pending: VecDeque<PathBuf>,
     snapshot: UsageSnapshot,
     month_key: u32,
@@ -524,6 +524,7 @@ impl UsageCollector {
         self.snapshot.codex.month_cents = 0;
         self.snapshot.codex.month_input_tokens = 0;
         self.snapshot.codex.month_output_tokens = 0;
+        self.claude_keys = retain_keys_for_month(&self.claude_keys, window.month_start);
         self.checkpoint_dirty = true;
     }
 
@@ -737,8 +738,14 @@ impl UsageCollector {
         }
         // Count every in-month event. A global timestamp watermark would drop
         // older JSONL after a newer file is scanned first (Codex catch-up).
-        for (mut event, key) in chunk.events.into_iter().zip(chunk.dedupe) {
-            if let Some(key) = key {
+        for (mut event, digest) in chunk.events.into_iter().zip(chunk.dedupe) {
+            let day = ymd_key_from_unix(event.timestamp_ms, window.bias_minutes);
+            let (year, month, day_of_month) = local_ymd(event.timestamp_ms, window.bias_minutes);
+            if let Some(digest) = digest {
+                let key = ClaudeDedupeKey {
+                    digest,
+                    month: ymd_key(year, month, 1),
+                };
                 if !self.claude_keys.insert(key) {
                     continue;
                 }
@@ -765,8 +772,6 @@ impl UsageCollector {
                     }
                 }
             }
-            let day = ymd_key_from_unix(event.timestamp_ms, window.bias_minutes);
-            let (year, month, day_of_month) = local_ymd(event.timestamp_ms, window.bias_minutes);
             let day_iso = ymd_iso(year, month, day_of_month);
             let Some(cents) = cost_cents(&event.model, event.usage, Some(&day_iso)) else {
                 continue;
@@ -1287,7 +1292,7 @@ struct AppendedChunk {
     new_offset: u64,
     consumed: u64,
     events: Vec<ParsedEvent>,
-    dedupe: Vec<Option<u64>>,
+    dedupe: Vec<Option<[u8; 16]>>,
     limits: Option<ProviderUsage>,
     last_model: Option<String>,
 }
@@ -1386,7 +1391,7 @@ fn take_jsonl_line(
     line: &[u8],
     model: &mut Option<String>,
     events: &mut Vec<ParsedEvent>,
-    keys: &mut Vec<Option<u64>>,
+    keys: &mut Vec<Option<[u8; 16]>>,
     limits: &mut Option<ProviderUsage>,
 ) {
     let text = String::from_utf8_lossy(line);
@@ -1473,7 +1478,7 @@ struct ClaudeCacheCreation {
     ephemeral_1h_input_tokens: Option<u64>,
 }
 
-fn parse_claude_line(line: &str) -> Option<(ParsedEvent, u64)> {
+fn parse_claude_line(line: &str) -> Option<(ParsedEvent, [u8; 16])> {
     let rec: ClaudeAssistantLine = serde_json::from_str(line).ok()?;
     if rec.kind.as_deref() != Some("assistant") {
         return None;
@@ -1498,7 +1503,7 @@ fn parse_claude_line(line: &str) -> Option<(ParsedEvent, u64)> {
     } else {
         model
     };
-    let key = hash_key(
+    let key = claude_dedupe_digest(
         message.id.as_deref().unwrap_or(""),
         rec.request_id.as_deref().unwrap_or(""),
     );
@@ -2096,13 +2101,6 @@ fn ymd_to_days(year: i32, month: u8, day: u8) -> Option<u64> {
     let doy = (153 * m as u64 + 2) / 5 + u64::from(day) - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     Some((era as i64 * 146_097 + doe as i64 - 719_468) as u64)
-}
-
-fn hash_key(message_id: &str, request_id: &str) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    message_id.hash(&mut hasher);
-    request_id.hash(&mut hasher);
-    hasher.finish()
 }
 
 fn unix_now_ms() -> u64 {
@@ -3568,6 +3566,44 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         assert_eq!(cents, 500);
         assert!(!restored.catch_up);
+    }
+
+    fn store_blob_text(store_root: &Path) -> String {
+        let entry = fs::read_dir(store_root)
+            .expect("store")
+            .filter_map(Result::ok)
+            .find(|entry| entry.file_name().to_string_lossy().ends_with(".state"))
+            .expect("blob");
+        fs::read_to_string(entry.path()).expect("blob text")
+    }
+
+    #[test]
+    fn component_store_restart_rename_same_id_does_not_double() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-jsonl-dedupe-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let store_root = root.join("store");
+        let session = claude_session(&root);
+        let stamp = current_stamp();
+        fs::write(&session, format!("{}\n", claude_usage_line("a", &stamp))).expect("a");
+        let mut first = new_persisted_collector(&root, store_root.clone());
+        assert_eq!(tick_idle(&mut first), UsageTick::Idle);
+        assert_eq!(first.snapshot().claude.month_cents, 500);
+        let blob = store_blob_text(&store_root);
+        assert!(blob.contains("dkey="));
+        assert!(!blob.contains("ckey="));
+        assert!(!blob.contains("requestId"));
+        assert!(!blob.contains("message\":"));
+        let archived = session.with_file_name("archived.jsonl");
+        fs::rename(&session, &archived).expect("rename");
+        fs::write(&session, format!("{}\n", claude_usage_line("a", &stamp))).expect("recreate");
+        let mut restored = new_persisted_collector(&root, store_root);
+        assert_eq!(tick_idle(&mut restored), UsageTick::Idle);
+        let cents = restored.snapshot().claude.month_cents;
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(cents, 500);
     }
 
     #[test]
