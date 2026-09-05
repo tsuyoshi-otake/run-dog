@@ -484,6 +484,119 @@ fn model_matches(model: &str, key: &str) -> bool {
         && model[..model.len() - FAST.len()].starts_with(&key[..key.len() - FAST.len()])
 }
 
+/// Windows `TIME_ZONE_INFORMATION` composition.
+///
+/// `TIME_ZONE_ID_STANDARD` (1) adds `StandardBias`. `TIME_ZONE_ID_DAYLIGHT`
+/// (2) adds `DaylightBias`. Unknown / invalid keep `Bias` only — do not invent
+/// a DST transition.
+#[must_use]
+pub fn windows_tz_bias_minutes(
+    bias: i32,
+    standard_bias: i32,
+    daylight_bias: i32,
+    zone_id: u32,
+) -> i32 {
+    match zone_id {
+        1 => bias.saturating_add(standard_bias),
+        2 => bias.saturating_add(daylight_bias),
+        _ => bias,
+    }
+}
+
+/// Parse an RFC3339-like timestamp to Unix milliseconds (UTC).
+///
+/// Accepts `Z`, `+HH:MM`, `-HH:MM`, `+HHMM`, and `-HHMM`. A missing offset is
+/// not a unique instant and is rejected. The civil clock is never treated as
+/// UTC when an offset is present.
+#[must_use]
+pub fn parse_rfc3339_ms(value: &str) -> Option<u64> {
+    if value.len() < 20 {
+        return None;
+    }
+    let bytes = value.as_bytes();
+    if bytes.get(4) != Some(&b'-')
+        || bytes.get(7) != Some(&b'-')
+        || bytes.get(10) != Some(&b'T')
+        || bytes.get(13) != Some(&b':')
+        || bytes.get(16) != Some(&b':')
+    {
+        return None;
+    }
+    let year: i32 = value.get(0..4)?.parse().ok()?;
+    let month: u8 = value.get(5..7)?.parse().ok()?;
+    let day: u8 = value.get(8..10)?.parse().ok()?;
+    let hour: u8 = value.get(11..13)?.parse().ok()?;
+    let minute: u8 = value.get(14..16)?.parse().ok()?;
+    let second: u8 = value.get(17..19)?.parse().ok()?;
+    if hour > 23 || minute > 59 || second > 60 {
+        return None;
+    }
+    let mut idx = 19;
+    if bytes.get(idx) == Some(&b'.') {
+        idx += 1;
+        while idx < bytes.len() && bytes[idx].is_ascii_digit() {
+            idx += 1;
+        }
+    }
+    let offset_minutes = parse_rfc3339_offset(value.get(idx..)?)?;
+    let days = ymd_to_epoch_days(year, month, day)?;
+    let civil_ms = days
+        .saturating_mul(86_400)
+        .saturating_add(u64::from(hour) * 3_600)
+        .saturating_add(u64::from(minute) * 60)
+        .saturating_add(u64::from(second))
+        .saturating_mul(1_000);
+    let utc = i64::try_from(civil_ms)
+        .ok()?
+        .checked_sub(i64::from(offset_minutes) * 60_000)?;
+    u64::try_from(utc).ok()
+}
+
+fn parse_rfc3339_offset(value: &str) -> Option<i32> {
+    if value == "Z" || value == "z" {
+        return Some(0);
+    }
+    let sign = match value.as_bytes().first()? {
+        b'+' => 1,
+        b'-' => -1,
+        _ => return None,
+    };
+    let rest = value.get(1..)?;
+    let (hours, minutes) = if rest.len() == 5 && rest.as_bytes().get(2) == Some(&b':') {
+        (
+            rest.get(0..2)?.parse::<i32>().ok()?,
+            rest.get(3..5)?.parse::<i32>().ok()?,
+        )
+    } else if rest.len() == 4 {
+        (
+            rest.get(0..2)?.parse::<i32>().ok()?,
+            rest.get(2..4)?.parse::<i32>().ok()?,
+        )
+    } else {
+        return None;
+    };
+    if !(0..=23).contains(&hours) || !(0..=59).contains(&minutes) {
+        return None;
+    }
+    Some(sign * (hours * 60 + minutes))
+}
+
+fn ymd_to_epoch_days(year: i32, month: u8, day: u8) -> Option<u64> {
+    if !(1..=12).contains(&month) || day == 0 {
+        return None;
+    }
+    let (y, m) = if month <= 2 {
+        (year - 1, i32::from(month) + 9)
+    } else {
+        (year, i32::from(month) - 3)
+    };
+    let era = y.div_euclid(400);
+    let yoe = (y - era * 400) as u64;
+    let doy = (153 * m as u64 + 2) / 5 + u64::from(day) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some((era as i64 * 146_097 + doe as i64 - 719_468) as u64)
+}
+
 /// Civil date from Unix milliseconds shifted by a timezone bias in minutes.
 /// Windows `TIME_ZONE_INFORMATION.Bias` is UTC = local + Bias.
 #[must_use]
@@ -526,7 +639,8 @@ mod tests {
     use super::{
         cost_cents, days_to_ymd, format_banked_reset_label, format_compact_token_count,
         format_fable_limit_label, format_plan_label, is_long_context_request, local_ymd,
-        resolve_codex_model, ymd_key, LimitWindow, ProviderUsage, TokenUsage,
+        parse_rfc3339_ms, resolve_codex_model, windows_tz_bias_minutes, ymd_iso, ymd_key,
+        LimitWindow, ProviderUsage, TokenUsage,
     };
 
     #[test]
@@ -672,6 +786,59 @@ mod tests {
             format_banked_reset_label(Some(2)).as_deref(),
             Some("Banked Reset: 2")
         );
+    }
+
+    #[test]
+    fn component_rfc3339_offsets_are_utc_instants_not_wall_clock() {
+        let z = parse_rfc3339_ms("2026-08-16T01:02:03Z").expect("Z");
+        let plus = parse_rfc3339_ms("2026-08-16T10:02:03+09:00").expect("+09");
+        let minus = parse_rfc3339_ms("2026-08-15T17:02:03-08:00").expect("-08");
+        let compact = parse_rfc3339_ms("2026-08-16T10:02:03+0900").expect("compact");
+        assert_eq!(z, plus);
+        assert_eq!(z, minus);
+        assert_eq!(z, compact);
+        // Fail-first: the old parser treated +09:00 civil digits as UTC.
+        assert_ne!(
+            plus,
+            parse_rfc3339_ms("2026-08-16T10:02:03Z").expect("wall Z")
+        );
+        assert!(parse_rfc3339_ms("2026-08-16T01:02:03").is_none());
+        assert!(parse_rfc3339_ms("not-a-timestamp-at-all!!").is_none());
+        assert!(parse_rfc3339_ms("2026-08-16 01:02:03Z").is_none());
+    }
+
+    #[test]
+    fn component_rfc3339_month_boundary_keeps_utc_then_local_bucket() {
+        let utc = parse_rfc3339_ms("2026-08-31T23:30:00+09:00").expect("boundary");
+        assert_eq!(local_ymd(utc, -540), (2026, 8, 31));
+        assert_eq!(local_ymd(utc, 0), (2026, 8, 31));
+        let usage = TokenUsage {
+            input: 1_000_000,
+            output: 1_000_000,
+            ..TokenUsage::default()
+        };
+        assert_eq!(
+            cost_cents("claude-sonnet-5", usage, Some(&ymd_iso(2026, 8, 31))),
+            Some(1_200)
+        );
+        assert_eq!(
+            cost_cents("claude-sonnet-5", usage, Some(&ymd_iso(2026, 9, 1))),
+            Some(1_800)
+        );
+    }
+
+    #[test]
+    fn component_windows_tz_bias_uses_standard_or_daylight_addend() {
+        // US Pacific: Bias=480, StandardBias=0, DaylightBias=-60
+        assert_eq!(windows_tz_bias_minutes(480, 0, -60, 1), 480);
+        assert_eq!(windows_tz_bias_minutes(480, 0, -60, 2), 420);
+        assert_eq!(windows_tz_bias_minutes(480, 0, -60, 0), 480);
+    }
+
+    #[test]
+    fn component_ambiguous_and_nonexistent_local_without_offset_are_rejected() {
+        assert!(parse_rfc3339_ms("2026-11-01T01:30:00").is_none());
+        assert!(parse_rfc3339_ms("2026-03-08T02:30:00").is_none());
     }
 
     #[test]
