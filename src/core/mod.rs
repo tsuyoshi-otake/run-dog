@@ -1,6 +1,7 @@
 //! Pure domain logic used by the application state machine.
 
 mod animation;
+mod claude_dedupe;
 mod codex_usage;
 mod cpu;
 mod gpu;
@@ -15,6 +16,7 @@ mod usage_durable;
 mod usage_state;
 
 pub use animation::{AnimationController, AnimationRateChange, FpsLimit, FrameCursor};
+pub use claude_dedupe::{claude_dedupe_digest, hex_decode, retain_keys_for_month, ClaudeDedupeKey};
 pub use codex_usage::{decide_codex_event, CodexTokenTotals, CodexUsageDecision};
 pub use cpu::{
     breakdown_between, process_share, usage_between, CpuBreakdown, CpuLoad, CpuSampler,
