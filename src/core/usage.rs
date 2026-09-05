@@ -65,6 +65,38 @@ impl LimitWindow {
             self
         }
     }
+
+    /// Live percentage may be shown only before `resets_at_ms`.
+    ///
+    /// Unknown (`resets_at_ms == 0`) and expired windows are not current.
+    /// Presentation must not render those as 0%.
+    #[must_use]
+    pub const fn is_current(self, now_ms: u64) -> bool {
+        self.resets_at_ms != 0 && self.resets_at_ms > now_ms
+    }
+}
+
+/// Flyout label for the Claude Fable weekly bucket.
+///
+/// Expired / unknown reset times are "—" — never a fabricated 0%.
+#[must_use]
+pub fn format_fable_limit_label(window: LimitWindow, now_ms: u64) -> String {
+    if window.is_current(now_ms) {
+        format!("Fable: {:.0}%", window.used_percent())
+    } else {
+        "Fable: —".to_owned()
+    }
+}
+
+/// Codex banked reset count. Hidden when the field is absent or zero.
+///
+/// This is a credit count, not a third reset timestamp and not a usage %.
+#[must_use]
+pub fn format_banked_reset_label(available: Option<u16>) -> Option<String> {
+    match available {
+        Some(count) if count > 0 => Some(format!("Banked Reset: {count}")),
+        _ => None,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -77,6 +109,10 @@ pub struct ProviderUsage {
     pub plan_len: u8,
     pub primary: Option<LimitWindow>,
     pub secondary: Option<LimitWindow>,
+    /// Claude weekly Fable-scoped meter. Absent when the provider omitted it.
+    pub fable: Option<LimitWindow>,
+    /// Codex banked reset credits (`available_count`). `None` means omitted.
+    pub banked_reset_available: Option<u16>,
 }
 
 impl ProviderUsage {
@@ -124,6 +160,12 @@ impl ProviderUsage {
             .into_iter()
             .flatten()
             .find(|window| pred(window.window_minutes))
+    }
+
+    /// True when the Codex payload reported a positive banked-reset count.
+    #[must_use]
+    pub const fn shows_banked_reset(self) -> bool {
+        matches!(self.banked_reset_available, Some(count) if count > 0)
     }
 }
 
@@ -482,9 +524,9 @@ pub fn days_to_ymd(days: i64) -> (i32, u8, u8) {
 #[cfg(test)]
 mod tests {
     use super::{
-        cost_cents, days_to_ymd, format_compact_token_count, format_plan_label,
-        is_long_context_request, local_ymd, resolve_codex_model, ymd_key, LimitWindow,
-        ProviderUsage, TokenUsage,
+        cost_cents, days_to_ymd, format_banked_reset_label, format_compact_token_count,
+        format_fable_limit_label, format_plan_label, is_long_context_request, local_ymd,
+        resolve_codex_model, ymd_key, LimitWindow, ProviderUsage, TokenUsage,
     };
 
     #[test]
@@ -601,6 +643,35 @@ mod tests {
         };
         assert_eq!(window.effective(999).used_tenths, 280);
         assert_eq!(window.effective(1_000).used_tenths, 0);
+    }
+
+    #[test]
+    fn component_fable_label_does_not_fabricate_zero_after_reset() {
+        let window = LimitWindow {
+            used_tenths: 410,
+            resets_at_ms: 1_000,
+            window_minutes: 10_080,
+        };
+        assert_eq!(format_fable_limit_label(window, 999), "Fable: 41%");
+        assert_eq!(format_fable_limit_label(window, 1_000), "Fable: —");
+        let unknown = LimitWindow {
+            used_tenths: 410,
+            resets_at_ms: 0,
+            window_minutes: 10_080,
+        };
+        assert_eq!(format_fable_limit_label(unknown, 1), "Fable: —");
+        assert!(!format_fable_limit_label(window, 1_000).contains("0%"));
+        assert!(!format_fable_limit_label(unknown, 1).contains("0%"));
+    }
+
+    #[test]
+    fn component_banked_reset_label_hides_absent_and_zero() {
+        assert_eq!(format_banked_reset_label(None), None);
+        assert_eq!(format_banked_reset_label(Some(0)), None);
+        assert_eq!(
+            format_banked_reset_label(Some(2)).as_deref(),
+            Some("Banked Reset: 2")
+        );
     }
 
     #[test]

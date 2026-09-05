@@ -23,9 +23,9 @@ pub use sparkline::{Sparkline, SPARKLINE_CAPACITY};
 pub use storage::StorageStatus;
 pub use theme::{ResolvedTheme, ThemePreference};
 pub use usage::{
-    cost_cents, days_to_ymd, format_compact_token_count, format_plan_label,
-    is_long_context_request, local_hms, local_ymd, resolve_codex_model, ymd_iso, ymd_key,
-    LimitWindow, ProviderUsage, TokenUsage, UsageSnapshot,
+    cost_cents, days_to_ymd, format_banked_reset_label, format_compact_token_count,
+    format_fable_limit_label, format_plan_label, is_long_context_request, local_hms, local_ymd,
+    resolve_codex_model, ymd_iso, ymd_key, LimitWindow, ProviderUsage, TokenUsage, UsageSnapshot,
 };
 pub use usage_checkpoint::{
     FileCheckpointCursor, FileCheckpointKey, UsageCheckpoint, USAGE_CHECKPOINT_MIGRATION_VERSION,
