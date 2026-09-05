@@ -10,6 +10,8 @@ mod storage;
 mod theme;
 mod usage;
 mod usage_checkpoint;
+mod usage_durable;
+mod usage_state;
 
 pub use animation::{AnimationController, AnimationRateChange, FpsLimit, FrameCursor};
 pub use cpu::{
@@ -29,4 +31,12 @@ pub use usage::{
 };
 pub use usage_checkpoint::{
     FileCheckpointCursor, FileCheckpointKey, UsageCheckpoint, USAGE_CHECKPOINT_MIGRATION_VERSION,
+};
+pub use usage_durable::{
+    load_usage_state, persist_usage_state, GenerationBlobs, LoadStatus, MemoryBlobs, PersistStatus,
+    MAX_PRIOR_GENERATIONS,
+};
+pub use usage_state::{
+    usage_store_root_is_forbidden, CursorKind, UsageAggregate, UsageCursor, UsageState,
+    USAGE_STATE_HEADER, USAGE_STATE_SCHEMA_VERSION,
 };

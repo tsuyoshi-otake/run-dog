@@ -1,0 +1,11 @@
+tested commit: (this branch, see git)
+date: 2026-09-05
+OS: Windows 10.0.26200
+Rust: rustc 1.97.1 (local). GHA rustc 1.98 for #27/#30/#31
+pin origin/main: a8e870c0f1cad7cf4e431f6d563c8670c5626868
+command: cargo test --lib usage_
+scope: usage_state / usage_durable / usage_store schema and atomic generation
+result: PASS (24 filtered tests including unrelated usage_* names)
+collector wiring: NOT RUN
+GHA on this PR: pending after push
+old 2c0494c gates: not used as proof
