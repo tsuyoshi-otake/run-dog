@@ -555,5 +555,11 @@ mod tests {
 
             prop_assert_eq!(selection.is_some(), release_version > current);
         }
+
+        #[test]
+        fn pbt_updater_metadata_parsers_never_panic(tag in "\\PC{0,64}", checksum in "\\PC{0,128}") {
+            let _ = Version::parse(&tag);
+            let _ = parse_checksum_manifest(&checksum);
+        }
     }
 }
