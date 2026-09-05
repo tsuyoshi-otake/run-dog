@@ -41,14 +41,15 @@ use windows_sys::Win32::{
 
 use crate::core::{
     cancel_fetch, claude_dedupe_digest, cost_cents, decide_codex_event, fetch_result_code,
-    finish_fetch, is_long_context_request, local_ymd, persist_result_code, persist_result_detail,
-    rebuild_reason_code, record_spawn_failure, reject_late_result, retain_keys_for_month,
-    should_start_fetch, start_fetch, ymd_iso, ymd_key, CheckpointSource, ClaudeDedupeKey,
-    CodexTokenTotals, CodexUsageDecision, CursorKind, CursorRebuildReason, DiagnosticEvent,
-    DiagnosticKind, DiagnosticRing, DiagnosticSnapshot, FetchErrorKind, FetchOutcome,
-    FileCheckpointKey, LimitWindow, LoadStatus, PersistStatus, ProviderFetchKind,
-    ProviderFetchState, ProviderUsage, RebuildState, RescanReason, RestoreResult, StartupMode,
-    TokenUsage, UsageCursor, UsageSnapshot, UsageState, USAGE_STATE_SCHEMA_VERSION,
+    finish_fetch, is_long_context_request, local_ymd, parse_rfc3339_ms, persist_result_code,
+    persist_result_detail, rebuild_reason_code, record_spawn_failure, reject_late_result,
+    retain_keys_for_month, should_start_fetch, start_fetch, windows_tz_bias_minutes, ymd_iso,
+    ymd_key, CheckpointSource, ClaudeDedupeKey, CodexTokenTotals, CodexUsageDecision, CursorKind,
+    CursorRebuildReason, DiagnosticEvent, DiagnosticKind, DiagnosticRing, DiagnosticSnapshot,
+    FetchErrorKind, FetchOutcome, FileCheckpointKey, LimitWindow, LoadStatus, PersistStatus,
+    ProviderFetchKind, ProviderFetchState, ProviderUsage, RebuildState, RescanReason,
+    RestoreResult, StartupMode, TokenUsage, UsageCursor, UsageSnapshot, UsageState,
+    USAGE_STATE_SCHEMA_VERSION,
 };
 
 #[cfg(test)]
@@ -2549,37 +2550,7 @@ fn claude_window(window: Option<ClaudeUsageWindow>, minutes: u16) -> Option<Limi
 }
 
 fn parse_timestamp(value: &str) -> Option<u64> {
-    // RFC3339-like `2026-08-16T10:15:30Z` or with offset. Enough for local logs.
-    if value.len() < 20 {
-        return None;
-    }
-    let year: i32 = value.get(0..4)?.parse().ok()?;
-    let month: u8 = value.get(5..7)?.parse().ok()?;
-    let day: u8 = value.get(8..10)?.parse().ok()?;
-    let hour: u8 = value.get(11..13)?.parse().ok()?;
-    let minute: u8 = value.get(14..16)?.parse().ok()?;
-    let second: u8 = value.get(17..19)?.parse().ok()?;
-    let days = ymd_to_days(year, month, day)?;
-    Some(
-        (days * 86_400 + u64::from(hour) * 3_600 + u64::from(minute) * 60 + u64::from(second))
-            * 1_000,
-    )
-}
-
-fn ymd_to_days(year: i32, month: u8, day: u8) -> Option<u64> {
-    if !(1..=12).contains(&month) || day == 0 {
-        return None;
-    }
-    let (y, m) = if month <= 2 {
-        (year - 1, i32::from(month) + 9)
-    } else {
-        (year, i32::from(month) - 3)
-    };
-    let era = y.div_euclid(400);
-    let yoe = (y - era * 400) as u64;
-    let doy = (153 * m as u64 + 2) / 5 + u64::from(day) - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    Some((era as i64 * 146_097 + doe as i64 - 719_468) as u64)
+    parse_rfc3339_ms(value)
 }
 
 fn unix_now_ms() -> u64 {
@@ -2591,8 +2562,8 @@ fn unix_now_ms() -> u64 {
 
 pub(super) fn timezone_bias_minutes() -> i32 {
     let mut info = TIME_ZONE_INFORMATION::default();
-    let _ = unsafe { GetTimeZoneInformation(&mut info) };
-    info.Bias
+    let zone_id = unsafe { GetTimeZoneInformation(&mut info) };
+    windows_tz_bias_minutes(info.Bias, info.StandardBias, info.DaylightBias, zone_id)
 }
 
 fn day_window(now_ms: u64) -> DayWindow {
