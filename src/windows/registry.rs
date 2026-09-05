@@ -39,7 +39,61 @@ const LEGACY_THEME_VALUE: &str = "Theme";
 const LEGACY_FPS_LIMIT_VALUE: &str = "FpsLimit";
 const LEGACY_STARTUP_VALUE: &str = "LaunchAtStartup";
 const SYSTEM_THEME_VALUE: &str = "SystemUsesLightTheme";
-const MAX_REGISTRY_STRING_BYTES: u32 = 8_192;
+/// Generic `REG_SZ` reader/writer bound. Do not raise this for settings or
+/// journals. Usage checkpoint uses the same bound; oversized payloads fail
+/// persist instead of becoming unreadable.
+pub const MAX_REGISTRY_STRING_BYTES: u32 = 8_192;
+
+/// Why a usage checkpoint was or was not restored. Payloads and paths stay out.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UsageCheckpointRestoreReason {
+    Loaded,
+    Missing,
+    Tombstoned,
+    MigrationMismatch { stored: u32, expected: u32 },
+    TooLarge { byte_length: u32 },
+    DecodeFailed,
+    RegistryUnavailable,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct UsageCheckpointRestore {
+    pub checkpoint: Option<UsageCheckpoint>,
+    pub reason: UsageCheckpointRestoreReason,
+}
+
+/// UTF-16 `REG_SZ` byte size including the terminating NUL. Tests use this as
+/// the size oracle; file counts are not a specification.
+#[must_use]
+pub fn registry_sz_utf16_bytes(value: &str) -> u32 {
+    let units = value.encode_utf16().count().saturating_add(1);
+    u32::try_from(units.saturating_mul(2)).unwrap_or(u32::MAX)
+}
+
+struct RegistryKey {
+    key: HKEY,
+}
+
+impl RegistryKey {
+    fn open(path: &str, access: u32) -> Option<Self> {
+        Some(Self {
+            key: open_key(path, access)?,
+        })
+    }
+
+    fn handle(&self) -> HKEY {
+        self.key
+    }
+}
+
+impl Drop for RegistryKey {
+    fn drop(&mut self) {
+        if !self.key.is_null() {
+            close_key(self.key);
+            self.key = ptr::null_mut();
+        }
+    }
+}
 
 static SETTINGS_KEY_OVERRIDE: Mutex<Option<String>> = Mutex::new(None);
 
@@ -266,7 +320,12 @@ pub fn save_pinned_flyout(pinned: bool) -> bool {
 
 #[must_use]
 pub fn load_usage_checkpoint() -> Option<UsageCheckpoint> {
-    load_usage_checkpoint_at(&settings_key())
+    restore_usage_checkpoint().checkpoint
+}
+
+#[must_use]
+pub fn restore_usage_checkpoint() -> UsageCheckpointRestore {
+    restore_usage_checkpoint_at(&settings_key())
 }
 
 pub fn save_usage_checkpoint(checkpoint: &UsageCheckpoint) -> bool {
@@ -277,22 +336,60 @@ pub fn clear_usage_checkpoint() -> bool {
     clear_usage_checkpoint_at(&settings_key())
 }
 
-fn load_usage_checkpoint_at(settings_key: &str) -> Option<UsageCheckpoint> {
+fn restore_usage_checkpoint_at(settings_key: &str) -> UsageCheckpointRestore {
     if lifecycle_is_tombstoned_at(settings_key) {
-        return None;
+        return UsageCheckpointRestore {
+            checkpoint: None,
+            reason: UsageCheckpointRestoreReason::Tombstoned,
+        };
     }
-    if load_usage_checkpoint_migration_at(settings_key) != USAGE_CHECKPOINT_MIGRATION_VERSION {
-        let _ = clear_usage_checkpoint_payload_at(settings_key);
-        return None;
+    let Some(key) = RegistryKey::open(settings_key, KEY_READ) else {
+        return UsageCheckpointRestore {
+            checkpoint: None,
+            reason: UsageCheckpointRestoreReason::RegistryUnavailable,
+        };
+    };
+    let stored_migration = read_dword(key.handle(), USAGE_CHECKPOINT_MIGRATION_VALUE).unwrap_or(0);
+    let payload = read_registry_sz(key.handle(), USAGE_CHECKPOINT_VALUE);
+    if stored_migration != 0 && stored_migration != USAGE_CHECKPOINT_MIGRATION_VERSION {
+        return UsageCheckpointRestore {
+            checkpoint: None,
+            reason: UsageCheckpointRestoreReason::MigrationMismatch {
+                stored: stored_migration,
+                expected: USAGE_CHECKPOINT_MIGRATION_VERSION,
+            },
+        };
     }
-    let key = open_key(settings_key, KEY_READ)?;
-    let payload = read_string(key, USAGE_CHECKPOINT_VALUE)?;
-    close_key(key);
-    if let Some(checkpoint) = UsageCheckpoint::decode(&payload) {
-        return Some(checkpoint);
+    match payload {
+        RegistrySz::Missing => UsageCheckpointRestore {
+            checkpoint: None,
+            reason: UsageCheckpointRestoreReason::Missing,
+        },
+        RegistrySz::TooLarge { byte_length } => UsageCheckpointRestore {
+            checkpoint: None,
+            reason: UsageCheckpointRestoreReason::TooLarge { byte_length },
+        },
+        RegistrySz::Invalid => UsageCheckpointRestore {
+            checkpoint: None,
+            reason: UsageCheckpointRestoreReason::DecodeFailed,
+        },
+        RegistrySz::Value(payload) if stored_migration == USAGE_CHECKPOINT_MIGRATION_VERSION => {
+            match UsageCheckpoint::decode(&payload) {
+                Some(checkpoint) => UsageCheckpointRestore {
+                    checkpoint: Some(checkpoint),
+                    reason: UsageCheckpointRestoreReason::Loaded,
+                },
+                None => UsageCheckpointRestore {
+                    checkpoint: None,
+                    reason: UsageCheckpointRestoreReason::DecodeFailed,
+                },
+            }
+        }
+        RegistrySz::Value(_) => UsageCheckpointRestore {
+            checkpoint: None,
+            reason: UsageCheckpointRestoreReason::Missing,
+        },
     }
-    let _ = clear_usage_checkpoint_payload_at(settings_key);
-    None
 }
 
 fn save_usage_checkpoint_at(settings_key: &str, checkpoint: &UsageCheckpoint) -> bool {
@@ -320,24 +417,6 @@ fn clear_usage_checkpoint_at(settings_key: &str) -> bool {
         && delete_value(key, USAGE_CHECKPOINT_MIGRATION_VALUE);
     close_key(key);
     cleared
-}
-
-fn clear_usage_checkpoint_payload_at(settings_key: &str) -> bool {
-    let Some(key) = open_writable_settings_key_at(settings_key) else {
-        return false;
-    };
-    let cleared = delete_value(key, USAGE_CHECKPOINT_VALUE);
-    close_key(key);
-    cleared
-}
-
-fn load_usage_checkpoint_migration_at(settings_key: &str) -> u32 {
-    let Some(key) = open_key(settings_key, KEY_READ) else {
-        return 0;
-    };
-    let version = read_dword(key, USAGE_CHECKPOINT_MIGRATION_VALUE).unwrap_or(0);
-    close_key(key);
-    version
 }
 
 #[doc(hidden)]
@@ -538,7 +617,14 @@ fn delete_value(key: HKEY, name: &str) -> bool {
     result == ERROR_SUCCESS || result == ERROR_FILE_NOT_FOUND
 }
 
-fn read_string(key: HKEY, name: &str) -> Option<String> {
+enum RegistrySz {
+    Missing,
+    TooLarge { byte_length: u32 },
+    Invalid,
+    Value(String),
+}
+
+fn read_registry_sz(key: HKEY, name: &str) -> RegistrySz {
     let name = wide(name);
     let mut value_type = 0;
     let mut length = 0;
@@ -552,13 +638,16 @@ fn read_string(key: HKEY, name: &str) -> Option<String> {
             &mut length,
         )
     };
-    if result != ERROR_SUCCESS
-        || value_type != REG_SZ
-        || length == 0
-        || length > MAX_REGISTRY_STRING_BYTES
-        || length % 2 != 0
-    {
-        return None;
+    if result == ERROR_FILE_NOT_FOUND {
+        return RegistrySz::Missing;
+    }
+    if result != ERROR_SUCCESS || value_type != REG_SZ || length == 0 || length % 2 != 0 {
+        return RegistrySz::Invalid;
+    }
+    if length > MAX_REGISTRY_STRING_BYTES {
+        return RegistrySz::TooLarge {
+            byte_length: length,
+        };
     }
 
     let mut utf16 = vec![0_u16; (length / 2) as usize];
@@ -573,13 +662,23 @@ fn read_string(key: HKEY, name: &str) -> Option<String> {
         )
     };
     if result != ERROR_SUCCESS || value_type != REG_SZ {
-        return None;
+        return RegistrySz::Invalid;
     }
     let terminator = utf16
         .iter()
         .position(|unit| *unit == 0)
         .unwrap_or(utf16.len());
-    String::from_utf16(&utf16[..terminator]).ok()
+    match String::from_utf16(&utf16[..terminator]) {
+        Ok(value) => RegistrySz::Value(value),
+        Err(_) => RegistrySz::Invalid,
+    }
+}
+
+fn read_string(key: HKEY, name: &str) -> Option<String> {
+    match read_registry_sz(key, name) {
+        RegistrySz::Value(value) => Some(value),
+        _ => None,
+    }
 }
 
 fn read_dword(key: HKEY, name: &str) -> Option<u32> {
@@ -602,9 +701,13 @@ fn read_dword(key: HKEY, name: &str) -> Option<u32> {
 }
 
 fn write_string(key: HKEY, name: &str, value: &str) -> bool {
+    let byte_length = registry_sz_utf16_bytes(value);
+    if byte_length == 0 || byte_length > MAX_REGISTRY_STRING_BYTES {
+        return false;
+    }
     let name = wide(name);
     let value = wide(value);
-    let byte_length = (value.len() * size_of::<u16>()) as u32;
+    debug_assert_eq!(byte_length, (value.len() * size_of::<u16>()) as u32);
     (unsafe {
         RegSetValueExW(
             key,
@@ -658,7 +761,7 @@ pub fn test_hive_path(suffix: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::wide;
+    use super::{registry_sz_utf16_bytes, wide, write_string, MAX_REGISTRY_STRING_BYTES};
 
     #[test]
     fn component_utf16_encoder_is_nul_terminated_and_preserves_non_ascii() {
@@ -668,5 +771,28 @@ mod tests {
             String::from_utf16(&encoded[..encoded.len() - 1]).ok(),
             Some("RunDog 犬".to_owned())
         );
+    }
+
+    #[test]
+    fn component_registry_sz_byte_oracle_counts_utf16_nul() {
+        assert_eq!(registry_sz_utf16_bytes(""), 2);
+        assert_eq!(registry_sz_utf16_bytes("A"), 4);
+        assert_eq!(registry_sz_utf16_bytes("犬"), 4);
+        let max_chars = (MAX_REGISTRY_STRING_BYTES as usize / 2).saturating_sub(1);
+        let exact = "B".repeat(max_chars);
+        assert_eq!(registry_sz_utf16_bytes(&exact), MAX_REGISTRY_STRING_BYTES);
+        let over = "B".repeat(max_chars + 1);
+        assert!(registry_sz_utf16_bytes(&over) > MAX_REGISTRY_STRING_BYTES);
+    }
+
+    #[test]
+    fn component_write_string_rejects_over_bound_without_registry() {
+        let over = "C".repeat((MAX_REGISTRY_STRING_BYTES as usize / 2) + 8);
+        assert!(registry_sz_utf16_bytes(&over) > MAX_REGISTRY_STRING_BYTES);
+        assert!(!write_string(
+            std::ptr::null_mut(),
+            "UsageCheckpoint",
+            &over
+        ));
     }
 }

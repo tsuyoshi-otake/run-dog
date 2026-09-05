@@ -130,6 +130,7 @@ pub struct UsageCollector {
     checkpoint_dirty: bool,
     persist_checkpoint: bool,
     month_rescan_notify: bool,
+    last_restore_reason: super::registry::UsageCheckpointRestoreReason,
 }
 
 struct RemoteLimits {
@@ -188,11 +189,18 @@ impl UsageCollector {
             checkpoint_dirty: false,
             persist_checkpoint,
             month_rescan_notify: false,
+            last_restore_reason: super::registry::UsageCheckpointRestoreReason::Missing,
         };
         if persist_checkpoint {
             collector.restore_checkpoint(day_window(unix_now_ms()));
         }
         collector
+    }
+
+    #[must_use]
+    #[allow(dead_code)]
+    pub fn last_checkpoint_restore_reason(&self) -> super::registry::UsageCheckpointRestoreReason {
+        self.last_restore_reason
     }
 
     pub fn flush_checkpoint(&mut self) {
@@ -304,7 +312,9 @@ impl UsageCollector {
     }
 
     fn restore_checkpoint(&mut self, window: DayWindow) {
-        let Some(checkpoint) = super::registry::load_usage_checkpoint() else {
+        let restored = super::registry::restore_usage_checkpoint();
+        self.last_restore_reason = restored.reason;
+        let Some(checkpoint) = restored.checkpoint else {
             return;
         };
         self.apply_checkpoint(window, checkpoint);
@@ -1997,6 +2007,7 @@ mod tests {
         read_claude_credentials, read_regular_file, unix_now_ms, UsageCollector, UsageTick,
     };
     use crate::core::{local_hms, local_ymd};
+    use crate::windows::registry::UsageCheckpointRestoreReason;
     use std::{fs, ptr};
 
     #[test]
@@ -2295,6 +2306,10 @@ mod tests {
 
         let mut collector =
             UsageCollector::with_dirs(root.join("claude"), root.join("codex"), false);
+        assert_eq!(
+            collector.last_checkpoint_restore_reason(),
+            UsageCheckpointRestoreReason::Missing
+        );
         assert_eq!(collector.snapshot().claude.month_cents, 0);
         let mut last = UsageTick::MoreWork;
         for _ in 0..16 {
