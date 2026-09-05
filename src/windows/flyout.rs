@@ -14,11 +14,12 @@ use windows_sys::{
             Gdi::{
                 BeginPaint, CreateFontW, CreatePen, CreateRoundRectRgn, CreateSolidBrush,
                 DeleteObject, DrawTextW, Ellipse, EndPaint, FillRect, GetDC, GetDeviceCaps,
-                GetStockObject, InvalidateRect, LineTo, MoveToEx, Polygon, Polyline, ReleaseDC,
-                RoundRect, SelectObject, SetBkMode, SetTextColor, SetWindowRgn, CLEARTYPE_QUALITY,
-                DEFAULT_CHARSET, DEFAULT_GUI_FONT, DT_END_ELLIPSIS, DT_NOPREFIX, DT_RIGHT,
-                DT_SINGLELINE, DT_VCENTER, FW_NORMAL, FW_SEMIBOLD, LOGPIXELSX, NULL_BRUSH,
-                NULL_PEN, PAINTSTRUCT, PS_SOLID, TRANSPARENT,
+                GetMonitorInfoW, GetStockObject, InvalidateRect, LineTo, MonitorFromPoint,
+                MonitorFromWindow, MoveToEx, Polygon, Polyline, ReleaseDC, RoundRect, SelectObject,
+                SetBkMode, SetTextColor, SetWindowRgn, CLEARTYPE_QUALITY, DEFAULT_CHARSET,
+                DEFAULT_GUI_FONT, DT_END_ELLIPSIS, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE,
+                DT_VCENTER, FW_NORMAL, FW_SEMIBOLD, LOGPIXELSX, MONITORINFO,
+                MONITOR_DEFAULTTONEAREST, NULL_BRUSH, NULL_PEN, PAINTSTRUCT, PS_SOLID, TRANSPARENT,
             },
         },
         System::LibraryLoader::GetModuleHandleW,
@@ -28,9 +29,10 @@ use windows_sys::{
                 CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetCursorPos,
                 GetSystemMetrics, GetWindowLongPtrW, IsWindow, IsWindowVisible, RegisterClassW,
                 SetWindowLongPtrW, SetWindowPos, ShowWindow, CS_DROPSHADOW, GWLP_USERDATA,
-                HWND_TOPMOST, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE,
-                SW_SHOWNOACTIVATE, WM_DESTROY, WM_MOUSEACTIVATE, WM_PAINT, WNDCLASSW,
-                WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+                HWND_TOPMOST, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+                SM_YVIRTUALSCREEN, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE, SW_SHOWNOACTIVATE,
+                WM_DESTROY, WM_MOUSEACTIVATE, WM_PAINT, WNDCLASSW, WS_EX_NOACTIVATE,
+                WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
             },
         },
     },
@@ -225,6 +227,61 @@ fn apply_rounded_chrome(hwnd: HWND, width: i32, height: i32, dpi: i32) {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PixelRect {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+}
+
+impl PixelRect {
+    fn from_rect(rect: RECT) -> Self {
+        Self {
+            left: rect.left,
+            top: rect.top,
+            right: rect.right,
+            bottom: rect.bottom,
+        }
+    }
+}
+
+/// Clamp the flyout to a work area. Coordinates are virtual-screen pixels
+/// and may be negative. `window_size` / #26 extra height is an input, not
+/// rewritten here.
+fn position_flyout(
+    origin: (i32, i32),
+    icon: Option<PixelRect>,
+    size: (i32, i32),
+    work_area: PixelRect,
+) -> (i32, i32) {
+    const MARGIN: i32 = 8;
+    let (width, height) = size;
+    let mut x = origin.0 - width / 2;
+    let mut y = origin.1 - height - MARGIN;
+    if y < work_area.top {
+        y = match icon {
+            Some(icon) => icon.bottom + MARGIN,
+            None => origin.1 + 16,
+        };
+    }
+    let min_x = work_area.left + MARGIN;
+    let max_x = work_area.right - width - MARGIN;
+    x = if max_x >= min_x {
+        x.clamp(min_x, max_x)
+    } else {
+        work_area.left
+    };
+    let min_y = work_area.top;
+    let max_y = work_area.bottom - height;
+    y = if max_y >= min_y {
+        y.clamp(min_y, max_y)
+    } else {
+        work_area.top
+    };
+    (x, y)
+}
+
 fn position_near_icon(owner: HWND, width: i32, height: i32) -> (i32, i32) {
     let ident = NOTIFYICONIDENTIFIER {
         cbSize: size_of::<NOTIFYICONIDENTIFIER>() as u32,
@@ -248,27 +305,45 @@ fn position_near_icon(owner: HWND, width: i32, height: i32) -> (i32, i32) {
         origin.y = 0;
     }
 
-    let screen_w = unsafe { GetSystemMetrics(SM_CXSCREEN) };
-    let screen_h = unsafe { GetSystemMetrics(SM_CYSCREEN) };
-    let mut x = origin.x - width / 2;
-    let mut y = origin.y - height - 8;
-    if y < 0 {
-        y = if have_icon {
-            icon.bottom + 8
-        } else {
-            origin.y + 16
-        };
+    let work_area = monitor_work_area(owner, origin);
+    let icon = have_icon.then_some(PixelRect::from_rect(icon));
+    position_flyout((origin.x, origin.y), icon, (width, height), work_area)
+}
+
+fn monitor_work_area(owner: HWND, origin: POINT) -> PixelRect {
+    let from_owner = if owner.is_null() {
+        ptr::null_mut()
+    } else {
+        unsafe { MonitorFromWindow(owner, MONITOR_DEFAULTTONEAREST) }
+    };
+    let monitor = if from_owner.is_null() {
+        unsafe { MonitorFromPoint(origin, MONITOR_DEFAULTTONEAREST) }
+    } else {
+        from_owner
+    };
+    let mut info = MONITORINFO {
+        cbSize: size_of::<MONITORINFO>() as u32,
+        rcMonitor: RECT::default(),
+        rcWork: RECT::default(),
+        dwFlags: 0,
+    };
+    if !monitor.is_null() && unsafe { GetMonitorInfoW(monitor, &mut info) } != 0 {
+        return PixelRect::from_rect(info.rcWork);
     }
-    if x < 8 {
-        x = 8;
+    virtual_screen_rect()
+}
+
+fn virtual_screen_rect() -> PixelRect {
+    let left = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) };
+    let top = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };
+    let width = unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) };
+    let height = unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) };
+    PixelRect {
+        left,
+        top,
+        right: left.saturating_add(width),
+        bottom: top.saturating_add(height),
     }
-    if x + width > screen_w - 8 {
-        x = screen_w - width - 8;
-    }
-    if y + height > screen_h - 8 {
-        y = screen_h - height - 8;
-    }
-    (x.max(0), y.max(0))
 }
 
 fn window_size(dpi: i32, usage: Option<UsageSnapshot>, show_gpu: bool) -> (i32, i32) {
@@ -1680,8 +1755,8 @@ mod tests {
     use super::{
         extra_usage_block_units, format_bytes, format_gpu_capacity, format_limit_metric_label,
         format_month_usage, format_percent, format_reset_local, format_self_usage, gpu_details,
-        visible_usage_count, window_size, CARD_GPU_BLOCK_HEIGHT, CARD_HEIGHT,
-        CARD_USAGE_BLOCK_HEIGHT, CARD_WIDTH,
+        position_flyout, visible_usage_count, window_size, PixelRect, CARD_GPU_BLOCK_HEIGHT,
+        CARD_HEIGHT, CARD_USAGE_BLOCK_HEIGHT, CARD_WIDTH,
     };
     use crate::core::{
         format_banked_reset_label, format_fable_limit_label, CpuLoad, LimitWindow, ProcessStatus,
@@ -1912,5 +1987,93 @@ mod tests {
             Some("Banked Reset: 2")
         );
         assert_eq!(format_banked_reset_label(None), None);
+    }
+
+    #[test]
+    fn component_flyout_stays_on_owning_monitor_work_area() {
+        let size = (320, 400);
+        let icon = PixelRect {
+            left: -1_820,
+            top: 1_020,
+            right: -1_780,
+            bottom: 1_060,
+        };
+        let left_of_primary = PixelRect {
+            left: -1_920,
+            top: 0,
+            right: 0,
+            bottom: 1_080,
+        };
+        let (x, y) = position_flyout((-1_800, 1_020), Some(icon), size, left_of_primary);
+        assert!(x < 0, "primary SM_CXSCREEN clamp would force x=8, got {x}");
+        assert!(x >= left_of_primary.left);
+        assert!(x + size.0 <= left_of_primary.right);
+        assert!(y >= left_of_primary.top);
+        assert!(y + size.1 <= left_of_primary.bottom);
+
+        let above_primary = PixelRect {
+            left: 0,
+            top: -1_080,
+            right: 1_920,
+            bottom: 0,
+        };
+        let (x, y) = position_flyout((200, -60), None, size, above_primary);
+        assert!(y < 0, "primary SM_CYSCREEN clamp would force y=0, got {y}");
+        assert!(x >= above_primary.left);
+        assert!(y + size.1 <= above_primary.bottom);
+
+        let taskbar_bottom = PixelRect {
+            left: 0,
+            top: 0,
+            right: 1_920,
+            bottom: 1_040,
+        };
+        let (_, y) = position_flyout((1_800, 1_040), None, size, taskbar_bottom);
+        assert!(y + size.1 <= taskbar_bottom.bottom);
+
+        let taskbar_left = PixelRect {
+            left: 72,
+            top: 0,
+            right: 1_920,
+            bottom: 1_080,
+        };
+        let (x, _) = position_flyout((80, 1_040), None, size, taskbar_left);
+        assert!(x >= taskbar_left.left + 8);
+
+        let usage = UsageSnapshot {
+            claude: ProviderUsage {
+                today_cents: 1,
+                fable: Some(LimitWindow {
+                    used_tenths: 410,
+                    resets_at_ms: 1_787_011_200_000,
+                    window_minutes: 10_080,
+                }),
+                ..ProviderUsage::default()
+            },
+            codex: ProviderUsage {
+                month_cents: 125,
+                banked_reset_available: Some(2),
+                ..ProviderUsage::default()
+            },
+            ..UsageSnapshot::default()
+        };
+        let tall = window_size(96, Some(usage), false);
+        assert_eq!(
+            tall,
+            (
+                CARD_WIDTH,
+                CARD_HEIGHT + CARD_USAGE_BLOCK_HEIGHT * 2 + 24 + 15
+            )
+        );
+        let short_work = PixelRect {
+            left: 0,
+            top: 0,
+            right: 800,
+            bottom: tall.1 - 40,
+        };
+        let (x, y) = position_flyout((400, short_work.bottom), None, tall, short_work);
+        assert_eq!(y, short_work.top);
+        assert!(x >= short_work.left);
+        assert!(x + tall.0 <= short_work.right);
     }
 }
