@@ -3,6 +3,8 @@
 //! This is not the Registry `UsageCheckpoint` text. Extra positional columns
 //! from experimental reader/Codex patches are rejected, not merged in.
 
+use std::collections::HashSet;
+
 use super::{FileCheckpointKey, ProviderUsage, UsageCheckpoint, UsageSnapshot};
 
 pub const USAGE_STATE_HEADER: &str = "rundog-usage-state-1";
@@ -20,6 +22,17 @@ pub struct UsageCursor {
     pub logical_id: String,
     pub offset: u64,
     pub size: u64,
+    /// First-64-byte fingerprint. A hint, not a complete in-place rewrite detector.
+    pub prefix: Option<u64>,
+}
+
+/// Why a cursor was rebuilt instead of appended. No paths or payloads.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CursorRebuildReason {
+    SizeShrunk,
+    PrefixChanged,
+    FileIdAndPrefixChanged,
+    SameSizeRewriteHint,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -37,6 +50,7 @@ pub struct UsageState {
     pub schema_version: u32,
     pub aggregate: UsageAggregate,
     pub cursors: Vec<UsageCursor>,
+    pub claude_keys: HashSet<u64>,
 }
 
 impl UsageState {
@@ -55,6 +69,7 @@ impl UsageState {
                     logical_id,
                     offset: cursor.offset,
                     size: cursor.size,
+                    prefix: None,
                 }
             })
             .collect();
@@ -74,6 +89,7 @@ impl UsageState {
                 },
             },
             cursors,
+            claude_keys: HashSet::new(),
         }
     }
 
@@ -124,6 +140,14 @@ impl UsageState {
                 "cursor={kind}\t{}\t{}\t{}\n",
                 cursor.logical_id, cursor.offset, cursor.size
             ));
+            if let Some(prefix) = cursor.prefix {
+                out.push_str(&format!("prefix={kind}\t{}\t{prefix}\n", cursor.logical_id));
+            }
+        }
+        let mut keys: Vec<u64> = self.claude_keys.iter().copied().collect();
+        keys.sort_unstable();
+        for key in keys {
+            out.push_str(&format!("ckey={key}\n"));
         }
         out
     }
@@ -149,6 +173,8 @@ impl UsageState {
         let mut codex_in = 0_u64;
         let mut codex_out = 0_u64;
         let mut cursors = Vec::new();
+        let mut prefixes: Vec<(CursorKind, String, u64)> = Vec::new();
+        let mut claude_keys = HashSet::new();
         for line in lines {
             if line.is_empty() {
                 continue;
@@ -183,8 +209,20 @@ impl UsageState {
                 codex_out = value.parse().ok()?;
             } else if let Some(value) = line.strip_prefix("cursor=") {
                 cursors.push(parse_cursor_line(value)?);
+            } else if let Some(value) = line.strip_prefix("prefix=") {
+                prefixes.push(parse_prefix_line(value)?);
+            } else if let Some(value) = line.strip_prefix("ckey=") {
+                claude_keys.insert(value.parse().ok()?);
             } else if line.starts_with("file=") {
                 return None;
+            }
+        }
+        for (kind, logical_id, prefix) in prefixes {
+            if let Some(cursor) = cursors
+                .iter_mut()
+                .find(|cursor| cursor.kind == kind && cursor.logical_id == logical_id)
+            {
+                cursor.prefix = Some(prefix);
             }
         }
         let schema_version = schema_version?;
@@ -218,6 +256,7 @@ impl UsageState {
                 },
             },
             cursors,
+            claude_keys,
         })
     }
 }
@@ -248,7 +287,21 @@ fn parse_cursor_line(value: &str) -> Option<UsageCursor> {
         logical_id: parts[1].to_owned(),
         offset: parts[2].parse().ok()?,
         size: parts[3].parse().ok()?,
+        prefix: None,
     })
+}
+
+fn parse_prefix_line(value: &str) -> Option<(CursorKind, String, u64)> {
+    let parts: Vec<&str> = value.split('\t').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let kind = match parts[0] {
+        "c" => CursorKind::Claude,
+        "x" => CursorKind::Codex,
+        _ => return None,
+    };
+    Some((kind, parts[1].to_owned(), parts[2].parse().ok()?))
 }
 
 /// True when a candidate store root would write into provider user data.
@@ -295,8 +348,19 @@ mod tests {
                 logical_id: "projects/p/session.jsonl".to_owned(),
                 offset: 8,
                 size: 16,
+                prefix: Some(9),
             }],
+            claude_keys: [7].into_iter().collect(),
         }
+    }
+
+    #[test]
+    fn component_usage_state_named_prefix_is_not_a_positional_file_column() {
+        let encoded = sample_state(true).encode();
+        assert!(encoded.contains("prefix=c\tprojects/p/session.jsonl\t9\n"));
+        assert!(encoded.contains("cursor=c\tprojects/p/session.jsonl\t8\t16\n"));
+        assert!(encoded.contains("ckey=7\n"));
+        assert!(!encoded.contains("file="));
     }
 
     #[test]
