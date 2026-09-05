@@ -1,6 +1,7 @@
 //! Pure domain logic used by the application state machine.
 
 mod animation;
+mod codex_usage;
 mod cpu;
 mod gpu;
 mod memory;
@@ -12,6 +13,7 @@ mod usage;
 mod usage_checkpoint;
 
 pub use animation::{AnimationController, AnimationRateChange, FpsLimit, FrameCursor};
+pub use codex_usage::{decide_codex_event, CodexTokenTotals, CodexUsageDecision};
 pub use cpu::{
     breakdown_between, process_share, usage_between, CpuBreakdown, CpuLoad, CpuSampler,
     ProcessStatus, ProcessTimes, SystemTimes,
