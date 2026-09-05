@@ -643,4 +643,47 @@ mod tests {
         }
         .has_month_activity());
     }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config {
+            cases: 256,
+            failure_persistence: Some(Box::new(
+                proptest::test_runner::FileFailurePersistence::Direct(
+                    "verification/evidence/usage-pbt-counterexamples.regressions",
+                ),
+            )),
+            ..proptest::test_runner::Config::default()
+        })]
+
+        #[test]
+        fn pbt_unknown_model_keeps_token_totals_without_inventing_cost(
+            input in 0_u64..50_000,
+            output in 0_u64..50_000,
+        ) {
+            let usage = TokenUsage {
+                input,
+                output,
+                ..TokenUsage::default()
+            };
+            proptest::prop_assert_eq!(usage.processed_input_tokens(), input);
+            proptest::prop_assert_eq!(usage.processed_output_tokens(), output);
+            proptest::prop_assert_eq!(cost_cents("mystery-model-not-in-table", usage, None), None);
+        }
+
+        #[test]
+        fn pbt_same_logical_tokens_same_known_model_cost(
+            input in 0_u64..20_000,
+            output in 0_u64..20_000,
+        ) {
+            let usage = TokenUsage {
+                input,
+                output,
+                ..TokenUsage::default()
+            };
+            let left = cost_cents("claude-opus-5", usage, None);
+            let right = cost_cents("claude-opus-5", usage, None);
+            proptest::prop_assert_eq!(left, right);
+            proptest::prop_assert!(left.is_some());
+        }
+    }
 }
