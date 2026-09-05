@@ -51,16 +51,21 @@ specifically requested by the user or the person installing or operating it.
 
 Details: [privacy page](https://tsuyoshi-otake.github.io/run-dog/privacy.html).
 
-Network use that the user or installer requests:
+Network use that the user or installer requests is listed in
+[docs/PRIVACY.md](docs/PRIVACY.md). Short form:
 
-- Checking GitHub Releases for a newer version (once at startup, or when the user
-  chooses Check again). Download and install run only after the user chooses
-  Install from the menu.
-- If Claude Code or Codex CLI is already installed, reading local logs and querying
-  those vendors' usage-limit APIs with credentials already on the machine. Tokens
-  are never sent to this project or to SignPath.
+- GitHub Releases (`api.github.com` / `github.com`): once at startup, or Check
+  again. Download only after Install.
+- Claude: `api.anthropic.com` `/api/oauth/usage` about every 5 minutes; token
+  refresh may rewrite `.credentials.json`.
+- Codex: `chatgpt.com` `/backend-api/wham/usage` about every 60 seconds.
+  `auth.json` is read-only.
+- There is **no RunDog-owned server**. Limit fetch does not send raw prompts or
+  responses. Tokens are never sent to this project or to SignPath.
 
-There is no advertising, analytics, or crash-reporting SDK.
+There is no advertising, analytics, or crash-reporting SDK. A new
+`Automatic vendor usage-limit queries` setting is deferred so existing
+auto-query UX is not turned Off.
 
 ## System changes and uninstall
 

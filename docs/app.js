@@ -1,15 +1,6 @@
 import { I18N, LANGS } from "./i18n.js";
 
 const STORAGE_KEY = "rundog-lang";
-const FONTS = {
-  zh: "https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;600;700&display=swap",
-  "zh-TW":
-    "https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;600;700&display=swap",
-  ko: "https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;600;700&display=swap",
-  vi: "https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;600;700&display=swap",
-  ru: "https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;600;700&display=swap",
-  th: "https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@400;600;700&display=swap",
-};
 
 function resolveLang(raw) {
   if (!raw) {
@@ -157,22 +148,6 @@ function renderLangs(lang) {
   );
 }
 
-function loadFont(lang) {
-  const href = FONTS[lang];
-  if (!href) {
-    return;
-  }
-  const id = `font-${lang}`;
-  if (document.getElementById(id)) {
-    return;
-  }
-  const link = document.createElement("link");
-  link.id = id;
-  link.rel = "stylesheet";
-  link.href = href;
-  document.head.append(link);
-}
-
 function apply(lang, pushUrl) {
   const t = I18N[lang] ?? I18N.ja;
   document.documentElement.lang = lang;
@@ -204,7 +179,6 @@ function apply(lang, pushUrl) {
   renderFaq(t.faq ?? []);
   renderPrivacy(t.privacyBody ?? []);
   renderLangs(lang);
-  loadFont(lang);
 
   try {
     localStorage.setItem(STORAGE_KEY, lang);
