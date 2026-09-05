@@ -111,6 +111,9 @@ cargo +nightly llvm-cov --all-targets --json --summary-only --output-path target
 
 [TESTING.md](TESTING.md) は、C2（condition coverage）、PBT、ISTQB コンポーネントテスト、Fake のみを使う非ライブ結合テストの範囲を定義しています。更新 protocol のテストも fixture の release metadata と checksum manifest だけを使います。テストは HKCU、実トレイ、Task Manager、実 CPU API、ネットワークに触れません。
 
+現行の配置とモジュール境界は [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) です。
+`PLAN.md` は初期実装計画であり、現行仕様ではありません。
+
 ## 範囲
 
 対象は Windows 10 / 11 64-bit の通知領域モニターです。CPU / メモリ / GPU / ストレージ、Claude Code / Codex の利用状況、トレイメニューの多言語化、GitHub Releases からの更新確認を含みます。ゲームや、犬以外の Runner 種別はこの対象外です。
