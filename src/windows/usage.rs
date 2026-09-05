@@ -40,8 +40,8 @@ use windows_sys::Win32::{
 };
 
 use crate::core::{
-    cost_cents, local_ymd, ymd_iso, ymd_key, FileCheckpointCursor, FileCheckpointKey, LimitWindow,
-    ProviderUsage, TokenUsage, UsageCheckpoint, UsageSnapshot,
+    cost_cents, local_ymd, ymd_iso, ymd_key, FileCheckpointCursor, FileCheckpointKey, LimitSource,
+    LimitWindow, ProviderUsage, TokenUsage, UsageCheckpoint, UsageSnapshot,
 };
 
 pub const USAGE_TIMER_ID: usize = 4;
@@ -231,13 +231,30 @@ impl UsageCollector {
             return false;
         };
         let mut changed = false;
+        let now_ms = unix_now_ms();
         if let Some(limits) = remote.claude {
-            apply_provider_limits(&mut self.snapshot.claude, limits);
+            apply_provider_limits(
+                &mut self.snapshot.claude,
+                limits,
+                now_ms,
+                LimitSource::Remote,
+            );
+            changed = true;
+        } else if !self.snapshot.claude.limits_last_error {
+            self.snapshot.claude.limits_last_error = true;
             changed = true;
         }
         if let Some(limits) = remote.codex {
-            apply_provider_limits(&mut self.snapshot.codex, limits);
+            apply_provider_limits(
+                &mut self.snapshot.codex,
+                limits,
+                now_ms,
+                LimitSource::Remote,
+            );
             self.codex_from_remote = true;
+            changed = true;
+        } else if !self.snapshot.codex.limits_last_error {
+            self.snapshot.codex.limits_last_error = true;
             changed = true;
         }
         changed
@@ -552,7 +569,12 @@ impl UsageCollector {
                 && !self.codex_from_remote
                 && is_subscription_limits(&limits)
             {
-                apply_provider_limits(&mut self.snapshot.codex, limits);
+                apply_provider_limits(
+                    &mut self.snapshot.codex,
+                    limits,
+                    now_ms,
+                    LimitSource::LocalJsonl,
+                );
             }
         }
         // Count every in-month event. A global timestamp watermark would drop
@@ -743,14 +765,12 @@ impl UsageCollector {
             }
             if let Some(limits) = read_codex_limits_tail(path, size) {
                 if is_subscription_limits(&limits) {
-                    self.snapshot.codex.primary =
-                        limits.primary.map(|window| window.effective(now_ms));
-                    self.snapshot.codex.secondary =
-                        limits.secondary.map(|window| window.effective(now_ms));
-                    if limits.plan_len != 0 {
-                        self.snapshot.codex.plan = limits.plan;
-                        self.snapshot.codex.plan_len = limits.plan_len;
-                    }
+                    apply_provider_limits(
+                        &mut self.snapshot.codex,
+                        limits,
+                        now_ms,
+                        LimitSource::LocalJsonl,
+                    );
                     break;
                 }
             }
@@ -783,12 +803,10 @@ impl UsageCollector {
                 claude: fetch_claude_limits(&claude_dir),
                 codex: fetch_codex_wham_limits(&codex_home),
             };
-            if remote.claude.is_some() || remote.codex.is_some() {
-                if let Ok(mut guard) = latest.lock() {
-                    *guard = Some(remote);
-                }
-                let _ = unsafe { PostMessageW(hwnd as HWND, USAGE_READY_MESSAGE, 0, 0) };
+            if let Ok(mut guard) = latest.lock() {
+                *guard = Some(remote);
             }
+            let _ = unsafe { PostMessageW(hwnd as HWND, USAGE_READY_MESSAGE, 0, 0) };
             in_flight.store(false, Ordering::SeqCst);
         });
     }
@@ -1682,9 +1700,17 @@ fn wham_window(window: WhamWindow) -> Option<LimitWindow> {
     })
 }
 
-fn apply_provider_limits(target: &mut ProviderUsage, limits: ProviderUsage) {
+fn apply_provider_limits(
+    target: &mut ProviderUsage,
+    limits: ProviderUsage,
+    now_ms: u64,
+    source: LimitSource,
+) {
     target.primary = limits.primary;
     target.secondary = limits.secondary;
+    target.limits_source = source;
+    target.limits_observed_at_ms = now_ms;
+    target.limits_last_error = false;
     if limits.plan_len != 0 {
         target.plan = limits.plan;
         target.plan_len = limits.plan_len;
@@ -1875,12 +1901,15 @@ fn path_size_mtime(path: &Path) -> Option<(u64, u64)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_current_month, is_safe_header_value, is_subscription_limits, parse_claude_line,
-        parse_claude_usage_response, parse_codex_limits_line, parse_codex_model,
+        apply_provider_limits, is_current_month, is_safe_header_value, is_subscription_limits,
+        parse_claude_line, parse_claude_usage_response, parse_codex_limits_line, parse_codex_model,
         parse_codex_usage_line, parse_wham_usage_response, persist_claude_credentials,
         read_claude_credentials, read_regular_file, unix_now_ms, UsageCollector, UsageTick,
     };
-    use crate::core::{local_hms, local_ymd};
+    use crate::core::{
+        format_limit_label, local_hms, local_ymd, LimitFreshness, LimitSource, LimitWindow,
+        ProviderUsage,
+    };
     use std::{fs, ptr};
 
     #[test]
@@ -2032,6 +2061,29 @@ mod tests {
         )
         .expect("claude max 20x");
         assert_eq!(max_20x.plan_label().as_deref(), Some("Max 20x"));
+    }
+
+    #[test]
+    fn component_expired_limit_apply_keeps_value_and_is_not_shown_as_zero() {
+        let limits = ProviderUsage {
+            primary: Some(LimitWindow {
+                used_tenths: 280,
+                resets_at_ms: 1_000,
+                window_minutes: 300,
+            }),
+            ..ProviderUsage::default()
+        };
+        let mut target = ProviderUsage::default();
+        apply_provider_limits(&mut target, limits, 2_000, LimitSource::Remote);
+        assert_eq!(target.limits_source, LimitSource::Remote);
+        assert_eq!(target.limits_observed_at_ms, 2_000);
+        assert!(!target.limits_last_error);
+        let stored = target.primary.expect("stored window");
+        assert_eq!(stored.used_tenths, 280);
+        assert_eq!(stored.freshness(2_000), LimitFreshness::Expired);
+        assert_eq!(format_limit_label("5h", target.primary, 2_000), "5h: —");
+        assert_ne!(format_limit_label("5h", target.primary, 2_000), "5h: 0%");
+        assert_ne!(format_limit_label("5h", target.primary, 2_000), "5h: 28%");
     }
 
     #[test]
