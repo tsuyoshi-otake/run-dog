@@ -566,18 +566,20 @@ impl UsageCollector {
             let day = ymd_key_from_unix(event.timestamp_ms, window.bias_minutes);
             let (year, month, day_of_month) = local_ymd(event.timestamp_ms, window.bias_minutes);
             let day_iso = ymd_iso(year, month, day_of_month);
-            let Some(cents) = cost_cents(&event.model, event.usage, Some(&day_iso)) else {
-                continue;
-            };
+            let cents = cost_cents(&event.model, event.usage, Some(&day_iso));
             let target = match kind {
                 SourceKind::Claude => &mut self.snapshot.claude,
                 SourceKind::Codex => &mut self.snapshot.codex,
             };
             if day == window.today {
-                target.today_cents = target.today_cents.saturating_add(cents);
+                if let Some(cents) = cents {
+                    target.today_cents = target.today_cents.saturating_add(cents);
+                }
             }
             if day >= window.month_start {
-                target.month_cents = target.month_cents.saturating_add(cents);
+                if let Some(cents) = cents {
+                    target.month_cents = target.month_cents.saturating_add(cents);
+                }
                 target.month_input_tokens = target
                     .month_input_tokens
                     .saturating_add(event.usage.processed_input_tokens());
@@ -2100,6 +2102,40 @@ mod tests {
         assert_eq!(collector.snapshot().claude.month_input_tokens, 1_000_000);
         assert_eq!(collector.snapshot().claude.month_output_tokens, 0);
         assert!(!collector.catch_up);
+    }
+
+    #[test]
+    fn component_unknown_model_keeps_tokens_and_omits_fabricated_cost() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-usage-unknown-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let project = root.join("claude").join("projects").join("p1");
+        fs::create_dir_all(&project).expect("temp project");
+        let now = unix_now_ms();
+        let (year, month, day) = local_ymd(now, 0);
+        let (hour, minute) = local_hms(now, 0);
+        let line = format!(
+            r#"{{"type":"assistant","timestamp":"{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:00Z","requestId":"u1","message":{{"id":"u1","model":"mystery-model","usage":{{"input_tokens":1000,"output_tokens":20}}}}}}"#
+        );
+        fs::write(project.join("session.jsonl"), format!("{line}\n")).expect("jsonl");
+
+        let mut collector =
+            UsageCollector::with_dirs(root.join("claude"), root.join("codex"), false);
+        let mut last = UsageTick::MoreWork;
+        for _ in 0..16 {
+            last = collector.tick(ptr::null_mut());
+            if last == UsageTick::Idle && collector.snapshot().claude.month_input_tokens > 0 {
+                break;
+            }
+        }
+        let snapshot = collector.snapshot().claude;
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(last, UsageTick::Idle);
+        assert_eq!(snapshot.month_input_tokens, 1_000);
+        assert_eq!(snapshot.month_output_tokens, 20);
+        assert_eq!(snapshot.month_cents, 0);
     }
 
     #[test]
