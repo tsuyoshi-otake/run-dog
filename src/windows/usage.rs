@@ -18,7 +18,7 @@ use std::{
     path::{Path, PathBuf},
     ptr,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
     thread,
@@ -40,10 +40,15 @@ use windows_sys::Win32::{
 };
 
 use crate::core::{
-    claude_dedupe_digest, cost_cents, decide_codex_event, is_long_context_request, local_ymd,
-    retain_keys_for_month, ymd_iso, ymd_key, ClaudeDedupeKey, CodexTokenTotals, CodexUsageDecision,
-    CursorKind, CursorRebuildReason, FileCheckpointKey, LimitWindow, LoadStatus, PersistStatus,
-    ProviderUsage, TokenUsage, UsageCursor, UsageSnapshot, UsageState,
+    cancel_fetch, claude_dedupe_digest, cost_cents, decide_codex_event, fetch_result_code,
+    finish_fetch, is_long_context_request, local_ymd, persist_result_code, persist_result_detail,
+    rebuild_reason_code, record_spawn_failure, reject_late_result, retain_keys_for_month,
+    should_start_fetch, start_fetch, ymd_iso, ymd_key, CheckpointSource, ClaudeDedupeKey,
+    CodexTokenTotals, CodexUsageDecision, CursorKind, CursorRebuildReason, DiagnosticEvent,
+    DiagnosticKind, DiagnosticRing, DiagnosticSnapshot, FetchErrorKind, FetchOutcome,
+    FileCheckpointKey, LimitWindow, LoadStatus, PersistStatus, ProviderFetchKind,
+    ProviderFetchState, ProviderUsage, RebuildState, RescanReason, RestoreResult, StartupMode,
+    TokenUsage, UsageCursor, UsageSnapshot, UsageState, USAGE_STATE_SCHEMA_VERSION,
 };
 
 #[cfg(test)]
@@ -133,14 +138,24 @@ pub struct UsageCollector {
     last_collected_ms: u64,
     file_checkpoint: HashMap<FileCheckpointKey, UsageCursor>,
     last_discover_ms: u64,
-    last_claude_limits_ms: u64,
     last_codex_limits_ms: u64,
     restat_skip: usize,
     catch_up: bool,
     deferred: VecDeque<PathBuf>,
     read_buf: Vec<u8>,
     codex_from_remote: bool,
-    remote_fetch: RemoteLimitsFetch,
+    claude_fetch: ProviderRemoteSlot,
+    codex_fetch: ProviderRemoteSlot,
+    diagnostics: DiagnosticRing,
+    startup_mode: StartupMode,
+    dirs_enumerated: u64,
+    files_stated: u64,
+    files_opened: u64,
+    usage_parse_bytes: u64,
+    integrity_probe_bytes: u64,
+    limits_tail_bytes: u64,
+    cursor_reset_count: u64,
+    cancelled: bool,
     checkpoint_dirty: bool,
     persist_checkpoint: bool,
     month_rescan_notify: bool,
@@ -148,14 +163,42 @@ pub struct UsageCollector {
     last_rebuild_reason: Option<CursorRebuildReason>,
 }
 
-struct RemoteLimits {
-    claude: Option<ProviderUsage>,
-    codex: Option<ProviderUsage>,
+struct SlotOutcome {
+    generation: u64,
+    usage: Option<ProviderUsage>,
+    error: Option<FetchErrorKind>,
+    observed_at_ms: u64,
 }
 
-struct RemoteLimitsFetch {
+struct ProviderRemoteSlot {
     in_flight: Arc<AtomicBool>,
-    latest: Arc<Mutex<Option<RemoteLimits>>>,
+    cancelled: Arc<AtomicBool>,
+    generation: Arc<AtomicU64>,
+    latest: Arc<Mutex<Option<SlotOutcome>>>,
+    state: ProviderFetchState,
+}
+
+impl ProviderRemoteSlot {
+    fn new() -> Self {
+        Self {
+            in_flight: Arc::new(AtomicBool::new(false)),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            generation: Arc::new(AtomicU64::new(0)),
+            latest: Arc::new(Mutex::new(None)),
+            state: ProviderFetchState::default(),
+        }
+    }
+
+    fn take(&mut self) -> Option<SlotOutcome> {
+        self.latest.lock().ok().and_then(|mut guard| guard.take())
+    }
+
+    fn cancel(&mut self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+        cancel_fetch(&mut self.state);
+        self.generation
+            .store(self.state.request_generation, Ordering::SeqCst);
+    }
 }
 
 impl UsageCollector {
@@ -203,25 +246,61 @@ impl UsageCollector {
             last_collected_ms: 0,
             file_checkpoint: HashMap::new(),
             last_discover_ms: 0,
-            last_claude_limits_ms: 0,
             last_codex_limits_ms: 0,
             restat_skip: 0,
             catch_up: true,
             deferred: VecDeque::new(),
             read_buf: Vec::new(),
             codex_from_remote: false,
-            remote_fetch: RemoteLimitsFetch {
-                in_flight: Arc::new(AtomicBool::new(false)),
-                latest: Arc::new(Mutex::new(None)),
-            },
+            claude_fetch: ProviderRemoteSlot::new(),
+            codex_fetch: ProviderRemoteSlot::new(),
+            diagnostics: DiagnosticRing::new(),
+            startup_mode: StartupMode::Test,
+            dirs_enumerated: 0,
+            files_stated: 0,
+            files_opened: 0,
+            usage_parse_bytes: 0,
+            integrity_probe_bytes: 0,
+            limits_tail_bytes: 0,
+            cursor_reset_count: 0,
+            cancelled: false,
             checkpoint_dirty: false,
             persist_checkpoint,
             month_rescan_notify: false,
             store,
             last_rebuild_reason: None,
         };
+        collector.startup_mode = if persist_checkpoint && collector.store_is_production() {
+            StartupMode::Production
+        } else {
+            StartupMode::Test
+        };
+        collector.record_diag(
+            DiagnosticKind::StartupMode,
+            collector.startup_mode as u64,
+            0,
+        );
+        collector.record_diag(
+            DiagnosticKind::CheckpointSchema,
+            u64::from(USAGE_STATE_SCHEMA_VERSION),
+            0,
+        );
+        collector.record_diag(DiagnosticKind::ClaudeFetch, 0, 0);
+        collector.record_diag(DiagnosticKind::CodexFetch, 0, 0);
+        collector.record_diag(DiagnosticKind::RescanReason, RescanReason::None as u64, 0);
         if persist_checkpoint {
             collector.restore_checkpoint(day_window(unix_now_ms()));
+        } else {
+            collector.record_diag(
+                DiagnosticKind::RestoreResult,
+                RestoreResult::Missing as u64,
+                0,
+            );
+            collector.record_diag(
+                DiagnosticKind::CheckpointSource,
+                CheckpointSource::Missing as u64,
+                0,
+            );
         }
         collector
     }
@@ -252,26 +331,71 @@ impl UsageCollector {
     }
 
     pub fn take_claude_limits(&mut self) -> bool {
-        let Some(remote) = self
-            .remote_fetch
-            .latest
-            .lock()
-            .ok()
-            .and_then(|mut guard| guard.take())
-        else {
-            return false;
-        };
+        let now_ms = unix_now_ms();
+        let claude = self.claude_fetch.take();
+        let codex = self.codex_fetch.take();
         let mut changed = false;
-        if let Some(limits) = remote.claude {
-            apply_provider_limits(&mut self.snapshot.claude, limits);
-            changed = true;
+        if let Some(outcome) = claude {
+            changed |= self.apply_remote_outcome(ProviderFetchKind::Claude, outcome, now_ms);
         }
-        if let Some(limits) = remote.codex {
-            apply_provider_limits(&mut self.snapshot.codex, limits);
-            self.codex_from_remote = true;
-            changed = true;
+        if let Some(outcome) = codex {
+            changed |= self.apply_remote_outcome(ProviderFetchKind::Codex, outcome, now_ms);
         }
         changed
+    }
+
+    /// Reject in-flight results after shutdown. Generation/cancel is the
+    /// contract; dropping the worker thread is not.
+    pub fn cancel_remote_fetches(&mut self) {
+        self.cancelled = true;
+        self.claude_fetch.cancel();
+        self.codex_fetch.cancel();
+        self.record_diag(
+            DiagnosticKind::ClaudeFetch,
+            u64::from(FetchErrorKind::Cancelled.as_u32()),
+            0,
+        );
+        self.record_diag(
+            DiagnosticKind::CodexFetch,
+            u64::from(FetchErrorKind::Cancelled.as_u32()),
+            0,
+        );
+    }
+
+    #[must_use]
+    pub fn diagnostics(&self) -> DiagnosticSnapshot {
+        let mut snapshot = DiagnosticSnapshot::from_ring(&self.diagnostics);
+        snapshot.startup_mode = self.startup_mode as u64;
+        snapshot.known_files = self.files.len() as u64;
+        snapshot.dirs_enumerated = self.dirs_enumerated;
+        snapshot.files_stated = self.files_stated;
+        snapshot.files_opened = self.files_opened;
+        snapshot.usage_parse_bytes = self.usage_parse_bytes;
+        snapshot.integrity_probe_bytes = self.integrity_probe_bytes;
+        snapshot.limits_tail_bytes = self.limits_tail_bytes;
+        snapshot.cursor_reset_count = self.cursor_reset_count;
+        if let Some(reason) = self.last_rebuild_reason {
+            snapshot.cursor_reset_reason = rebuild_reason_code(reason);
+        }
+        snapshot.catch_up = u64::from(self.catch_up);
+        snapshot.rebuild_state = if self.month_rescan_notify {
+            RebuildState::Rescan as u64
+        } else if self.catch_up {
+            RebuildState::CatchUp as u64
+        } else {
+            RebuildState::Idle as u64
+        };
+        snapshot.pending_files = self.pending.len() as u64;
+        snapshot.oldest_pending_age_ms = oldest_pending_age_ms(&self.pending, &self.files);
+        snapshot.claude_fetch = fetch_result_code(
+            self.claude_fetch.state.last_error,
+            self.claude_fetch.state.freshness,
+        );
+        snapshot.codex_fetch = fetch_result_code(
+            self.codex_fetch.state.last_error,
+            self.codex_fetch.state.freshness,
+        );
+        snapshot
     }
 
     #[must_use]
@@ -317,6 +441,7 @@ impl UsageCollector {
             }
         }
         self.maybe_fetch_remote_limits(hwnd, now_ms);
+        self.record_tick_gauges();
 
         if self.catch_up && self.discover.is_empty() && !unread_remaining {
             self.finish_catch_up(window);
@@ -335,14 +460,57 @@ impl UsageCollector {
     }
 
     fn restore_checkpoint(&mut self, window: DayWindow) {
+        self.record_diag(
+            DiagnosticKind::CheckpointSchema,
+            u64::from(USAGE_STATE_SCHEMA_VERSION),
+            0,
+        );
         if let Some(store) = self.store.as_ref() {
             if store.refuses_provider_roots(&self.claude_dir, &self.codex_home) {
                 self.store = None;
                 self.persist_checkpoint = false;
+                self.record_diag(
+                    DiagnosticKind::RestoreResult,
+                    RestoreResult::Refused as u64,
+                    0,
+                );
+                self.record_diag(
+                    DiagnosticKind::CheckpointSource,
+                    CheckpointSource::Missing as u64,
+                    0,
+                );
                 return;
             }
             match store.load() {
-                LoadStatus::Loaded(state) | LoadStatus::RecoveredPrior { state, .. } => {
+                LoadStatus::Loaded(state) => {
+                    let bytes = state.encode().len() as u64;
+                    self.record_diag(
+                        DiagnosticKind::CheckpointSource,
+                        CheckpointSource::FileStore as u64,
+                        0,
+                    );
+                    self.record_diag(
+                        DiagnosticKind::RestoreResult,
+                        RestoreResult::Loaded as u64,
+                        0,
+                    );
+                    self.record_diag(DiagnosticKind::CheckpointBytes, bytes, 0);
+                    self.apply_state(window, state);
+                    return;
+                }
+                LoadStatus::RecoveredPrior { state, .. } => {
+                    let bytes = state.encode().len() as u64;
+                    self.record_diag(
+                        DiagnosticKind::CheckpointSource,
+                        CheckpointSource::RecoveredPrior as u64,
+                        0,
+                    );
+                    self.record_diag(
+                        DiagnosticKind::RestoreResult,
+                        RestoreResult::Recovered as u64,
+                        0,
+                    );
+                    self.record_diag(DiagnosticKind::CheckpointBytes, bytes, 0);
                     self.apply_state(window, state);
                     return;
                 }
@@ -350,12 +518,48 @@ impl UsageCollector {
             }
         }
         if !self.store_is_production() {
+            self.record_diag(
+                DiagnosticKind::RestoreResult,
+                RestoreResult::Missing as u64,
+                0,
+            );
+            self.record_diag(
+                DiagnosticKind::CheckpointSource,
+                CheckpointSource::Missing as u64,
+                0,
+            );
             return;
         }
         let Some(checkpoint) = super::registry::load_usage_checkpoint() else {
+            self.record_diag(
+                DiagnosticKind::RestoreResult,
+                RestoreResult::Missing as u64,
+                0,
+            );
+            self.record_diag(
+                DiagnosticKind::CheckpointSource,
+                CheckpointSource::Missing as u64,
+                0,
+            );
             return;
         };
-        self.apply_state(window, UsageState::from_registry_checkpoint(&checkpoint, 0));
+        let migrated = UsageState::from_registry_checkpoint(&checkpoint, 0);
+        self.record_diag(
+            DiagnosticKind::CheckpointSource,
+            CheckpointSource::Registry as u64,
+            0,
+        );
+        self.record_diag(
+            DiagnosticKind::RestoreResult,
+            RestoreResult::Loaded as u64,
+            0,
+        );
+        self.record_diag(
+            DiagnosticKind::CheckpointBytes,
+            migrated.encode().len() as u64,
+            0,
+        );
+        self.apply_state(window, migrated);
         self.checkpoint_dirty = true;
         self.persist_checkpoint_if_needed(window);
     }
@@ -470,10 +674,18 @@ impl UsageCollector {
             return;
         }
         let state = self.build_state(window);
+        let write_bytes = state.encode().len() as u64;
         let Some(store) = self.store.as_mut() else {
             return;
         };
-        match store.persist(&state) {
+        let status = store.persist(&state);
+        self.record_diag(DiagnosticKind::CheckpointWriteBytes, write_bytes, 0);
+        self.record_diag(
+            DiagnosticKind::CheckpointSaveResult,
+            persist_result_code(status),
+            persist_result_detail(status),
+        );
+        match status {
             PersistStatus::Applied { .. } => {
                 self.file_checkpoint = state
                     .cursors
@@ -539,6 +751,7 @@ impl UsageCollector {
             self.month_key = window.month_start;
         }
         self.month_rescan_notify = true;
+        self.record_diag(DiagnosticKind::RescanReason, RescanReason::User as u64, 0);
         self.begin_month_rescan(window);
     }
 
@@ -599,6 +812,7 @@ impl UsageCollector {
         let Ok(entries) = fs::read_dir(dir) else {
             return;
         };
+        self.dirs_enumerated = self.dirs_enumerated.saturating_add(1);
         let mut files = Vec::new();
         let mut dirs = Vec::new();
         for entry in entries.flatten() {
@@ -640,6 +854,7 @@ impl UsageCollector {
         let Some((size, mtime_ms)) = path_size_mtime(path) else {
             return;
         };
+        self.files_stated = self.files_stated.saturating_add(1);
         if require_recent_mtime
             && ymd_key_from_unix(mtime_ms, window.bias_minutes) < previous_month_start(window)
         {
@@ -652,6 +867,7 @@ impl UsageCollector {
         } else {
             return;
         };
+        let mut registered_rebuild = None;
         if let std::collections::hash_map::Entry::Vacant(entry) =
             self.files.entry(path.to_path_buf())
         {
@@ -668,6 +884,8 @@ impl UsageCollector {
             );
             if let Some(reason) = rebuild {
                 self.last_rebuild_reason = Some(reason);
+                self.cursor_reset_count = self.cursor_reset_count.saturating_add(1);
+                registered_rebuild = Some(reason);
                 self.checkpoint_dirty = true;
             }
             let stored = file_checkpoint_key(path, &self.claude_dir, &self.codex_home, kind)
@@ -696,12 +914,21 @@ impl UsageCollector {
                 self.enqueue_scan(path.to_path_buf(), mtime_ms, window);
             }
         }
+        if let Some(reason) = registered_rebuild {
+            self.record_diag(DiagnosticKind::CursorResetCount, self.cursor_reset_count, 0);
+            self.record_diag(
+                DiagnosticKind::CursorResetReason,
+                rebuild_reason_code(reason),
+                0,
+            );
+        }
     }
 
     fn scan_file(&mut self, path: &Path, window: DayWindow, now_ms: u64) -> u64 {
         let Some((size, mtime_ms)) = path_size_mtime(path) else {
             return 0;
         };
+        self.files_stated = self.files_stated.saturating_add(1);
         let max_bytes = self.byte_budget();
         let prefix = file_prefix_fingerprint(path);
         let file_id = jsonl_file_id(path);
@@ -731,11 +958,20 @@ impl UsageCollector {
         };
         if let Some(reason) = rebuild {
             self.last_rebuild_reason = Some(reason);
+            self.cursor_reset_count = self.cursor_reset_count.saturating_add(1);
+            self.record_diag(DiagnosticKind::CursorResetCount, self.cursor_reset_count, 0);
+            self.record_diag(
+                DiagnosticKind::CursorResetReason,
+                rebuild_reason_code(reason),
+                0,
+            );
             self.checkpoint_dirty = true;
         }
         if size_matches_offset {
             return 0;
         }
+        self.integrity_probe_bytes = self.integrity_probe_bytes.saturating_add(64);
+        self.files_opened = self.files_opened.saturating_add(1);
         let chunk = read_appended(
             path,
             offset,
@@ -745,6 +981,7 @@ impl UsageCollector {
             max_bytes,
             &mut self.read_buf,
         );
+        self.usage_parse_bytes = self.usage_parse_bytes.saturating_add(chunk.consumed);
         let Some(cursor) = self.files.get_mut(path) else {
             return chunk.consumed;
         };
@@ -983,6 +1220,10 @@ impl UsageCollector {
             if now_ms.saturating_sub(mtime_ms) > 7 * 86_400_000 {
                 continue;
             }
+            self.limits_tail_bytes = self
+                .limits_tail_bytes
+                .saturating_add(size.min(CODEX_LIMITS_TAIL));
+            self.files_opened = self.files_opened.saturating_add(1);
             if let Some(limits) = read_codex_limits_tail(path, size) {
                 if is_subscription_limits(&limits) {
                     self.snapshot.codex.primary =
@@ -1000,40 +1241,229 @@ impl UsageCollector {
     }
 
     fn maybe_fetch_remote_limits(&mut self, hwnd: HWND, now_ms: u64) {
-        if hwnd.is_null() {
+        if self.cancelled || hwnd.is_null() {
             return;
         }
-        if now_ms.saturating_sub(self.last_claude_limits_ms) < CLAUDE_LIMITS_PERIOD_MS {
-            return;
-        }
-        if self
-            .remote_fetch
-            .in_flight
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_err()
-        {
-            return;
-        }
-        self.last_claude_limits_ms = now_ms;
         let claude_dir = self.claude_dir.clone();
+        self.spawn_provider_fetch(
+            ProviderFetchKind::Claude,
+            hwnd,
+            now_ms,
+            CLAUDE_LIMITS_PERIOD_MS,
+            "run-dog-claude-limits",
+            move || fetch_claude_limits(&claude_dir),
+        );
         let codex_home = self.codex_home.clone();
-        let latest = Arc::clone(&self.remote_fetch.latest);
-        let in_flight = Arc::clone(&self.remote_fetch.in_flight);
-        let hwnd = hwnd as isize;
-        thread::spawn(move || {
-            let remote = RemoteLimits {
-                claude: fetch_claude_limits(&claude_dir),
-                codex: fetch_codex_wham_limits(&codex_home),
-            };
-            if remote.claude.is_some() || remote.codex.is_some() {
-                if let Ok(mut guard) = latest.lock() {
-                    *guard = Some(remote);
-                }
-                let _ = unsafe { PostMessageW(hwnd as HWND, USAGE_READY_MESSAGE, 0, 0) };
-            }
-            in_flight.store(false, Ordering::SeqCst);
-        });
+        self.spawn_provider_fetch(
+            ProviderFetchKind::Codex,
+            hwnd,
+            now_ms,
+            CODEX_LIMITS_PERIOD_MS,
+            "run-dog-codex-limits",
+            move || fetch_codex_wham_limits(&codex_home),
+        );
     }
+
+    fn spawn_provider_fetch<F>(
+        &mut self,
+        kind: ProviderFetchKind,
+        hwnd: HWND,
+        now_ms: u64,
+        period_ms: u64,
+        name: &str,
+        fetch: F,
+    ) where
+        F: FnOnce() -> Result<ProviderUsage, FetchErrorKind> + Send + 'static,
+    {
+        let spawn_failed = {
+            let slot = match kind {
+                ProviderFetchKind::Claude => &mut self.claude_fetch,
+                ProviderFetchKind::Codex => &mut self.codex_fetch,
+            };
+            if slot.cancelled.load(Ordering::SeqCst) {
+                return;
+            }
+            if !should_start_fetch(&slot.state, now_ms, period_ms) {
+                return;
+            }
+            if slot
+                .in_flight
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_err()
+            {
+                return;
+            }
+            let generation = start_fetch(&mut slot.state, now_ms);
+            slot.generation.store(generation, Ordering::SeqCst);
+            let latest = Arc::clone(&slot.latest);
+            let in_flight = Arc::clone(&slot.in_flight);
+            let cancelled = Arc::clone(&slot.cancelled);
+            let hwnd_bits = hwnd as isize;
+            let worker = thread::Builder::new().name(name.to_owned()).spawn(move || {
+                let observed_at_ms = unix_now_ms();
+                let (usage, error) = if cancelled.load(Ordering::SeqCst) {
+                    (None, Some(FetchErrorKind::Cancelled))
+                } else {
+                    match fetch() {
+                        Ok(usage) => (Some(usage), None),
+                        Err(error) => (None, Some(error)),
+                    }
+                };
+                if let Ok(mut guard) = latest.lock() {
+                    *guard = Some(SlotOutcome {
+                        generation,
+                        usage,
+                        error,
+                        observed_at_ms,
+                    });
+                }
+                in_flight.store(false, Ordering::SeqCst);
+                let _ = unsafe { PostMessageW(hwnd_bits as HWND, USAGE_READY_MESSAGE, 0, 0) };
+            });
+            if worker.is_err() {
+                slot.in_flight.store(false, Ordering::SeqCst);
+                record_spawn_failure(&mut slot.state, now_ms);
+                true
+            } else {
+                false
+            }
+        };
+        if spawn_failed {
+            self.record_diag(
+                fetch_kind_diag(kind),
+                u64::from(FetchErrorKind::SpawnFailed.as_u32()),
+                0,
+            );
+        }
+    }
+
+    fn apply_remote_outcome(
+        &mut self,
+        kind: ProviderFetchKind,
+        outcome: SlotOutcome,
+        now_ms: u64,
+    ) -> bool {
+        let cancelled = self.cancelled
+            || match kind {
+                ProviderFetchKind::Claude => self.claude_fetch.cancelled.load(Ordering::SeqCst),
+                ProviderFetchKind::Codex => self.codex_fetch.cancelled.load(Ordering::SeqCst),
+            };
+        let started_generation = match kind {
+            ProviderFetchKind::Claude => self.claude_fetch.state.request_generation,
+            ProviderFetchKind::Codex => self.codex_fetch.state.request_generation,
+        };
+        if reject_late_result(cancelled, started_generation, outcome.generation) {
+            match kind {
+                ProviderFetchKind::Claude => self.claude_fetch.state.in_flight = false,
+                ProviderFetchKind::Codex => self.codex_fetch.state.in_flight = false,
+            }
+            self.record_diag(
+                fetch_kind_diag(kind),
+                u64::from(FetchErrorKind::GenerationMismatch.as_u32()),
+                0,
+            );
+            return false;
+        }
+        let reset_at_ms = outcome.usage.as_ref().map(provider_reset_at).unwrap_or(0);
+        let fetch_outcome = FetchOutcome {
+            generation: outcome.generation,
+            succeeded: outcome.usage.is_some(),
+            error: outcome.error,
+            observed_at_ms: outcome.observed_at_ms,
+            reset_at_ms,
+        };
+        let fetch_code = {
+            let slot = match kind {
+                ProviderFetchKind::Claude => &mut self.claude_fetch,
+                ProviderFetchKind::Codex => &mut self.codex_fetch,
+            };
+            finish_fetch(&mut slot.state, now_ms, &fetch_outcome);
+            fetch_result_code(slot.state.last_error, slot.state.freshness)
+        };
+        self.record_diag(
+            fetch_kind_diag(kind),
+            fetch_code,
+            outcome.error.map(FetchErrorKind::as_u32).unwrap_or(0),
+        );
+        let Some(limits) = outcome.usage else {
+            return false;
+        };
+        match kind {
+            ProviderFetchKind::Claude => apply_provider_limits(&mut self.snapshot.claude, limits),
+            ProviderFetchKind::Codex => {
+                apply_provider_limits(&mut self.snapshot.codex, limits);
+                self.codex_from_remote = true;
+            }
+        }
+        true
+    }
+
+    fn record_diag(&mut self, kind: DiagnosticKind, value: u64, detail: u32) {
+        self.diagnostics
+            .push(DiagnosticEvent::new(kind, value, detail, unix_now_ms()));
+    }
+
+    fn record_tick_gauges(&mut self) {
+        let snapshot = self.diagnostics();
+        self.record_diag(DiagnosticKind::KnownFiles, snapshot.known_files, 0);
+        self.record_diag(DiagnosticKind::DirsEnumerated, snapshot.dirs_enumerated, 0);
+        self.record_diag(DiagnosticKind::FilesStated, snapshot.files_stated, 0);
+        self.record_diag(DiagnosticKind::FilesOpened, snapshot.files_opened, 0);
+        self.record_diag(
+            DiagnosticKind::UsageParseBytes,
+            snapshot.usage_parse_bytes,
+            0,
+        );
+        self.record_diag(
+            DiagnosticKind::IntegrityProbeBytes,
+            snapshot.integrity_probe_bytes,
+            0,
+        );
+        self.record_diag(
+            DiagnosticKind::LimitsTailBytes,
+            snapshot.limits_tail_bytes,
+            0,
+        );
+        self.record_diag(
+            DiagnosticKind::CursorResetCount,
+            snapshot.cursor_reset_count,
+            0,
+        );
+        self.record_diag(DiagnosticKind::CatchUpState, snapshot.catch_up, 0);
+        self.record_diag(DiagnosticKind::RebuildState, snapshot.rebuild_state, 0);
+        self.record_diag(DiagnosticKind::PendingFiles, snapshot.pending_files, 0);
+        self.record_diag(
+            DiagnosticKind::OldestPendingAge,
+            snapshot.oldest_pending_age_ms,
+            0,
+        );
+    }
+}
+
+fn fetch_kind_diag(kind: ProviderFetchKind) -> DiagnosticKind {
+    match kind {
+        ProviderFetchKind::Claude => DiagnosticKind::ClaudeFetch,
+        ProviderFetchKind::Codex => DiagnosticKind::CodexFetch,
+    }
+}
+
+fn provider_reset_at(usage: &ProviderUsage) -> u64 {
+    usage
+        .primary
+        .or(usage.secondary)
+        .or(usage.fable)
+        .map(|window| window.resets_at_ms)
+        .unwrap_or(0)
+}
+
+fn oldest_pending_age_ms(pending: &VecDeque<PathBuf>, files: &HashMap<PathBuf, FileCursor>) -> u64 {
+    let now = unix_now_ms();
+    pending
+        .iter()
+        .filter_map(|path| files.get(path).map(|cursor| cursor.mtime_ms))
+        .min()
+        .map(|mtime| now.saturating_sub(mtime))
+        .unwrap_or(0)
 }
 
 struct ParsedEvent {
@@ -1797,35 +2227,43 @@ struct OAuthTokenResponse {
     expires_at: Option<u64>,
 }
 
-fn fetch_claude_limits(claude_dir: &Path) -> Option<ProviderUsage> {
-    let mut creds = read_claude_credentials(claude_dir)?;
+fn fetch_claude_limits(claude_dir: &Path) -> Result<ProviderUsage, FetchErrorKind> {
+    let mut creds = read_claude_credentials(claude_dir).ok_or(FetchErrorKind::AuthMissing)?;
     if claude_token_expired(&creds) {
         let _ = refresh_claude_credentials(claude_dir, &mut creds);
     }
-    if let Some(usage) = claude_usage_request(&creds.access_token, creds.plan.as_deref()) {
-        return Some(usage);
+    match claude_usage_request(&creds.access_token, creds.plan.as_deref()) {
+        Ok(usage) => return Ok(usage),
+        Err(FetchErrorKind::AuthMissing) => {}
+        Err(error) => {
+            if !refresh_claude_credentials(claude_dir, &mut creds) {
+                return Err(error);
+            }
+            return claude_usage_request(&creds.access_token, creds.plan.as_deref());
+        }
     }
     if refresh_claude_credentials(claude_dir, &mut creds) {
         claude_usage_request(&creds.access_token, creds.plan.as_deref())
     } else {
-        None
+        Err(FetchErrorKind::AuthMissing)
     }
 }
 
-fn claude_usage_request(token: &str, plan: Option<&str>) -> Option<ProviderUsage> {
-    let headers = bearer_headers(token, "anthropic-beta: oauth-2025-04-20\r\n")?;
+fn claude_usage_request(token: &str, plan: Option<&str>) -> Result<ProviderUsage, FetchErrorKind> {
+    let headers = bearer_headers(token, "anthropic-beta: oauth-2025-04-20\r\n")
+        .ok_or(FetchErrorKind::AuthMissing)?;
     let (status, body) = super::update::https_get(
         "api.anthropic.com",
         "/api/oauth/usage",
         &headers,
         16 * 1_024,
     )
-    .ok()?;
+    .map_err(|_| FetchErrorKind::Transport)?;
     if status != 200 {
-        return None;
+        return Err(FetchErrorKind::HttpStatus);
     }
-    let text = String::from_utf8(body).ok()?;
-    parse_claude_usage_response(&text, plan)
+    let text = String::from_utf8(body).map_err(|_| FetchErrorKind::Parse)?;
+    parse_claude_usage_response(&text, plan).ok_or(FetchErrorKind::Parse)
 }
 
 fn refresh_claude_credentials(claude_dir: &Path, creds: &mut ClaudeCreds) -> bool {
@@ -1925,14 +2363,21 @@ struct WhamWindow {
     reset_at: Option<f64>,
 }
 
-fn fetch_codex_wham_limits(codex_home: &Path) -> Option<ProviderUsage> {
-    let raw = read_regular_file(&codex_home.join("auth.json"))?;
-    let file: CodexAuthFile = serde_json::from_str(&raw).ok()?;
-    let tokens = file.tokens?;
-    let access = tokens.access_token.filter(|token| !token.is_empty())?;
-    let account = tokens.account_id.filter(|id| !id.is_empty())?;
+fn fetch_codex_wham_limits(codex_home: &Path) -> Result<ProviderUsage, FetchErrorKind> {
+    let raw =
+        read_regular_file(&codex_home.join("auth.json")).ok_or(FetchErrorKind::AuthMissing)?;
+    let file: CodexAuthFile = serde_json::from_str(&raw).map_err(|_| FetchErrorKind::Parse)?;
+    let tokens = file.tokens.ok_or(FetchErrorKind::AuthMissing)?;
+    let access = tokens
+        .access_token
+        .filter(|token| !token.is_empty())
+        .ok_or(FetchErrorKind::AuthMissing)?;
+    let account = tokens
+        .account_id
+        .filter(|id| !id.is_empty())
+        .ok_or(FetchErrorKind::AuthMissing)?;
     if !is_safe_header_value(&access) || !is_safe_header_value(&account) {
-        return None;
+        return Err(FetchErrorKind::AuthMissing);
     }
     let (status, body) = super::update::https_get(
         "chatgpt.com",
@@ -1942,11 +2387,12 @@ fn fetch_codex_wham_limits(codex_home: &Path) -> Option<ProviderUsage> {
         ),
         16 * 1_024,
     )
-    .ok()?;
+    .map_err(|_| FetchErrorKind::Transport)?;
     if status != 200 {
-        return None;
+        return Err(FetchErrorKind::HttpStatus);
     }
-    parse_wham_usage_response(&String::from_utf8(body).ok()?)
+    let text = String::from_utf8(body).map_err(|_| FetchErrorKind::Parse)?;
+    parse_wham_usage_response(&text).ok_or(FetchErrorKind::Parse)
 }
 
 pub fn parse_wham_usage_response(body: &str) -> Option<ProviderUsage> {
@@ -2398,6 +2844,54 @@ mod tests {
             }
         }
 
+        fn test_complete_fetch(
+            &mut self,
+            kind: crate::core::ProviderFetchKind,
+            usage: Option<crate::core::ProviderUsage>,
+            error: Option<crate::core::FetchErrorKind>,
+        ) -> bool {
+            let now = unix_now_ms();
+            let slot = match kind {
+                crate::core::ProviderFetchKind::Claude => &mut self.claude_fetch,
+                crate::core::ProviderFetchKind::Codex => &mut self.codex_fetch,
+            };
+            let generation = if slot.state.request_generation == 0 || !slot.state.in_flight {
+                crate::core::start_fetch(&mut slot.state, now)
+            } else {
+                slot.state.request_generation
+            };
+            self.apply_remote_outcome(
+                kind,
+                super::SlotOutcome {
+                    generation,
+                    usage,
+                    error,
+                    observed_at_ms: now,
+                },
+                now,
+            )
+        }
+
+        fn test_fetch_freshness(
+            &self,
+            kind: crate::core::ProviderFetchKind,
+        ) -> crate::core::LimitsFreshness {
+            match kind {
+                crate::core::ProviderFetchKind::Claude => self.claude_fetch.state.freshness,
+                crate::core::ProviderFetchKind::Codex => self.codex_fetch.state.freshness,
+            }
+        }
+
+        fn test_mark_spawn_failure(&mut self, kind: crate::core::ProviderFetchKind) {
+            let now = unix_now_ms();
+            let slot = match kind {
+                crate::core::ProviderFetchKind::Claude => &mut self.claude_fetch,
+                crate::core::ProviderFetchKind::Codex => &mut self.codex_fetch,
+            };
+            let _ = crate::core::start_fetch(&mut slot.state, now);
+            crate::core::record_spawn_failure(&mut slot.state, now);
+        }
+
         fn test_remember_codex(&mut self, logical_id: &str) {
             self.file_checkpoint.insert(
                 crate::core::FileCheckpointKey::Codex(logical_id.to_owned()),
@@ -2411,6 +2905,17 @@ mod tests {
                     last_codex_total: None,
                 },
             );
+        }
+    }
+
+    fn sample_limit_usage(used_tenths: u16) -> crate::core::ProviderUsage {
+        crate::core::ProviderUsage {
+            primary: Some(crate::core::LimitWindow {
+                used_tenths,
+                resets_at_ms: unix_now_ms().saturating_add(3_600_000),
+                window_minutes: 300,
+            }),
+            ..crate::core::ProviderUsage::default()
         }
     }
 
@@ -3155,6 +3660,151 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         assert_eq!(usage.month_input_tokens, 120);
         assert_eq!(usage.month_output_tokens, 7);
+    }
+
+    #[test]
+    fn component_claude_failure_does_not_block_codex_apply() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-fetch-isol-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let mut collector = new_claude_collector(&root);
+        assert!(collector.test_complete_fetch(
+            crate::core::ProviderFetchKind::Codex,
+            Some(sample_limit_usage(210)),
+            None,
+        ));
+        assert!(!collector.test_complete_fetch(
+            crate::core::ProviderFetchKind::Claude,
+            None,
+            Some(crate::core::FetchErrorKind::HttpStatus),
+        ));
+        let snap = collector.snapshot();
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(snap.codex.primary.unwrap().used_tenths, 210);
+        assert!(snap.claude.primary.is_none());
+        assert_eq!(
+            collector.test_fetch_freshness(crate::core::ProviderFetchKind::Claude),
+            crate::core::LimitsFreshness::Failed
+        );
+        assert_eq!(
+            collector.test_fetch_freshness(crate::core::ProviderFetchKind::Codex),
+            crate::core::LimitsFreshness::Current
+        );
+    }
+
+    #[test]
+    fn component_failed_fetch_does_not_write_zero_percent() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-fetch-zero-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let mut collector = new_claude_collector(&root);
+        assert!(collector.test_complete_fetch(
+            crate::core::ProviderFetchKind::Claude,
+            Some(sample_limit_usage(410)),
+            None,
+        ));
+        assert!(!collector.test_complete_fetch(
+            crate::core::ProviderFetchKind::Claude,
+            None,
+            Some(crate::core::FetchErrorKind::Transport),
+        ));
+        let window = collector.snapshot().claude.primary.unwrap();
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(window.used_tenths, 410);
+        assert_ne!(window.used_tenths, 0);
+        assert_eq!(
+            collector.test_fetch_freshness(crate::core::ProviderFetchKind::Claude),
+            crate::core::LimitsFreshness::Stale
+        );
+    }
+
+    #[test]
+    fn component_late_fetch_after_cancel_is_rejected() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-fetch-late-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let mut collector = new_claude_collector(&root);
+        let now = unix_now_ms();
+        let generation = crate::core::start_fetch(&mut collector.claude_fetch.state, now);
+        collector.cancel_remote_fetches();
+        let applied = collector.apply_remote_outcome(
+            crate::core::ProviderFetchKind::Claude,
+            super::SlotOutcome {
+                generation,
+                usage: Some(sample_limit_usage(990)),
+                error: None,
+                observed_at_ms: now,
+            },
+            now,
+        );
+        let _ = fs::remove_dir_all(&root);
+        assert!(!applied);
+        assert!(collector.snapshot().claude.primary.is_none());
+    }
+
+    #[test]
+    fn component_spawn_failure_clears_inflight() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-fetch-spawn-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let mut collector = new_claude_collector(&root);
+        collector.test_mark_spawn_failure(crate::core::ProviderFetchKind::Codex);
+        let _ = fs::remove_dir_all(&root);
+        assert!(!collector.codex_fetch.state.in_flight);
+        assert_eq!(
+            collector.codex_fetch.state.last_error,
+            Some(crate::core::FetchErrorKind::SpawnFailed)
+        );
+        assert!(crate::core::should_start_fetch(
+            &collector.codex_fetch.state,
+            unix_now_ms() + crate::core::FETCH_BACKOFF_INITIAL_MS,
+            super::CODEX_LIMITS_PERIOD_MS,
+        ));
+    }
+
+    #[test]
+    fn component_diagnostics_are_bounded_and_secret_free() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-diag-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let store_root = root.join("store");
+        write_codex_session(
+            &root,
+            "rollout.jsonl",
+            &[token_count_line(&current_stamp(), 80, 20, 5, 80, 20, 5)],
+        );
+        let mut collector = new_persisted_collector(&root, store_root);
+        assert_eq!(tick_idle(&mut collector), UsageTick::Idle);
+        collector.test_complete_fetch(
+            crate::core::ProviderFetchKind::Claude,
+            None,
+            Some(crate::core::FetchErrorKind::AuthMissing),
+        );
+        let snapshot = collector.diagnostics();
+        let rendered = format!("{snapshot:?}");
+        let _ = fs::remove_dir_all(&root);
+        assert!(snapshot.known_files >= 1);
+        assert!(snapshot.usage_parse_bytes > 0);
+        assert_eq!(
+            snapshot.checkpoint_schema,
+            u64::from(crate::core::USAGE_STATE_SCHEMA_VERSION)
+        );
+        assert_eq!(snapshot.startup_mode, crate::core::StartupMode::Test as u64);
+        assert!(!rendered.contains("Bearer"));
+        assert!(!rendered.contains("Authorization"));
+        assert!(!rendered.contains("sk-"));
+        assert!(!rendered.contains("prompt"));
+        assert!(!rendered.contains("refresh_token"));
     }
 
     #[test]
