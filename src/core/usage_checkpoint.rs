@@ -18,10 +18,15 @@ pub enum FileCheckpointKey {
     Codex(String),
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct FileCheckpointCursor {
     pub offset: u64,
     pub size: u64,
+    pub codex_total_input: u64,
+    pub codex_total_cached: u64,
+    pub codex_total_output: u64,
+    pub has_codex_total: bool,
+    pub last_codex_model: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -79,9 +84,24 @@ impl UsageCheckpoint {
                 FileCheckpointKey::Claude(path) | FileCheckpointKey::Codex(path) => path,
             };
             out.push_str(&format!(
-                "file={prefix}\t{path}\t{}\t{}\n",
+                "file={prefix}\t{path}\t{}\t{}",
                 cursor.offset, cursor.size
             ));
+            if cursor.has_codex_total {
+                out.push_str(&format!(
+                    "\t{}\t{}\t{}",
+                    cursor.codex_total_input, cursor.codex_total_cached, cursor.codex_total_output
+                ));
+            }
+            if let Some(model) = cursor
+                .last_codex_model
+                .as_deref()
+                .filter(|model| is_checkpoint_model_token(model))
+            {
+                out.push('\t');
+                out.push_str(model);
+            }
+            out.push('\n');
         }
         out
     }
@@ -133,13 +153,13 @@ impl UsageCheckpoint {
             } else if let Some(value) = line.strip_prefix("codex_out=") {
                 codex_out = value.parse().ok()?;
             } else if let Some(value) = line.strip_prefix("file=") {
-                let (prefix, path, offset, size) = parse_file_line(value)?;
+                let (prefix, path, cursor) = parse_file_line(value)?;
                 let key = match prefix {
                     'c' => FileCheckpointKey::Claude(path.to_owned()),
                     'x' => FileCheckpointKey::Codex(path.to_owned()),
                     _ => return None,
                 };
-                files.insert(key, FileCheckpointCursor { offset, size });
+                files.insert(key, cursor);
             }
         }
         if !catch_up_done {
@@ -179,13 +199,43 @@ fn file_key_sort_key(key: &FileCheckpointKey) -> (&'static str, &str) {
     }
 }
 
-fn parse_file_line(value: &str) -> Option<(char, &str, u64, u64)> {
+fn is_checkpoint_model_token(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 64 && !value.contains(['\t', '\n', '\r', ' '])
+}
+
+fn parse_file_line(value: &str) -> Option<(char, &str, FileCheckpointCursor)> {
     let mut parts = value.split('\t');
     let prefix = parts.next()?.chars().next()?;
     let path = parts.next()?;
     let offset = parts.next()?.parse().ok()?;
     let size = parts.next()?.parse().ok()?;
-    Some((prefix, path, offset, size))
+    let rest: Vec<&str> = parts.collect();
+    let mut cursor = FileCheckpointCursor {
+        offset,
+        size,
+        ..FileCheckpointCursor::default()
+    };
+    match rest.as_slice() {
+        [] => {}
+        [model] if is_checkpoint_model_token(model) => {
+            cursor.last_codex_model = Some((*model).to_owned());
+        }
+        [input, cached, output] => {
+            cursor.codex_total_input = input.parse().ok()?;
+            cursor.codex_total_cached = cached.parse().ok()?;
+            cursor.codex_total_output = output.parse().ok()?;
+            cursor.has_codex_total = true;
+        }
+        [input, cached, output, model] if is_checkpoint_model_token(model) => {
+            cursor.codex_total_input = input.parse().ok()?;
+            cursor.codex_total_cached = cached.parse().ok()?;
+            cursor.codex_total_output = output.parse().ok()?;
+            cursor.has_codex_total = true;
+            cursor.last_codex_model = Some((*model).to_owned());
+        }
+        _ => return None,
+    }
+    Some((prefix, path, cursor))
 }
 
 #[cfg(test)]
@@ -225,6 +275,7 @@ mod tests {
                 FileCheckpointCursor {
                     offset: 4096,
                     size: 4096,
+                    ..FileCheckpointCursor::default()
                 },
             )]
             .into(),
@@ -237,6 +288,11 @@ mod tests {
             FileCheckpointCursor {
                 offset: 10,
                 size: 20,
+                has_codex_total: true,
+                codex_total_input: 80,
+                codex_total_cached: 20,
+                codex_total_output: 5,
+                last_codex_model: Some("gpt-5.4".to_owned()),
             },
         );
         assert_eq!(
