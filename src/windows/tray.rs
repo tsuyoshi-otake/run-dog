@@ -23,7 +23,7 @@ use crate::{
 
 use super::{flyout::HoverFlyout, icons::IconFrames, update::UpdateMenuState};
 
-pub const TRAY_CALLBACK_MESSAGE: u32 = 0x8000 + 1;
+pub use super::messages::TRAY_CALLBACK_MESSAGE;
 /// One-shot retries while Explorer populates `NotifyIconSettings`.
 pub const PROMOTE_TIMER_ID: usize = 3;
 const PROMOTE_RETRY_MS: u32 = 500;
