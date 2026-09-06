@@ -114,7 +114,7 @@ pub struct ProviderUsage {
     pub month_cents: u32,
     pub month_input_tokens: u64,
     pub month_output_tokens: u64,
-    pub plan: [u8; 16],
+    pub plan: [u8; 24],
     pub plan_len: u8,
     pub primary: Option<LimitWindow>,
     pub secondary: Option<LimitWindow>,
@@ -135,7 +135,15 @@ impl ProviderUsage {
     }
 
     pub fn set_plan(&mut self, label: &str) {
-        let formatted = format_plan_label(label);
+        self.store_plan(&format_plan_label(label));
+    }
+
+    /// Codex / ChatGPT `plan_type` uses ChatGPT product names, not Claude Max 20x.
+    pub fn set_chatgpt_plan(&mut self, label: &str) {
+        self.store_plan(&format_chatgpt_plan_label(label));
+    }
+
+    fn store_plan(&mut self, formatted: &str) {
         let bytes = formatted.as_bytes();
         let len = bytes.len().min(self.plan.len());
         self.plan[..len].copy_from_slice(&bytes[..len]);
@@ -178,7 +186,9 @@ impl ProviderUsage {
     }
 }
 
-/// `default_claude_max_20x` / `pro` → `Max 20x` / `Pro 20x`.
+/// Claude slug `default_claude_max_20x` → `Max 20x`. Bare `pro` is `Pro`.
+///
+/// Multipliers stay only when the slug itself contains `20x` / `5x` / `2x`.
 #[must_use]
 pub fn format_plan_label(raw: &str) -> String {
     let lower = raw.to_ascii_lowercase();
@@ -197,17 +207,56 @@ pub fn format_plan_label(raw: &str) -> String {
     } else {
         raw.trim()
     };
-    let multiplier = extract_multiplier(&lower).or_else(|| {
-        if name.eq_ignore_ascii_case("pro") {
-            Some("20x")
-        } else {
-            None
-        }
-    });
-    match multiplier {
+    match extract_multiplier(&lower) {
         Some(multiplier) if !name.is_empty() => format!("{name} {multiplier}"),
         _ if !name.is_empty() => name.to_owned(),
         _ => raw.to_owned(),
+    }
+}
+
+/// Exact ChatGPT / Codex `plan_type` tokens → flyout label.
+///
+/// `pro` / `plus` appear in repo JSONL and WHAM fixtures. `go` / `business`
+/// are official product names mapped only on exact slug match (live payload
+/// NOT RUN). Free / Team / Enterprise / Edu are not mapped: no captured ID.
+const CHATGPT_PLAN_LABELS: &[(&str, &str)] = &[
+    ("pro", "ChatGPT Pro"),
+    ("chatgpt_pro", "ChatGPT Pro"),
+    ("chatgpt-pro", "ChatGPT Pro"),
+    ("plus", "ChatGPT Plus"),
+    ("chatgpt_plus", "ChatGPT Plus"),
+    ("chatgpt-plus", "ChatGPT Plus"),
+    ("go", "ChatGPT Go"),
+    ("chatgpt_go", "ChatGPT Go"),
+    ("chatgpt-go", "ChatGPT Go"),
+    ("business", "ChatGPT Business"),
+    ("chatgpt_business", "ChatGPT Business"),
+    ("chatgpt-business", "ChatGPT Business"),
+];
+
+/// ChatGPT / Codex `plan_type` from WHAM or JSONL `rate_limits`.
+///
+/// Unknown tokens stay raw when they are a short ASCII slug. No invented
+/// product name and no Claude `Pro 20x` fallback.
+#[must_use]
+pub fn format_chatgpt_plan_label(raw: &str) -> String {
+    let key = raw.trim().to_ascii_lowercase();
+    if key.is_empty() {
+        return String::new();
+    }
+    for (id, label) in CHATGPT_PLAN_LABELS {
+        if key == *id {
+            return (*label).to_owned();
+        }
+    }
+    if key.len() <= 16
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        key
+    } else {
+        String::new()
     }
 }
 
@@ -646,10 +695,11 @@ pub fn days_to_ymd(days: i64) -> (i32, u8, u8) {
 #[cfg(test)]
 mod tests {
     use super::{
-        cost_cents, days_to_ymd, format_banked_reset_label, format_compact_token_count,
-        format_fable_limit_label, format_limit_label, format_plan_label, is_long_context_request,
-        local_ymd, parse_rfc3339_ms, resolve_codex_model, windows_tz_bias_minutes, ymd_iso,
-        ymd_key, LimitWindow, ProviderUsage, TokenUsage,
+        cost_cents, days_to_ymd, format_banked_reset_label, format_chatgpt_plan_label,
+        format_compact_token_count, format_fable_limit_label, format_limit_label,
+        format_plan_label, is_long_context_request, local_ymd, parse_rfc3339_ms,
+        resolve_codex_model, windows_tz_bias_minutes, ymd_iso, ymd_key, LimitWindow, ProviderUsage,
+        TokenUsage,
     };
 
     #[test]
@@ -916,8 +966,24 @@ mod tests {
     fn component_plan_labels_capitalise_and_keep_rate_multipliers() {
         assert_eq!(format_plan_label("default_claude_max_20x"), "Max 20x");
         assert_eq!(format_plan_label("max"), "Max");
-        assert_eq!(format_plan_label("pro"), "Pro 20x");
+        assert_eq!(format_plan_label("pro"), "Pro");
         assert_eq!(format_plan_label("plus"), "Plus");
+    }
+
+    #[test]
+    fn component_chatgpt_plan_ids_use_product_names() {
+        assert_eq!(format_chatgpt_plan_label("pro"), "ChatGPT Pro");
+        assert_eq!(format_chatgpt_plan_label("plus"), "ChatGPT Plus");
+        assert_eq!(format_chatgpt_plan_label("go"), "ChatGPT Go");
+        assert_eq!(format_chatgpt_plan_label("business"), "ChatGPT Business");
+        assert_eq!(format_chatgpt_plan_label("chatgpt-pro"), "ChatGPT Pro");
+        assert_eq!(format_chatgpt_plan_label("team"), "team");
+        assert_eq!(format_chatgpt_plan_label("enterprise"), "enterprise");
+        assert_eq!(format_chatgpt_plan_label("free"), "free");
+        assert_eq!(format_chatgpt_plan_label("edu"), "edu");
+        assert_eq!(format_chatgpt_plan_label("not a plan!!"), "");
+        assert_ne!(format_chatgpt_plan_label("pro"), "Pro 20x");
+        assert_ne!(format_chatgpt_plan_label("pro"), "Plus");
     }
 
     #[test]
