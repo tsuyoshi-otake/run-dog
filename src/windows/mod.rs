@@ -301,6 +301,7 @@ impl EffectPort for WindowsPlatform {
             | Effect::RemoveTray
             | Effect::SetThemeMenu(_)
             | Effect::SetFpsMenu(_)
+            | Effect::SetDisplayMenu(_)
             | Effect::SetStartupMenu(_)
             | Effect::NotifyStartupChanged(_)
             | Effect::CommitSettings { .. }

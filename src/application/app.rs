@@ -1,7 +1,7 @@
 use crate::core::{
     AnimationController, AppSettings, CpuBreakdown, CpuSampler, FpsLimit, FrameCursor, GpuStatus,
     MemoryStatus, ProcessStatus, ResolvedTheme, Sparkline, StorageStatus, SystemTimes,
-    ThemePreference, UsageSnapshot,
+    ThemePreference, TrayDisplayMode, UsageSnapshot,
 };
 
 use super::{
@@ -166,6 +166,7 @@ impl App {
             },
             Effect::SetThemeMenu(self.settings.theme),
             Effect::SetFpsMenu(self.settings.fps_limit),
+            Effect::SetDisplayMenu(self.settings.display_mode),
             Effect::SetStartupMenu(self.settings.launch_at_startup),
         ]
     }
@@ -187,11 +188,16 @@ impl App {
             } => self.handle_cpu_sample(times, memory, storage, gpu, process),
             Event::AnimationTimerElapsed => {
                 self.frames.advance();
-                vec![Effect::ModifyTray(self.tray_icon())]
+                if self.settings.display_mode.uses_animation() {
+                    vec![Effect::ModifyTray(self.tray_icon())]
+                } else {
+                    Vec::new()
+                }
             }
             Event::SystemThemeChanged(theme) => self.handle_system_theme_change(theme),
             Event::SelectTheme(theme) => self.handle_theme_selection(theme),
             Event::SelectFpsLimit(limit) => self.handle_fps_selection(limit),
+            Event::SelectDisplayMode(mode) => self.handle_display_selection(mode),
             Event::ToggleStartup => self.handle_startup_toggle(),
             Event::SettingsCommitFinished {
                 settings,
@@ -311,6 +317,16 @@ impl App {
         self.begin_commit(settings, previous, false)
     }
 
+    fn handle_display_selection(&mut self, mode: TrayDisplayMode) -> Vec<Effect> {
+        if self.settings.display_mode == mode || self.pending_commit.is_some() {
+            return Vec::new();
+        }
+        let previous = self.settings;
+        let mut settings = self.settings;
+        settings.display_mode = mode;
+        self.begin_commit(settings, previous, false)
+    }
+
     fn handle_startup_toggle(&mut self) -> Vec<Effect> {
         if self.pending_commit.is_some() {
             return Vec::new();
@@ -372,6 +388,7 @@ impl App {
             return vec![
                 Effect::SetThemeMenu(self.settings.theme),
                 Effect::SetFpsMenu(self.settings.fps_limit),
+                Effect::SetDisplayMenu(self.settings.display_mode),
                 Effect::SetStartupMenu(self.settings.launch_at_startup),
             ];
         }
@@ -381,12 +398,14 @@ impl App {
             return vec![
                 Effect::SetThemeMenu(self.settings.theme),
                 Effect::SetFpsMenu(self.settings.fps_limit),
+                Effect::SetDisplayMenu(self.settings.display_mode),
                 Effect::SetStartupMenu(self.settings.launch_at_startup),
             ];
         }
 
         let previous_resolved_theme = self.resolved_theme;
         let previous_fps_limit = self.settings.fps_limit;
+        let previous_display_mode = self.settings.display_mode;
         let notify_startup = pending.sync_run_entry;
         self.settings = settings;
         self.resolved_theme = settings.theme.resolve(self.system_theme);
@@ -394,6 +413,7 @@ impl App {
         let mut effects = vec![
             Effect::SetThemeMenu(self.settings.theme),
             Effect::SetFpsMenu(self.settings.fps_limit),
+            Effect::SetDisplayMenu(self.settings.display_mode),
             Effect::SetStartupMenu(self.settings.launch_at_startup),
         ];
         if notify_startup {
@@ -401,7 +421,9 @@ impl App {
                 self.settings.launch_at_startup,
             ));
         }
-        if previous_resolved_theme != self.resolved_theme {
+        if previous_resolved_theme != self.resolved_theme
+            || previous_display_mode != self.settings.display_mode
+        {
             effects.push(Effect::ModifyTray(self.tray_icon()));
         }
         if previous_fps_limit != self.settings.fps_limit {
@@ -439,6 +461,7 @@ impl App {
         TrayIcon {
             theme: self.resolved_theme,
             frame: self.frames.current(),
+            display_mode: self.settings.display_mode,
             tooltip: self.tooltip.clone(),
             cpu_sparkline: self.cpu_sparkline,
             memory_sparkline: self.memory_sparkline,
@@ -482,10 +505,13 @@ fn format_tooltip(
 #[cfg(test)]
 mod tests {
     use super::{App, CPU_SAMPLE_INTERVAL_MS};
-    use crate::{
-        application::{CommitStatus, Effect, Event, TimerKind},
-        core::{AppSettings, FpsLimit, MemoryStatus, ResolvedTheme, SystemTimes, ThemePreference},
-    };
+    use         crate::{
+            application::{CommitStatus, Effect, Event, TimerKind},
+            core::{
+                AppSettings, FpsLimit, MemoryStatus, ResolvedTheme, SystemTimes, ThemePreference,
+                TrayDisplayMode,
+            },
+        };
 
     fn started_app() -> App {
         let mut app = App::new(AppSettings::default(), ResolvedTheme::Dark);
@@ -528,6 +554,54 @@ mod tests {
         assert!(app
             .dispatch(Event::SelectFpsLimit(FpsLimit::Fps40))
             .is_empty());
+        assert!(app
+            .dispatch(Event::SelectDisplayMode(TrayDisplayMode::Dog))
+            .is_empty());
+    }
+
+    #[test]
+    fn c2_display_mode_waits_for_durable_ack_and_skips_animation_tray_writes() {
+        let mut app = started_app();
+        let effects = app.dispatch(Event::SelectDisplayMode(TrayDisplayMode::Cpu));
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::CommitSettings {
+                operation_id: 1,
+                settings: AppSettings {
+                    display_mode: TrayDisplayMode::Cpu,
+                    ..
+                },
+                expected_generation: 0,
+                sync_run_entry: false,
+                ..
+            }]
+        ));
+        assert_eq!(
+            app.snapshot().settings.display_mode,
+            TrayDisplayMode::Dog
+        );
+        assert!(app
+            .dispatch(Event::SelectDisplayMode(TrayDisplayMode::Memory))
+            .is_empty());
+
+        let effects = app.dispatch(Event::SettingsCommitFinished {
+            settings: AppSettings {
+                display_mode: TrayDisplayMode::Cpu,
+                ..AppSettings::default()
+            },
+            status: CommitStatus::Applied,
+            new_generation: 1,
+            last_operation_id: 1,
+        });
+        assert!(effects.contains(&Effect::SetDisplayMenu(TrayDisplayMode::Cpu)));
+        assert!(effects.contains(&Effect::ModifyTray(app.tray_icon())));
+        assert_eq!(
+            app.snapshot().settings.display_mode,
+            TrayDisplayMode::Cpu
+        );
+
+        assert!(app.dispatch(Event::AnimationTimerElapsed).is_empty());
+        assert_eq!(app.snapshot().frame, 1);
     }
 
     #[test]

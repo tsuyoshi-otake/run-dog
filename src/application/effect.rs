@@ -1,6 +1,6 @@
 use crate::core::{
     AppSettings, CpuBreakdown, FpsLimit, GpuStatus, MemoryStatus, ProcessStatus, ResolvedTheme,
-    Sparkline, StorageStatus, ThemePreference, UsageSnapshot,
+    Sparkline, StorageStatus, ThemePreference, TrayDisplayMode, UsageSnapshot,
 };
 
 /// Timer identities are stable values, so the Windows adapter never needs to
@@ -16,6 +16,7 @@ pub enum TimerKind {
 pub struct TrayIcon {
     pub theme: ResolvedTheme,
     pub frame: usize,
+    pub display_mode: TrayDisplayMode,
     pub tooltip: String,
     pub cpu_sparkline: Sparkline,
     pub memory_sparkline: Sparkline,
@@ -60,6 +61,7 @@ pub enum Effect {
     },
     SetThemeMenu(ThemePreference),
     SetFpsMenu(FpsLimit),
+    SetDisplayMenu(TrayDisplayMode),
     SetStartupMenu(bool),
     /// User-visible confirmation after a successful Launch-at-startup toggle.
     NotifyStartupChanged(bool),

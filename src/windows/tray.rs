@@ -120,6 +120,7 @@ impl TrayAdapter {
             }
             Effect::SetThemeMenu(theme) => self.theme = *theme,
             Effect::SetFpsMenu(limit) => self.fps_limit = *limit,
+            Effect::SetDisplayMenu(_) => {}
             Effect::SetStartupMenu(enabled) => self.startup_enabled = *enabled,
             Effect::NotifyStartupChanged(enabled) => {
                 let text = super::i18n::current().menu();
@@ -392,6 +393,7 @@ impl TrayAdapter {
         let data = self.notification_data(&TrayIcon {
             theme: crate::core::ResolvedTheme::Dark,
             frame: 0,
+            display_mode: crate::core::TrayDisplayMode::Dog,
             tooltip: String::new(),
             cpu_sparkline: crate::core::Sparkline::new(),
             memory_sparkline: crate::core::Sparkline::new(),
@@ -466,6 +468,7 @@ impl TrayAdapter {
     fn remember(&mut self, icon: &TrayIcon) {
         let display_changed = self.last_icon.as_ref().is_none_or(|previous| {
             previous.theme != icon.theme
+                || previous.display_mode != icon.display_mode
                 || previous.tooltip != icon.tooltip
                 || previous.cpu_sparkline != icon.cpu_sparkline
                 || previous.memory_sparkline != icon.memory_sparkline
