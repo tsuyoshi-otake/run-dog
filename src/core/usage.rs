@@ -887,10 +887,7 @@ mod tests {
             ..TokenUsage::default()
         };
         assert_eq!(cost_cents("gpt-6-astra", usage, None), Some(6_000));
-        assert_eq!(
-            cost_cents("gpt-6-astra-20260904", usage, None),
-            Some(6_000)
-        );
+        assert_eq!(cost_cents("gpt-6-astra-20260904", usage, None), Some(6_000));
         let cached = TokenUsage {
             cached_input: 1_000_000,
             ..TokenUsage::default()

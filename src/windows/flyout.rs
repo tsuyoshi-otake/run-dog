@@ -1755,9 +1755,8 @@ mod tests {
     use super::{
         extra_usage_block_units, format_bytes, format_gpu_capacity, format_limit_metric_label,
         format_month_usage, format_percent, format_reset_local, format_self_usage,
-        format_today_usage, gpu_details,
-        position_flyout, visible_usage_count, window_size, PixelRect, CARD_GPU_BLOCK_HEIGHT,
-        CARD_HEIGHT, CARD_USAGE_BLOCK_HEIGHT, CARD_WIDTH,
+        format_today_usage, gpu_details, position_flyout, visible_usage_count, window_size,
+        PixelRect, CARD_GPU_BLOCK_HEIGHT, CARD_HEIGHT, CARD_USAGE_BLOCK_HEIGHT, CARD_WIDTH,
     };
     use crate::core::{
         format_banked_reset_label, format_fable_limit_label, CpuLoad, LimitWindow, ProcessStatus,
