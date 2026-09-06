@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_call:
 
 permissions:
   contents: read
@@ -18,10 +19,18 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      - name: Verify Rust sources
-        shell: pwsh
-        run: |
-          cargo fmt --check
-          cargo clippy --all-targets --all-features -- -D warnings
-          cargo test --all-targets
-          cargo build --release
+      # Each cargo invocation is its own step. A single pwsh script that chains
+      # cargo fmt/clippy/test/build can report success when only the last
+      # native command exits 0 (PSNativeCommandUseErrorActionPreference is
+      # false by default; GHA only prepends ErrorActionPreference=Stop).
+      - name: rustfmt
+        run: cargo fmt --check
+
+      - name: clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: test
+        run: cargo test --all-targets
+
+      - name: release build
+        run: cargo build --release

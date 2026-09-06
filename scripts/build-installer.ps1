@@ -5,6 +5,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $manifestPath = Join-Path $repoRoot 'Cargo.toml'
@@ -37,6 +38,9 @@ if ($updateRepository -notmatch '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$') {
 Push-Location $repoRoot
 try {
     cargo build --release
+    if ($LASTEXITCODE -ne 0) {
+        throw "cargo build --release failed with exit code $LASTEXITCODE."
+    }
 }
 finally {
     Pop-Location

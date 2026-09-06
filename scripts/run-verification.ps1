@@ -4,6 +4,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
 $repo = Split-Path -Parent $PSScriptRoot
 Set-Location -LiteralPath $repo
 

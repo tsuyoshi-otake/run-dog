@@ -9,20 +9,17 @@ permissions:
   contents: write
 
 jobs:
+  verify:
+    uses: ./.github/workflows/verify.yml
+
   release:
+    needs: verify
     runs-on: windows-latest
 
     steps:
       - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
-
-      - name: Verify Rust sources
-        shell: pwsh
-        run: |
-          cargo fmt --check
-          cargo clippy --all-targets --all-features -- -D warnings
-          cargo test --all-targets
 
       - name: Install Inno Setup
         shell: pwsh
