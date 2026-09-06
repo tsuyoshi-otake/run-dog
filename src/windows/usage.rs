@@ -2094,7 +2094,7 @@ fn parse_codex_limits_line(line: &str) -> Option<ProviderUsage> {
         ..ProviderUsage::default()
     };
     if let Some(plan) = limits.plan_type {
-        usage.set_plan(&plan);
+        usage.set_chatgpt_plan(&plan);
     }
     if usage.primary.is_none()
         && usage.secondary.is_none()
@@ -2406,7 +2406,7 @@ pub fn parse_wham_usage_response(body: &str) -> Option<ProviderUsage> {
         usage.secondary = rate.secondary_window.and_then(wham_window);
     }
     if let Some(plan) = parsed.plan_type {
-        usage.set_plan(&plan);
+        usage.set_chatgpt_plan(&plan);
     }
     if usage.primary.is_none()
         && usage.secondary.is_none()
@@ -3848,7 +3848,7 @@ mod tests {
             r#"{"timestamp":"2026-08-16T01:02:03Z","payload":{"rate_limits":{"plan_type":"pro","primary":{"used_percent":5.0,"resets_at":1780000000,"window_minutes":300},"secondary":{"used_percent":21.5,"resets_at":1780500000,"window_minutes":10080}}}}"#,
         )
         .expect("codex limits");
-        assert_eq!(codex.plan_label().as_deref(), Some("Pro 20x"));
+        assert_eq!(codex.plan_label().as_deref(), Some("ChatGPT Pro"));
         assert_eq!(codex.primary.unwrap().used_tenths, 50);
         assert_eq!(codex.secondary.unwrap().window_minutes, 10_080);
 
@@ -3951,7 +3951,7 @@ mod tests {
             r#"{"plan_type":"pro","rate_limit":{"primary_window":{"used_percent":34,"limit_window_seconds":18000,"reset_at":1778091218},"secondary_window":{"used_percent":37,"limit_window_seconds":604800,"reset_at":1778605571}}}"#,
         )
         .expect("wham usage");
-        assert_eq!(usage.plan_label().as_deref(), Some("Pro 20x"));
+        assert_eq!(usage.plan_label().as_deref(), Some("ChatGPT Pro"));
         assert_eq!(usage.primary.unwrap().window_minutes, 300);
         assert_eq!(usage.primary.unwrap().used_tenths, 340);
         assert_eq!(usage.secondary.unwrap().window_minutes, 10_080);
@@ -3965,6 +3965,7 @@ mod tests {
             r#"{"plan_type":"plus","rate_limit":{"primary_window":{"used_percent":27,"limit_window_seconds":18000,"reset_at":1782770922},"secondary_window":{"used_percent":4,"limit_window_seconds":604800,"reset_at":1783357722}},"rate_limit_reset_credits":{"available_count":2}}"#,
         )
         .expect("wham with banked resets");
+        assert_eq!(usage.plan_label().as_deref(), Some("ChatGPT Plus"));
         assert_eq!(usage.banked_reset_available, Some(2));
         assert_eq!(usage.primary.unwrap().used_tenths, 270);
         assert_eq!(usage.secondary.unwrap().used_tenths, 40);
