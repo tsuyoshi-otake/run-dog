@@ -18,7 +18,7 @@
 
 - `GetSystemTimes` の累積値差分による全体 CPU 使用率と、`GlobalMemoryStatusEx` によるメモリ使用率、システムボリュームの使用量、GPU エンジン使用率と専用 / 共有ビデオメモリ。ホバーで CPU / メモリ / GPU / ストレージのカードと直近 1 分のスパークライン、Claude Code / Codex CLI のサブスクリミットと API 相当利用料、RunDog 自身の CPU 割合とプライベートメモリを表示
 - CPU 使用率に応じた 5–40 FPS のアニメーション（既定の上限は 40 FPS）
-- 右クリックのトレイ表示切替（犬 / CPU / メモリ / GPU / Claude 5時間 / Claude 週 / Fable 週 / Codex 5時間 / Codex 週）。数値モードは 32×32 のパーセントアイコン
+- 右クリックのトレイ表示切替（犬 / CPU / メモリ / GPU / Claude 5時間 / Claude 週 / Fable 週 / Codex 5時間 / Codex 週）。数値モードは 32×32 の整数パーセント。古い・無いリミットは `--` で、0% は作らない。設定は残る
 - System / Light / Dark テーマ、アニメーション上限、スタートアップ、カード固定、更新確認、今月の利用状況の再スキャン、About、終了の右クリックメニュー（Windows の表示言語に追従）
 - Windows のスタートアップで起動、初回トレイ登録時の通知領域ピン留め（ユーザーが隠した場合は維持）、左クリックでモニターカードの常時表示と TOP 固定トグル、Explorer 再起動後の tray 再登録
 - GitHub Releases の stable release を起動時に一度だけ非同期確認し、検証済みの新版をサイレント導入
