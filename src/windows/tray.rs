@@ -45,7 +45,11 @@ pub const COMMAND_DISPLAY_DOG: u32 = 1_050;
 pub const COMMAND_DISPLAY_CPU: u32 = 1_051;
 pub const COMMAND_DISPLAY_MEMORY: u32 = 1_052;
 pub const COMMAND_DISPLAY_GPU: u32 = 1_053;
-pub const COMMAND_DISPLAY_CODEX_WEEK: u32 = 1_054;
+pub const COMMAND_DISPLAY_CLAUDE_5H: u32 = 1_054;
+pub const COMMAND_DISPLAY_CLAUDE_WEEK: u32 = 1_055;
+pub const COMMAND_DISPLAY_FABLE_WEEK: u32 = 1_056;
+pub const COMMAND_DISPLAY_CODEX_5H: u32 = 1_057;
+pub const COMMAND_DISPLAY_CODEX_WEEK: u32 = 1_058;
 pub const COMMAND_TOGGLE_STARTUP: u32 = 1_020;
 pub const COMMAND_TOGGLE_PINNED_FLYOUT: u32 = 1_021;
 pub const COMMAND_CHECK_FOR_UPDATES: u32 = 1_030;
@@ -69,6 +73,10 @@ pub const fn event_for_command(command: u32) -> Option<Event> {
         COMMAND_DISPLAY_CPU => Some(Event::SelectDisplayMode(TrayDisplayMode::Cpu)),
         COMMAND_DISPLAY_MEMORY => Some(Event::SelectDisplayMode(TrayDisplayMode::Memory)),
         COMMAND_DISPLAY_GPU => Some(Event::SelectDisplayMode(TrayDisplayMode::Gpu)),
+        COMMAND_DISPLAY_CLAUDE_5H => Some(Event::SelectDisplayMode(TrayDisplayMode::Claude5h)),
+        COMMAND_DISPLAY_CLAUDE_WEEK => Some(Event::SelectDisplayMode(TrayDisplayMode::ClaudeWeek)),
+        COMMAND_DISPLAY_FABLE_WEEK => Some(Event::SelectDisplayMode(TrayDisplayMode::FableWeek)),
+        COMMAND_DISPLAY_CODEX_5H => Some(Event::SelectDisplayMode(TrayDisplayMode::Codex5h)),
         COMMAND_DISPLAY_CODEX_WEEK => Some(Event::SelectDisplayMode(TrayDisplayMode::CodexWeek)),
         COMMAND_TOGGLE_STARTUP => Some(Event::ToggleStartup),
         COMMAND_EXIT => Some(Event::ExitRequested),
@@ -217,6 +225,30 @@ impl TrayAdapter {
             COMMAND_DISPLAY_GPU,
             text.display_gpu,
             self.display_mode == TrayDisplayMode::Gpu,
+        );
+        append_checked(
+            display_menu,
+            COMMAND_DISPLAY_CLAUDE_5H,
+            text.display_claude_5h,
+            self.display_mode == TrayDisplayMode::Claude5h,
+        );
+        append_checked(
+            display_menu,
+            COMMAND_DISPLAY_CLAUDE_WEEK,
+            text.display_claude_week,
+            self.display_mode == TrayDisplayMode::ClaudeWeek,
+        );
+        append_checked(
+            display_menu,
+            COMMAND_DISPLAY_FABLE_WEEK,
+            text.display_fable_week,
+            self.display_mode == TrayDisplayMode::FableWeek,
+        );
+        append_checked(
+            display_menu,
+            COMMAND_DISPLAY_CODEX_5H,
+            text.display_codex_5h,
+            self.display_mode == TrayDisplayMode::Codex5h,
         );
         append_checked(
             display_menu,
@@ -676,8 +708,9 @@ fn wide(value: &str) -> Vec<u16> {
 mod tests {
     use super::{
         event_for_command, update_balloon_text, TrayAdapter, UpdateMenuState, COMMAND_ABOUT,
-        COMMAND_CHECK_FOR_UPDATES, COMMAND_DISPLAY_CODEX_WEEK, COMMAND_DISPLAY_CPU, COMMAND_EXIT,
-        COMMAND_FPS_40, COMMAND_THEME_DARK, COMMAND_TOGGLE_STARTUP,
+        COMMAND_CHECK_FOR_UPDATES, COMMAND_DISPLAY_CLAUDE_5H, COMMAND_DISPLAY_CODEX_WEEK,
+        COMMAND_DISPLAY_CPU, COMMAND_DISPLAY_FABLE_WEEK, COMMAND_EXIT, COMMAND_FPS_40,
+        COMMAND_THEME_DARK, COMMAND_TOGGLE_STARTUP,
     };
     use crate::{
         application::Event,
@@ -700,6 +733,14 @@ mod tests {
         assert_eq!(
             event_for_command(COMMAND_DISPLAY_CPU),
             Some(Event::SelectDisplayMode(TrayDisplayMode::Cpu))
+        );
+        assert_eq!(
+            event_for_command(COMMAND_DISPLAY_CLAUDE_5H),
+            Some(Event::SelectDisplayMode(TrayDisplayMode::Claude5h))
+        );
+        assert_eq!(
+            event_for_command(COMMAND_DISPLAY_FABLE_WEEK),
+            Some(Event::SelectDisplayMode(TrayDisplayMode::FableWeek))
         );
         assert_eq!(
             event_for_command(COMMAND_DISPLAY_CODEX_WEEK),
