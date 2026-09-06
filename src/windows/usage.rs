@@ -3084,11 +3084,13 @@ mod tests {
 
     #[test]
     fn component_usage_read_intervals_are_at_least_one_minute() {
-        assert!(super::USAGE_IDLE_INTERVAL_MS >= 60_000);
-        assert!(super::USAGE_CONTINUE_INTERVAL_MS >= 60_000);
-        assert!(super::STAT_COOLDOWN_MS >= 60_000);
-        assert!(super::CLAUDE_LIMITS_PERIOD_MS >= 60_000);
-        assert!(super::CODEX_LIMITS_PERIOD_MS >= 60_000);
+        const {
+            assert!(super::USAGE_IDLE_INTERVAL_MS >= 60_000);
+            assert!(super::USAGE_CONTINUE_INTERVAL_MS >= 60_000);
+            assert!(super::STAT_COOLDOWN_MS >= 60_000);
+            assert!(super::CLAUDE_LIMITS_PERIOD_MS >= 60_000);
+            assert!(super::CODEX_LIMITS_PERIOD_MS >= 60_000);
+        }
     }
 
     #[test]
