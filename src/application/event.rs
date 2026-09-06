@@ -1,6 +1,6 @@
 use crate::core::{
     AppSettings, FpsLimit, GpuStatus, MemoryStatus, ProcessStatus, ResolvedTheme, StorageStatus,
-    SystemTimes, ThemePreference, UsageSnapshot,
+    SystemTimes, ThemePreference, TrayDisplayMode, UsageSnapshot,
 };
 
 use super::commit_protocol::CommitStatus;
@@ -19,6 +19,7 @@ pub enum Event {
     SystemThemeChanged(ResolvedTheme),
     SelectTheme(ThemePreference),
     SelectFpsLimit(FpsLimit),
+    SelectDisplayMode(TrayDisplayMode),
     ToggleStartup,
     SettingsCommitFinished {
         settings: AppSettings,
