@@ -1,0 +1,27 @@
+Phase J formal / PBT / model-mutation evidence
+Date: 2026-09-05
+Stack pin (PR #38 HEAD, this branch parent): a38382fb96722497b8af12ea69987c375d73cb0f
+origin/main (unmerged, unchanged): a8e870c0f1cad7cf4e431f6d563c8670c5626868
+Old pin 2c0494c is NOT used as proof of current main.
+
+This directory records local gates for feat/usage-ingest-formal.
+TLC PASS on RunDogUsageIngest.cfg is a check of the reference model only.
+It is not a proof of the Rust collector or Windows adapter.
+
+Toolchain
+- rustc 1.97.1 (8bab26f4f 2026-07-14)
+- cargo 1.97.1 (c980f4866 2026-06-30)
+- Temurin OpenJDK 21.0.12+8
+- TLC2 2026.09.04.170753 (tla2tools.jar local, not committed)
+- cargo-mutants 27.1.0
+
+Commands
+- cargo fmt --all -- --check
+- cargo clippy --all-targets -- -D warnings
+- cargo test --all-targets --offline
+- $env:RUN_DOG_TLA2TOOLS = verification\tools\tla2tools.jar
+  powershell -NoProfile -File scripts\run-usage-ingest-tlc.ps1 -Mode all
+- cargo mutants --file src/core/usage_state.rs --file src/core/usage_durable.rs --timeout 120 --jobs 2 --output verification/evidence/mutants-usage-ingest
+
+Fuzz: NOT RUN (harness deferred; no libFuzzer/cargo-fuzz targets added in this PR).
+RFC3339 (#19) / #9-#12 / #20-#22: not included.

@@ -14,11 +14,12 @@ use windows_sys::{
             Gdi::{
                 BeginPaint, CreateFontW, CreatePen, CreateRoundRectRgn, CreateSolidBrush,
                 DeleteObject, DrawTextW, Ellipse, EndPaint, FillRect, GetDC, GetDeviceCaps,
-                GetStockObject, InvalidateRect, LineTo, MoveToEx, Polygon, Polyline, ReleaseDC,
-                RoundRect, SelectObject, SetBkMode, SetTextColor, SetWindowRgn, CLEARTYPE_QUALITY,
-                DEFAULT_CHARSET, DEFAULT_GUI_FONT, DT_END_ELLIPSIS, DT_NOPREFIX, DT_RIGHT,
-                DT_SINGLELINE, DT_VCENTER, FW_NORMAL, FW_SEMIBOLD, LOGPIXELSX, NULL_BRUSH,
-                NULL_PEN, PAINTSTRUCT, PS_SOLID, TRANSPARENT,
+                GetMonitorInfoW, GetStockObject, InvalidateRect, LineTo, MonitorFromPoint,
+                MonitorFromWindow, MoveToEx, Polygon, Polyline, ReleaseDC, RoundRect, SelectObject,
+                SetBkMode, SetTextColor, SetWindowRgn, CLEARTYPE_QUALITY, DEFAULT_CHARSET,
+                DEFAULT_GUI_FONT, DT_END_ELLIPSIS, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE,
+                DT_VCENTER, FW_NORMAL, FW_SEMIBOLD, LOGPIXELSX, MONITORINFO,
+                MONITOR_DEFAULTTONEAREST, NULL_BRUSH, NULL_PEN, PAINTSTRUCT, PS_SOLID, TRANSPARENT,
             },
         },
         System::LibraryLoader::GetModuleHandleW,
@@ -28,9 +29,10 @@ use windows_sys::{
                 CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetCursorPos,
                 GetSystemMetrics, GetWindowLongPtrW, IsWindow, IsWindowVisible, RegisterClassW,
                 SetWindowLongPtrW, SetWindowPos, ShowWindow, CS_DROPSHADOW, GWLP_USERDATA,
-                HWND_TOPMOST, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE,
-                SW_SHOWNOACTIVATE, WM_DESTROY, WM_MOUSEACTIVATE, WM_PAINT, WNDCLASSW,
-                WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+                HWND_TOPMOST, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+                SM_YVIRTUALSCREEN, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE, SW_SHOWNOACTIVATE,
+                WM_DESTROY, WM_MOUSEACTIVATE, WM_PAINT, WNDCLASSW, WS_EX_NOACTIVATE,
+                WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
             },
         },
     },
@@ -39,9 +41,10 @@ use windows_sys::{
 use crate::{
     application::TrayIcon,
     core::{
-        format_banked_reset_label, format_compact_token_count, format_fable_limit_label, local_hms,
-        local_ymd, GpuStatus, LimitWindow, MemoryStatus, ProcessStatus, ProviderUsage,
-        ResolvedTheme, Sparkline, StorageStatus, UsageSnapshot, SPARKLINE_CAPACITY,
+        format_banked_reset_label, format_compact_token_count, format_fable_limit_label,
+        format_limit_label, format_usage_heading, local_hms, local_ymd, GpuStatus, LimitWindow,
+        MemoryStatus, ProcessStatus, ProviderUsage, ResolvedTheme, Sparkline, StorageStatus,
+        UsageSnapshot, SPARKLINE_CAPACITY,
     },
 };
 
@@ -224,6 +227,61 @@ fn apply_rounded_chrome(hwnd: HWND, width: i32, height: i32, dpi: i32) {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PixelRect {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+}
+
+impl PixelRect {
+    fn from_rect(rect: RECT) -> Self {
+        Self {
+            left: rect.left,
+            top: rect.top,
+            right: rect.right,
+            bottom: rect.bottom,
+        }
+    }
+}
+
+/// Clamp the flyout to a work area. Coordinates are virtual-screen pixels
+/// and may be negative. `window_size` / #26 extra height is an input, not
+/// rewritten here.
+fn position_flyout(
+    origin: (i32, i32),
+    icon: Option<PixelRect>,
+    size: (i32, i32),
+    work_area: PixelRect,
+) -> (i32, i32) {
+    const MARGIN: i32 = 8;
+    let (width, height) = size;
+    let mut x = origin.0 - width / 2;
+    let mut y = origin.1 - height - MARGIN;
+    if y < work_area.top {
+        y = match icon {
+            Some(icon) => icon.bottom + MARGIN,
+            None => origin.1 + 16,
+        };
+    }
+    let min_x = work_area.left + MARGIN;
+    let max_x = work_area.right - width - MARGIN;
+    x = if max_x >= min_x {
+        x.clamp(min_x, max_x)
+    } else {
+        work_area.left
+    };
+    let min_y = work_area.top;
+    let max_y = work_area.bottom - height;
+    y = if max_y >= min_y {
+        y.clamp(min_y, max_y)
+    } else {
+        work_area.top
+    };
+    (x, y)
+}
+
 fn position_near_icon(owner: HWND, width: i32, height: i32) -> (i32, i32) {
     let ident = NOTIFYICONIDENTIFIER {
         cbSize: size_of::<NOTIFYICONIDENTIFIER>() as u32,
@@ -247,27 +305,44 @@ fn position_near_icon(owner: HWND, width: i32, height: i32) -> (i32, i32) {
         origin.y = 0;
     }
 
-    let screen_w = unsafe { GetSystemMetrics(SM_CXSCREEN) };
-    let screen_h = unsafe { GetSystemMetrics(SM_CYSCREEN) };
-    let mut x = origin.x - width / 2;
-    let mut y = origin.y - height - 8;
-    if y < 0 {
-        y = if have_icon {
-            icon.bottom + 8
-        } else {
-            origin.y + 16
-        };
+    let work_area = monitor_work_area(owner, origin);
+    let icon = have_icon.then_some(PixelRect::from_rect(icon));
+    position_flyout((origin.x, origin.y), icon, (width, height), work_area)
+}
+
+fn monitor_work_area(owner: HWND, origin: POINT) -> PixelRect {
+    // The tray icon / cursor lives in virtual-screen space. The hidden
+    // message window is usually on the primary, so owner-first would
+    // reintroduce the SM_CXSCREEN bug on a secondary display.
+    let from_point = unsafe { MonitorFromPoint(origin, MONITOR_DEFAULTTONEAREST) };
+    let monitor = if from_point.is_null() && !owner.is_null() {
+        unsafe { MonitorFromWindow(owner, MONITOR_DEFAULTTONEAREST) }
+    } else {
+        from_point
+    };
+    let mut info = MONITORINFO {
+        cbSize: size_of::<MONITORINFO>() as u32,
+        rcMonitor: RECT::default(),
+        rcWork: RECT::default(),
+        dwFlags: 0,
+    };
+    if !monitor.is_null() && unsafe { GetMonitorInfoW(monitor, &mut info) } != 0 {
+        return PixelRect::from_rect(info.rcWork);
     }
-    if x < 8 {
-        x = 8;
+    virtual_screen_rect()
+}
+
+fn virtual_screen_rect() -> PixelRect {
+    let left = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) };
+    let top = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };
+    let width = unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) };
+    let height = unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) };
+    PixelRect {
+        left,
+        top,
+        right: left.saturating_add(width),
+        bottom: top.saturating_add(height),
     }
-    if x + width > screen_w - 8 {
-        x = screen_w - width - 8;
-    }
-    if y + height > screen_h - 8 {
-        y = screen_h - height - 8;
-    }
-    (x.max(0), y.max(0))
 }
 
 fn window_size(dpi: i32, usage: Option<UsageSnapshot>, show_gpu: bool) -> (i32, i32) {
@@ -295,7 +370,7 @@ fn visible_usage_count(usage: UsageSnapshot) -> usize {
         2
     } else {
         usize::from(usage.claude.has_month_activity())
-            + usize::from(usage.codex.has_month_activity())
+            + usize::from(usage.codex.shows_chatgpt_card(flyout_now_ms()))
     }
 }
 
@@ -903,7 +978,7 @@ fn visible_usage_rows(usage: UsageSnapshot) -> Vec<VisibleUsageRow> {
             mark: UsageMark::Claude,
         });
     }
-    if usage.codex.has_month_activity() || scanning {
+    if usage.codex.shows_chatgpt_card(flyout_now_ms()) || scanning {
         rows.push(VisibleUsageRow {
             title: "Codex",
             usage: usage.codex,
@@ -938,10 +1013,7 @@ fn paint_usage_row(
         UsageMark::Codex => super::brand::draw_openai(hdc, icon, palette.text),
     }
 
-    let heading = match usage.plan_label() {
-        Some(plan) => format!("{title} {plan}"),
-        None => title.to_owned(),
-    };
+    let heading = format_usage_heading(title, usage.plan_label().as_deref());
     select_font(hdc, title_font);
     let _ = unsafe { SetTextColor(hdc, palette.text) };
     draw_text(
@@ -975,6 +1047,7 @@ fn paint_usage_row(
 
     select_font(hdc, detail_font);
     let _ = unsafe { SetTextColor(hdc, palette.muted) };
+    let now_ms = flyout_now_ms();
     let mut metric_top = row.top + layout.title_h + px(2, layout.dpi);
     metric_top = paint_limit_metric(
         hdc,
@@ -986,6 +1059,7 @@ fn paint_usage_row(
         },
         "5h",
         usage.session_window(),
+        now_ms,
         palette,
         layout,
     );
@@ -999,6 +1073,7 @@ fn paint_usage_row(
         },
         "7d",
         usage.weekly_window(),
+        now_ms,
         palette,
         layout,
     );
@@ -1107,28 +1182,38 @@ fn paint_limit_metric(
     rect: RECT,
     name: &str,
     window: Option<LimitWindow>,
+    now_ms: u64,
     palette: &Palette,
     layout: &Layout,
 ) -> i32 {
-    let label = match window {
-        Some(window) => {
-            let reset = format_reset(window);
-            if reset.is_empty() {
-                format!("{name}: {:.0}%", window.used_percent())
-            } else {
-                format!("{name}: {:.0}%  {reset}", window.used_percent())
-            }
-        }
-        None => format!("{name}: —"),
+    let label =
+        format_limit_metric_label(name, window, now_ms, super::usage::timezone_bias_minutes());
+    let used = match window {
+        Some(window) if window.is_current(now_ms) => window.used_percent(),
+        _ => 0.0,
     };
-    paint_limit_label(
-        hdc,
-        rect,
-        &label,
-        window.map(LimitWindow::used_percent).unwrap_or(0.0),
-        palette,
-        layout,
-    )
+    paint_limit_label(hdc, rect, &label, used, palette, layout)
+}
+
+fn format_limit_metric_label(
+    name: &str,
+    window: Option<LimitWindow>,
+    now_ms: u64,
+    bias_minutes: i32,
+) -> String {
+    let label = format_limit_label(name, window, now_ms);
+    let Some(window) = window else {
+        return label;
+    };
+    if !window.is_current(now_ms) {
+        return label;
+    }
+    let reset = format_reset_local(window, bias_minutes);
+    if reset.is_empty() {
+        label
+    } else {
+        format!("{label}  {reset}")
+    }
 }
 
 fn paint_fable_metric(
@@ -1664,9 +1749,10 @@ fn wide(value: &str) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::{
-        extra_usage_block_units, format_bytes, format_gpu_capacity, format_month_usage,
-        format_percent, format_reset_local, format_self_usage, gpu_details, visible_usage_count,
-        window_size, CARD_GPU_BLOCK_HEIGHT, CARD_HEIGHT, CARD_USAGE_BLOCK_HEIGHT, CARD_WIDTH,
+        extra_usage_block_units, format_bytes, format_gpu_capacity, format_limit_metric_label,
+        format_month_usage, format_percent, format_reset_local, format_self_usage, gpu_details,
+        position_flyout, visible_usage_count, window_size, PixelRect, CARD_GPU_BLOCK_HEIGHT,
+        CARD_HEIGHT, CARD_USAGE_BLOCK_HEIGHT, CARD_WIDTH,
     };
     use crate::core::{
         format_banked_reset_label, format_fable_limit_label, CpuLoad, LimitWindow, ProcessStatus,
@@ -1792,6 +1878,26 @@ mod tests {
         assert_eq!(format_reset_local(weekly, 480), "08-17 16:00");
         assert_eq!(format_reset_local(session, -540), "16:39");
         assert_eq!(format_reset_local(unknown, -540), "");
+        assert_eq!(
+            format_limit_metric_label("5h", Some(session), SESSION_UTC_MS - 1, -540),
+            "5h: 28%  16:39"
+        );
+        assert_eq!(
+            format_limit_metric_label("5h", Some(session), SESSION_UTC_MS, -540),
+            "5h: —"
+        );
+        assert_eq!(
+            format_limit_metric_label("7d", Some(weekly), WEEKLY_UTC_MIDNIGHT_MS, -540),
+            "7d: —"
+        );
+        assert_eq!(
+            format_limit_metric_label("7d", Some(unknown), 1, -540),
+            "7d: —"
+        );
+        assert_ne!(
+            format_limit_metric_label("5h", Some(session), SESSION_UTC_MS, -540),
+            "5h: 0%"
+        );
     }
 
     #[test]
@@ -1838,6 +1944,80 @@ mod tests {
     }
 
     #[test]
+    fn component_flyout_shows_codex_when_chatgpt_plan_or_live_limits() {
+        let mut plan_only = ProviderUsage::default();
+        plan_only.set_chatgpt_plan("pro");
+        let usage = UsageSnapshot {
+            codex: plan_only,
+            ..UsageSnapshot::default()
+        };
+        assert!(!usage.codex.has_month_activity());
+        assert_eq!(usage.codex.plan_label().as_deref(), Some("ChatGPT Pro"));
+        assert_eq!(
+            crate::core::format_usage_heading("Codex", usage.codex.plan_label().as_deref()),
+            "ChatGPT Pro"
+        );
+        assert_eq!(visible_usage_count(usage), 1);
+        assert_eq!(
+            window_size(96, Some(usage), false),
+            (CARD_WIDTH, CARD_HEIGHT + CARD_USAGE_BLOCK_HEIGHT)
+        );
+
+        let expired = UsageSnapshot {
+            codex: ProviderUsage {
+                primary: Some(LimitWindow {
+                    used_tenths: 30,
+                    resets_at_ms: 1,
+                    window_minutes: 300,
+                }),
+                ..ProviderUsage::default()
+            },
+            ..UsageSnapshot::default()
+        };
+        assert_eq!(visible_usage_count(expired), 0);
+
+        let unknown = UsageSnapshot {
+            codex: ProviderUsage {
+                primary: Some(LimitWindow {
+                    used_tenths: 30,
+                    resets_at_ms: 0,
+                    window_minutes: 300,
+                }),
+                secondary: Some(LimitWindow {
+                    used_tenths: 200,
+                    resets_at_ms: 0,
+                    window_minutes: 10_080,
+                }),
+                ..ProviderUsage::default()
+            },
+            ..UsageSnapshot::default()
+        };
+        assert_eq!(visible_usage_count(unknown), 0);
+
+        let live = UsageSnapshot {
+            codex: ProviderUsage {
+                secondary: Some(LimitWindow {
+                    used_tenths: 200,
+                    resets_at_ms: u64::MAX,
+                    window_minutes: 10_080,
+                }),
+                ..ProviderUsage::default()
+            },
+            ..UsageSnapshot::default()
+        };
+        assert!(!live.codex.has_month_activity());
+        assert_eq!(visible_usage_count(live), 1);
+
+        let mut claude_plan = ProviderUsage::default();
+        claude_plan.set_plan("default_claude_max_20x");
+        let claude_only = UsageSnapshot {
+            claude: claude_plan,
+            ..UsageSnapshot::default()
+        };
+        assert_eq!(visible_usage_count(claude_only), 0);
+    }
+
+    #[test]
     fn component_flyout_grows_for_fable_and_banked_reset_rows() {
         let usage = UsageSnapshot {
             claude: ProviderUsage {
@@ -1877,5 +2057,93 @@ mod tests {
             Some("Banked Reset: 2")
         );
         assert_eq!(format_banked_reset_label(None), None);
+    }
+
+    #[test]
+    fn component_flyout_stays_on_owning_monitor_work_area() {
+        let size = (320, 400);
+        let icon = PixelRect {
+            left: -1_820,
+            top: 1_020,
+            right: -1_780,
+            bottom: 1_060,
+        };
+        let left_of_primary = PixelRect {
+            left: -1_920,
+            top: 0,
+            right: 0,
+            bottom: 1_080,
+        };
+        let (x, y) = position_flyout((-1_800, 1_020), Some(icon), size, left_of_primary);
+        assert!(x < 0, "primary SM_CXSCREEN clamp would force x=8, got {x}");
+        assert!(x >= left_of_primary.left);
+        assert!(x + size.0 <= left_of_primary.right);
+        assert!(y >= left_of_primary.top);
+        assert!(y + size.1 <= left_of_primary.bottom);
+
+        let above_primary = PixelRect {
+            left: 0,
+            top: -1_080,
+            right: 1_920,
+            bottom: 0,
+        };
+        let (x, y) = position_flyout((200, -60), None, size, above_primary);
+        assert!(y < 0, "primary SM_CYSCREEN clamp would force y=0, got {y}");
+        assert!(x >= above_primary.left);
+        assert!(y + size.1 <= above_primary.bottom);
+
+        let taskbar_bottom = PixelRect {
+            left: 0,
+            top: 0,
+            right: 1_920,
+            bottom: 1_040,
+        };
+        let (_, y) = position_flyout((1_800, 1_040), None, size, taskbar_bottom);
+        assert!(y + size.1 <= taskbar_bottom.bottom);
+
+        let taskbar_left = PixelRect {
+            left: 72,
+            top: 0,
+            right: 1_920,
+            bottom: 1_080,
+        };
+        let (x, _) = position_flyout((80, 1_040), None, size, taskbar_left);
+        assert!(x >= taskbar_left.left + 8);
+
+        let usage = UsageSnapshot {
+            claude: ProviderUsage {
+                today_cents: 1,
+                fable: Some(LimitWindow {
+                    used_tenths: 410,
+                    resets_at_ms: 1_787_011_200_000,
+                    window_minutes: 10_080,
+                }),
+                ..ProviderUsage::default()
+            },
+            codex: ProviderUsage {
+                month_cents: 125,
+                banked_reset_available: Some(2),
+                ..ProviderUsage::default()
+            },
+            ..UsageSnapshot::default()
+        };
+        let tall = window_size(96, Some(usage), false);
+        assert_eq!(
+            tall,
+            (
+                CARD_WIDTH,
+                CARD_HEIGHT + CARD_USAGE_BLOCK_HEIGHT * 2 + 24 + 15
+            )
+        );
+        let short_work = PixelRect {
+            left: 0,
+            top: 0,
+            right: 800,
+            bottom: tall.1 - 40,
+        };
+        let (x, y) = position_flyout((400, short_work.bottom), None, tall, short_work);
+        assert_eq!(y, short_work.top);
+        assert!(x >= short_work.left);
+        assert!(x + tall.0 <= short_work.right);
     }
 }
