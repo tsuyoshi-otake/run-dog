@@ -131,6 +131,16 @@ const fn primary_langid(langid: u16) -> u16 {
 /// All user-visible tray menu and balloon strings for one language.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MenuText {
+    pub display: &'static str,
+    pub display_dog: &'static str,
+    pub display_cpu: &'static str,
+    pub display_memory: &'static str,
+    pub display_gpu: &'static str,
+    pub display_claude_5h: &'static str,
+    pub display_claude_week: &'static str,
+    pub display_fable_week: &'static str,
+    pub display_codex_5h: &'static str,
+    pub display_codex_week: &'static str,
     pub theme: &'static str,
     pub theme_system: &'static str,
     pub theme_light: &'static str,
@@ -191,6 +201,16 @@ impl MenuText {
 }
 
 const JA: MenuText = MenuText {
+    display: "トレイ表示",
+    display_dog: "犬",
+    display_cpu: "CPU",
+    display_memory: "メモリ",
+    display_gpu: "GPU",
+    display_claude_5h: "Claude 5時間",
+    display_claude_week: "Claude 週",
+    display_fable_week: "Fable 週",
+    display_codex_5h: "Codex 5時間",
+    display_codex_week: "Codex 週",
     theme: "テーマ",
     theme_system: "システム",
     theme_light: "ライト",
@@ -226,6 +246,16 @@ const JA: MenuText = MenuText {
 };
 
 const EN: MenuText = MenuText {
+    display: "Tray icon",
+    display_dog: "Dog",
+    display_cpu: "CPU",
+    display_memory: "Memory",
+    display_gpu: "GPU",
+    display_claude_5h: "Claude 5h",
+    display_claude_week: "Claude week",
+    display_fable_week: "Fable week",
+    display_codex_5h: "Codex 5h",
+    display_codex_week: "Codex week",
     theme: "Theme",
     theme_system: "System",
     theme_light: "Light",
@@ -261,6 +291,16 @@ const EN: MenuText = MenuText {
 };
 
 const KO: MenuText = MenuText {
+    display: "트레이 아이콘",
+    display_dog: "개",
+    display_cpu: "CPU",
+    display_memory: "메모리",
+    display_gpu: "GPU",
+    display_claude_5h: "Claude 5시간",
+    display_claude_week: "Claude 주간",
+    display_fable_week: "Fable 주간",
+    display_codex_5h: "Codex 5시간",
+    display_codex_week: "Codex 주간",
     theme: "테마",
     theme_system: "시스템",
     theme_light: "밝게",
@@ -296,6 +336,16 @@ const KO: MenuText = MenuText {
 };
 
 const ZH: MenuText = MenuText {
+    display: "托盘图标",
+    display_dog: "狗",
+    display_cpu: "CPU",
+    display_memory: "内存",
+    display_gpu: "GPU",
+    display_claude_5h: "Claude 5 小时",
+    display_claude_week: "Claude 每周",
+    display_fable_week: "Fable 每周",
+    display_codex_5h: "Codex 5 小时",
+    display_codex_week: "Codex 每周",
     theme: "主题",
     theme_system: "系统",
     theme_light: "浅色",
@@ -331,6 +381,16 @@ const ZH: MenuText = MenuText {
 };
 
 const ZH_HANT: MenuText = MenuText {
+    display: "工作列圖示",
+    display_dog: "狗",
+    display_cpu: "CPU",
+    display_memory: "記憶體",
+    display_gpu: "GPU",
+    display_claude_5h: "Claude 5 小時",
+    display_claude_week: "Claude 每週",
+    display_fable_week: "Fable 每週",
+    display_codex_5h: "Codex 5 小時",
+    display_codex_week: "Codex 每週",
     theme: "主題",
     theme_system: "系統",
     theme_light: "淺色",
@@ -366,6 +426,16 @@ const ZH_HANT: MenuText = MenuText {
 };
 
 const VI: MenuText = MenuText {
+    display: "Biểu tượng khay",
+    display_dog: "Chó",
+    display_cpu: "CPU",
+    display_memory: "Bộ nhớ",
+    display_gpu: "GPU",
+    display_claude_5h: "Claude 5 giờ",
+    display_claude_week: "Claude tuần",
+    display_fable_week: "Fable tuần",
+    display_codex_5h: "Codex 5 giờ",
+    display_codex_week: "Codex tuần",
     theme: "Giao diện",
     theme_system: "Hệ thống",
     theme_light: "Sáng",
@@ -401,6 +471,16 @@ const VI: MenuText = MenuText {
 };
 
 const FR: MenuText = MenuText {
+    display: "Icône de notification",
+    display_dog: "Chien",
+    display_cpu: "CPU",
+    display_memory: "Mémoire",
+    display_gpu: "GPU",
+    display_claude_5h: "Claude 5 h",
+    display_claude_week: "Claude semaine",
+    display_fable_week: "Fable semaine",
+    display_codex_5h: "Codex 5 h",
+    display_codex_week: "Codex semaine",
     theme: "Thème",
     theme_system: "Système",
     theme_light: "Clair",
@@ -436,6 +516,16 @@ const FR: MenuText = MenuText {
 };
 
 const DE: MenuText = MenuText {
+    display: "Infobereich",
+    display_dog: "Hund",
+    display_cpu: "CPU",
+    display_memory: "Speicher",
+    display_gpu: "GPU",
+    display_claude_5h: "Claude 5 Std.",
+    display_claude_week: "Claude-Woche",
+    display_fable_week: "Fable-Woche",
+    display_codex_5h: "Codex 5 Std.",
+    display_codex_week: "Codex-Woche",
     theme: "Design",
     theme_system: "System",
     theme_light: "Hell",
@@ -471,6 +561,16 @@ const DE: MenuText = MenuText {
 };
 
 const ES: MenuText = MenuText {
+    display: "Icono de notificación",
+    display_dog: "Perro",
+    display_cpu: "CPU",
+    display_memory: "Memoria",
+    display_gpu: "GPU",
+    display_claude_5h: "Claude 5 h",
+    display_claude_week: "Claude semanal",
+    display_fable_week: "Fable semanal",
+    display_codex_5h: "Codex 5 h",
+    display_codex_week: "Codex semanal",
     theme: "Tema",
     theme_system: "Sistema",
     theme_light: "Claro",
@@ -506,6 +606,16 @@ const ES: MenuText = MenuText {
 };
 
 const RU: MenuText = MenuText {
+    display: "Значок в трее",
+    display_dog: "Собака",
+    display_cpu: "CPU",
+    display_memory: "Память",
+    display_gpu: "GPU",
+    display_claude_5h: "Claude 5 ч",
+    display_claude_week: "Claude за неделю",
+    display_fable_week: "Fable за неделю",
+    display_codex_5h: "Codex 5 ч",
+    display_codex_week: "Codex за неделю",
     theme: "Тема",
     theme_system: "Как в системе",
     theme_light: "Светлая",
@@ -541,6 +651,16 @@ const RU: MenuText = MenuText {
 };
 
 const IT: MenuText = MenuText {
+    display: "Icona di notifica",
+    display_dog: "Cane",
+    display_cpu: "CPU",
+    display_memory: "Memoria",
+    display_gpu: "GPU",
+    display_claude_5h: "Claude 5 ore",
+    display_claude_week: "Claude settimanale",
+    display_fable_week: "Fable settimanale",
+    display_codex_5h: "Codex 5 ore",
+    display_codex_week: "Codex settimanale",
     theme: "Tema",
     theme_system: "Sistema",
     theme_light: "Chiaro",
@@ -576,6 +696,16 @@ const IT: MenuText = MenuText {
 };
 
 const TH: MenuText = MenuText {
+    display: "ไอคอนถาด",
+    display_dog: "สุนัข",
+    display_cpu: "CPU",
+    display_memory: "หน่วยความจำ",
+    display_gpu: "GPU",
+    display_claude_5h: "Claude 5 ชม.",
+    display_claude_week: "Claude รายสัปดาห์",
+    display_fable_week: "Fable รายสัปดาห์",
+    display_codex_5h: "Codex 5 ชม.",
+    display_codex_week: "Codex รายสัปดาห์",
     theme: "ธีม",
     theme_system: "ตามระบบ",
     theme_light: "สว่าง",
@@ -657,6 +787,13 @@ mod tests {
             "Install RunDog v1.1.17"
         );
         assert_eq!(UiLanguage::Japanese.menu().about, "RunDog について");
+        assert_eq!(UiLanguage::Japanese.menu().display, "トレイ表示");
+        assert_eq!(
+            UiLanguage::Japanese.menu().display_claude_5h,
+            "Claude 5時間"
+        );
+        assert_eq!(UiLanguage::Japanese.menu().display_fable_week, "Fable 週");
+        assert_eq!(UiLanguage::Japanese.menu().display_codex_week, "Codex 週");
         assert_eq!(UiLanguage::Thai.menu().exit, "ออก");
         assert_eq!(UiLanguage::Russian.menu().theme, "Тема");
         assert_eq!(UiLanguage::Italian.menu().about, "Informazioni");
@@ -705,6 +842,13 @@ mod tests {
         ];
         for lang in langs {
             let text: MenuText = lang.menu();
+            assert!(!text.display.is_empty());
+            assert!(!text.display_dog.is_empty());
+            assert!(!text.display_claude_5h.is_empty());
+            assert!(!text.display_claude_week.is_empty());
+            assert!(!text.display_fable_week.is_empty());
+            assert!(!text.display_codex_5h.is_empty());
+            assert!(!text.display_codex_week.is_empty());
             assert!(!text.theme.is_empty());
             assert!(!text.about.is_empty());
             assert!(!text.exit.is_empty());

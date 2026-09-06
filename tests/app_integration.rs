@@ -11,7 +11,7 @@ use run_dog::{
     },
     core::{
         AppSettings, FpsLimit, MemoryStatus, PendingJournal, ResolvedTheme, SettingsRecord,
-        SystemTimes, ThemePreference,
+        SystemTimes, ThemePreference, TrayDisplayMode,
     },
 };
 
@@ -226,6 +226,7 @@ impl EffectPort for FakePlatform {
             Effect::Quit => self.quit_requested = true,
             Effect::SetThemeMenu(_)
             | Effect::SetFpsMenu(_)
+            | Effect::SetDisplayMenu(_)
             | Effect::SetStartupMenu(_)
             | Effect::NotifyStartupChanged(_)
             | Effect::CommitSettings { .. }
@@ -403,6 +404,20 @@ fn integration_theme_and_fps_selections_persist_to_the_fake_setting_store() {
     assert_eq!(rig.app.snapshot().resolved_theme, ResolvedTheme::Light);
     assert_eq!(rig.app.snapshot().settings.fps_limit, FpsLimit::Fps10);
     assert_eq!(rig.platform.record.settings.fps_limit, FpsLimit::Fps10);
+
+    rig.event(Event::SelectDisplayMode(TrayDisplayMode::CodexWeek));
+    assert_eq!(
+        rig.app.snapshot().settings.display_mode,
+        TrayDisplayMode::CodexWeek
+    );
+    assert_eq!(
+        rig.platform.record.settings.display_mode,
+        TrayDisplayMode::CodexWeek
+    );
+    assert_eq!(
+        rig.platform.tray.as_ref().map(|tray| tray.display_mode),
+        Some(TrayDisplayMode::CodexWeek)
+    );
 }
 
 #[test]

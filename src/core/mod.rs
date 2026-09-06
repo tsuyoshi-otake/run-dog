@@ -4,12 +4,14 @@ mod animation;
 mod claude_dedupe;
 mod codex_usage;
 mod cpu;
+mod display;
 mod gpu;
 mod memory;
 mod settings;
 mod sparkline;
 mod storage;
 mod theme;
+mod tray_raster;
 mod usage;
 mod usage_checkpoint;
 mod usage_diagnostics;
@@ -29,12 +31,17 @@ pub use cpu::{
     breakdown_between, process_share, usage_between, CpuBreakdown, CpuLoad, CpuSampler,
     ProcessStatus, ProcessTimes, SystemTimes,
 };
+pub use display::{
+    format_tray_glyph, format_tray_limit, format_tray_percent, TrayDisplayMode, TrayGlyph,
+    TrayMetrics,
+};
 pub use gpu::GpuStatus;
 pub use memory::MemoryStatus;
 pub use settings::{AppSettings, PendingJournal, SettingsRecord};
 pub use sparkline::{Sparkline, SPARKLINE_CAPACITY};
 pub use storage::StorageStatus;
 pub use theme::{ResolvedTheme, ThemePreference};
+pub use tray_raster::{rasterize_tray_glyph, TRAY_ICON_SIZE};
 pub use usage::{
     cost_cents, days_to_ymd, format_banked_reset_label, format_chatgpt_plan_label,
     format_compact_token_count, format_fable_limit_label, format_limit_label, format_plan_label,

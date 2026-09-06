@@ -210,7 +210,12 @@ fn load_settings_record_at(settings_key: &str) -> SettingsRecord {
         SettingsRecord::new(
             0,
             0,
-            AppSettings::from_persisted(theme.as_deref(), fps_limit.as_deref(), launch_at_startup),
+            AppSettings::from_persisted(
+                theme.as_deref(),
+                fps_limit.as_deref(),
+                launch_at_startup,
+                None,
+            ),
         )
     };
     close_key(key);

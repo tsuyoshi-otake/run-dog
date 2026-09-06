@@ -175,6 +175,7 @@ fn settings(theme: ThemePreference, fps: FpsLimit, startup: bool) -> AppSettings
         theme,
         fps_limit: fps,
         launch_at_startup: startup,
+        display_mode: run_dog::core::TrayDisplayMode::Dog,
     }
 }
 

@@ -1035,13 +1035,7 @@ fn paint_usage_row(
             right: row.right,
             bottom: row.top + layout.title_h,
         },
-        &format!(
-            "Today {}",
-            format_usd(
-                usage.today_cents,
-                usage.month_cents == 0 && usage.today_cents == 0
-            )
-        ),
+        &format_today_usage(usage),
         DT_RIGHT,
     );
 
@@ -1117,6 +1111,16 @@ fn paint_usage_row(
         &format_month_usage(usage, month_scan_in_progress),
         0,
     );
+}
+
+fn format_today_usage(usage: ProviderUsage) -> String {
+    format!(
+        "Today {}",
+        format_usd(
+            usage.today_cents,
+            usage.month_cents == 0 && usage.today_cents == 0
+        )
+    )
 }
 
 fn format_month_usage(usage: ProviderUsage, scanning: bool) -> String {
@@ -1750,9 +1754,9 @@ fn wide(value: &str) -> Vec<u16> {
 mod tests {
     use super::{
         extra_usage_block_units, format_bytes, format_gpu_capacity, format_limit_metric_label,
-        format_month_usage, format_percent, format_reset_local, format_self_usage, gpu_details,
-        position_flyout, visible_usage_count, window_size, PixelRect, CARD_GPU_BLOCK_HEIGHT,
-        CARD_HEIGHT, CARD_USAGE_BLOCK_HEIGHT, CARD_WIDTH,
+        format_month_usage, format_percent, format_reset_local, format_self_usage,
+        format_today_usage, gpu_details, position_flyout, visible_usage_count, window_size,
+        PixelRect, CARD_GPU_BLOCK_HEIGHT, CARD_HEIGHT, CARD_USAGE_BLOCK_HEIGHT, CARD_WIDTH,
     };
     use crate::core::{
         format_banked_reset_label, format_fable_limit_label, CpuLoad, LimitWindow, ProcessStatus,
@@ -1849,6 +1853,32 @@ mod tests {
         assert_eq!(
             format_month_usage(ProviderUsage::default(), true),
             "Month: Scanning..."
+        );
+        assert_eq!(
+            format_today_usage(ProviderUsage {
+                today_cents: 125,
+                month_cents: 400,
+                ..ProviderUsage::default()
+            }),
+            "Today $1.25"
+        );
+        assert_eq!(
+            format_today_usage(ProviderUsage {
+                month_cents: 400,
+                ..ProviderUsage::default()
+            }),
+            "Today $0.00"
+        );
+        let mut plan_only = ProviderUsage::default();
+        plan_only.set_chatgpt_plan("pro");
+        assert_eq!(format_today_usage(plan_only), "Today —");
+        assert_eq!(
+            format_today_usage(ProviderUsage {
+                month_input_tokens: 80,
+                month_output_tokens: 5,
+                ..ProviderUsage::default()
+            }),
+            "Today —"
         );
     }
 

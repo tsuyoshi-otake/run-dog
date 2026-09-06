@@ -10,18 +10,23 @@ use windows_sys::Win32::{
         },
         WindowsAndMessaging::{
             AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, KillTimer, PostMessageW,
-            SetForegroundWindow, SetTimer, TrackPopupMenu, HMENU, MF_CHECKED, MF_GRAYED, MF_POPUP,
-            MF_SEPARATOR, MF_STRING, MF_UNCHECKED, TPM_RIGHTBUTTON, WM_CONTEXTMENU, WM_NULL,
+            SetForegroundWindow, SetTimer, TrackPopupMenu, HICON, HMENU, MF_CHECKED, MF_GRAYED,
+            MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, TPM_RIGHTBUTTON, WM_CONTEXTMENU,
+            WM_NULL,
         },
     },
 };
 
 use crate::{
     application::{Effect, Event, TimerKind, TrayIcon},
-    core::{FpsLimit, ThemePreference},
+    core::{format_tray_glyph, FpsLimit, ThemePreference, TrayDisplayMode},
 };
 
-use super::{flyout::HoverFlyout, icons::IconFrames, update::UpdateMenuState};
+use super::{
+    flyout::HoverFlyout,
+    icons::{GeneratedIcon, IconFrames},
+    update::UpdateMenuState,
+};
 
 pub use super::messages::TRAY_CALLBACK_MESSAGE;
 /// One-shot retries while Explorer populates `NotifyIconSettings`.
@@ -36,6 +41,15 @@ pub const COMMAND_FPS_10: u32 = 1_010;
 pub const COMMAND_FPS_20: u32 = 1_011;
 pub const COMMAND_FPS_30: u32 = 1_012;
 pub const COMMAND_FPS_40: u32 = 1_013;
+pub const COMMAND_DISPLAY_DOG: u32 = 1_050;
+pub const COMMAND_DISPLAY_CPU: u32 = 1_051;
+pub const COMMAND_DISPLAY_MEMORY: u32 = 1_052;
+pub const COMMAND_DISPLAY_GPU: u32 = 1_053;
+pub const COMMAND_DISPLAY_CLAUDE_5H: u32 = 1_054;
+pub const COMMAND_DISPLAY_CLAUDE_WEEK: u32 = 1_055;
+pub const COMMAND_DISPLAY_FABLE_WEEK: u32 = 1_056;
+pub const COMMAND_DISPLAY_CODEX_5H: u32 = 1_057;
+pub const COMMAND_DISPLAY_CODEX_WEEK: u32 = 1_058;
 pub const COMMAND_TOGGLE_STARTUP: u32 = 1_020;
 pub const COMMAND_TOGGLE_PINNED_FLYOUT: u32 = 1_021;
 pub const COMMAND_CHECK_FOR_UPDATES: u32 = 1_030;
@@ -55,6 +69,15 @@ pub const fn event_for_command(command: u32) -> Option<Event> {
         COMMAND_FPS_20 => Some(Event::SelectFpsLimit(FpsLimit::Fps20)),
         COMMAND_FPS_30 => Some(Event::SelectFpsLimit(FpsLimit::Fps30)),
         COMMAND_FPS_40 => Some(Event::SelectFpsLimit(FpsLimit::Fps40)),
+        COMMAND_DISPLAY_DOG => Some(Event::SelectDisplayMode(TrayDisplayMode::Dog)),
+        COMMAND_DISPLAY_CPU => Some(Event::SelectDisplayMode(TrayDisplayMode::Cpu)),
+        COMMAND_DISPLAY_MEMORY => Some(Event::SelectDisplayMode(TrayDisplayMode::Memory)),
+        COMMAND_DISPLAY_GPU => Some(Event::SelectDisplayMode(TrayDisplayMode::Gpu)),
+        COMMAND_DISPLAY_CLAUDE_5H => Some(Event::SelectDisplayMode(TrayDisplayMode::Claude5h)),
+        COMMAND_DISPLAY_CLAUDE_WEEK => Some(Event::SelectDisplayMode(TrayDisplayMode::ClaudeWeek)),
+        COMMAND_DISPLAY_FABLE_WEEK => Some(Event::SelectDisplayMode(TrayDisplayMode::FableWeek)),
+        COMMAND_DISPLAY_CODEX_5H => Some(Event::SelectDisplayMode(TrayDisplayMode::Codex5h)),
+        COMMAND_DISPLAY_CODEX_WEEK => Some(Event::SelectDisplayMode(TrayDisplayMode::CodexWeek)),
         COMMAND_TOGGLE_STARTUP => Some(Event::ToggleStartup),
         COMMAND_EXIT => Some(Event::ExitRequested),
         _ => None,
@@ -68,12 +91,15 @@ pub struct TrayAdapter {
     icons: IconFrames,
     theme: ThemePreference,
     fps_limit: FpsLimit,
+    display_mode: TrayDisplayMode,
     startup_enabled: bool,
     flyout_pinned: bool,
     added: bool,
     promote_attempts: u8,
     flyout: HoverFlyout,
     last_icon: Option<TrayIcon>,
+    text_icon: Option<GeneratedIcon>,
+    text_key: Option<(crate::core::ResolvedTheme, String)>,
 }
 
 impl TrayAdapter {
@@ -83,18 +109,22 @@ impl TrayAdapter {
         theme: ThemePreference,
         fps_limit: FpsLimit,
         startup: bool,
+        display_mode: TrayDisplayMode,
     ) -> Self {
         Self {
             hwnd: ptr::null_mut(),
             icons,
             theme,
             fps_limit,
+            display_mode,
             startup_enabled: startup,
             flyout_pinned: super::registry::load_pinned_flyout(),
             added: false,
             promote_attempts: 0,
             flyout: HoverFlyout::new(),
             last_icon: None,
+            text_icon: None,
+            text_key: None,
         }
     }
 
@@ -116,10 +146,13 @@ impl TrayAdapter {
                 self.stop_promote();
                 self.flyout.destroy();
                 self.last_icon = None;
+                self.text_icon = None;
+                self.text_key = None;
                 self.remove();
             }
             Effect::SetThemeMenu(theme) => self.theme = *theme,
             Effect::SetFpsMenu(limit) => self.fps_limit = *limit,
+            Effect::SetDisplayMenu(mode) => self.display_mode = *mode,
             Effect::SetStartupMenu(enabled) => self.startup_enabled = *enabled,
             Effect::NotifyStartupChanged(enabled) => {
                 let text = super::i18n::current().menu();
@@ -148,11 +181,16 @@ impl TrayAdapter {
         self.flyout.hide();
         super::process::trim_working_set();
         let root = unsafe { CreatePopupMenu() };
+        let display_menu = unsafe { CreatePopupMenu() };
         let theme_menu = unsafe { CreatePopupMenu() };
         let speed_menu = unsafe { CreatePopupMenu() };
-        if root.is_null() || theme_menu.is_null() || speed_menu.is_null() {
+        if root.is_null() || display_menu.is_null() || theme_menu.is_null() || speed_menu.is_null()
+        {
             if !root.is_null() {
                 let _ = unsafe { DestroyMenu(root) };
+            }
+            if !display_menu.is_null() {
+                let _ = unsafe { DestroyMenu(display_menu) };
             }
             if !theme_menu.is_null() {
                 let _ = unsafe { DestroyMenu(theme_menu) };
@@ -164,6 +202,60 @@ impl TrayAdapter {
         }
 
         let text = super::i18n::current().menu();
+        append_checked(
+            display_menu,
+            COMMAND_DISPLAY_DOG,
+            text.display_dog,
+            self.display_mode == TrayDisplayMode::Dog,
+        );
+        append_checked(
+            display_menu,
+            COMMAND_DISPLAY_CPU,
+            text.display_cpu,
+            self.display_mode == TrayDisplayMode::Cpu,
+        );
+        append_checked(
+            display_menu,
+            COMMAND_DISPLAY_MEMORY,
+            text.display_memory,
+            self.display_mode == TrayDisplayMode::Memory,
+        );
+        append_checked(
+            display_menu,
+            COMMAND_DISPLAY_GPU,
+            text.display_gpu,
+            self.display_mode == TrayDisplayMode::Gpu,
+        );
+        append_checked(
+            display_menu,
+            COMMAND_DISPLAY_CLAUDE_5H,
+            text.display_claude_5h,
+            self.display_mode == TrayDisplayMode::Claude5h,
+        );
+        append_checked(
+            display_menu,
+            COMMAND_DISPLAY_CLAUDE_WEEK,
+            text.display_claude_week,
+            self.display_mode == TrayDisplayMode::ClaudeWeek,
+        );
+        append_checked(
+            display_menu,
+            COMMAND_DISPLAY_FABLE_WEEK,
+            text.display_fable_week,
+            self.display_mode == TrayDisplayMode::FableWeek,
+        );
+        append_checked(
+            display_menu,
+            COMMAND_DISPLAY_CODEX_5H,
+            text.display_codex_5h,
+            self.display_mode == TrayDisplayMode::Codex5h,
+        );
+        append_checked(
+            display_menu,
+            COMMAND_DISPLAY_CODEX_WEEK,
+            text.display_codex_week,
+            self.display_mode == TrayDisplayMode::CodexWeek,
+        );
         append_checked(
             theme_menu,
             COMMAND_THEME_SYSTEM,
@@ -207,6 +299,7 @@ impl TrayAdapter {
             self.fps_limit == FpsLimit::Fps40,
         );
 
+        append_submenu(root, display_menu, text.display);
         append_submenu(root, theme_menu, text.theme);
         append_submenu(root, speed_menu, text.animation_speed);
         let _ = unsafe { AppendMenuW(root, MF_SEPARATOR, 0, ptr::null()) };
@@ -392,6 +485,7 @@ impl TrayAdapter {
         let data = self.notification_data(&TrayIcon {
             theme: crate::core::ResolvedTheme::Dark,
             frame: 0,
+            display_mode: crate::core::TrayDisplayMode::Dog,
             tooltip: String::new(),
             cpu_sparkline: crate::core::Sparkline::new(),
             memory_sparkline: crate::core::Sparkline::new(),
@@ -407,14 +501,39 @@ impl TrayAdapter {
         self.added = false;
     }
 
-    fn notification_data(&self, icon: &TrayIcon) -> NOTIFYICONDATAW {
+    fn icon_handle(&mut self, icon: &TrayIcon) -> HICON {
+        if icon.display_mode.uses_animation() {
+            return self.icons.icon(icon.theme, icon.frame);
+        }
+        let Some(glyph) = format_tray_glyph(icon.display_mode, icon.metrics(), unix_now_ms())
+        else {
+            return self.icons.icon(icon.theme, icon.frame);
+        };
+        let key = (icon.theme, format!("{}:{}", glyph.tag, glyph.value));
+        if self.text_key.as_ref() == Some(&key) {
+            if let Some(icon) = self.text_icon.as_ref() {
+                return icon.raw();
+            }
+        }
+        match GeneratedIcon::from_glyph(icon.theme, &glyph) {
+            Ok(generated) => {
+                let handle = generated.raw();
+                self.text_icon = Some(generated);
+                self.text_key = Some(key);
+                handle
+            }
+            Err(_) => self.icons.icon(icon.theme, icon.frame),
+        }
+    }
+
+    fn notification_data(&mut self, icon: &TrayIcon) -> NOTIFYICONDATAW {
         let mut data = NOTIFYICONDATAW {
             cbSize: size_of::<NOTIFYICONDATAW>() as u32,
             hWnd: self.hwnd,
             uID: 1,
             uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP,
             uCallbackMessage: TRAY_CALLBACK_MESSAGE,
-            hIcon: self.icons.icon(icon.theme, icon.frame),
+            hIcon: self.icon_handle(icon),
             ..NOTIFYICONDATAW::default()
         };
         let limit = data.szTip.len() - 1;
@@ -448,14 +567,14 @@ impl TrayAdapter {
         );
     }
 
-    fn show_balloon(&self, title: &str, body: &str) {
+    fn show_balloon(&mut self, title: &str, body: &str) {
         if !self.added {
             return;
         }
-        let Some(icon) = self.last_icon.as_ref() else {
+        let Some(icon) = self.last_icon.clone() else {
             return;
         };
-        let mut data = self.notification_data(icon);
+        let mut data = self.notification_data(&icon);
         data.uFlags |= NIF_INFO;
         data.dwInfoFlags = NIIF_INFO | NIIF_NOSOUND;
         copy_utf16(title, &mut data.szInfoTitle);
@@ -466,6 +585,7 @@ impl TrayAdapter {
     fn remember(&mut self, icon: &TrayIcon) {
         let display_changed = self.last_icon.as_ref().is_none_or(|previous| {
             previous.theme != icon.theme
+                || previous.display_mode != icon.display_mode
                 || previous.tooltip != icon.tooltip
                 || previous.cpu_sparkline != icon.cpu_sparkline
                 || previous.memory_sparkline != icon.memory_sparkline
@@ -561,6 +681,13 @@ fn update_balloon_text(
     }
 }
 
+fn unix_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 fn copy_utf16(value: &str, dest: &mut [u16]) {
     if dest.is_empty() {
         return;
@@ -581,12 +708,13 @@ fn wide(value: &str) -> Vec<u16> {
 mod tests {
     use super::{
         event_for_command, update_balloon_text, TrayAdapter, UpdateMenuState, COMMAND_ABOUT,
-        COMMAND_CHECK_FOR_UPDATES, COMMAND_EXIT, COMMAND_FPS_40, COMMAND_THEME_DARK,
-        COMMAND_TOGGLE_STARTUP,
+        COMMAND_CHECK_FOR_UPDATES, COMMAND_DISPLAY_CLAUDE_5H, COMMAND_DISPLAY_CODEX_WEEK,
+        COMMAND_DISPLAY_CPU, COMMAND_DISPLAY_FABLE_WEEK, COMMAND_EXIT, COMMAND_FPS_40,
+        COMMAND_THEME_DARK, COMMAND_TOGGLE_STARTUP,
     };
     use crate::{
         application::Event,
-        core::{FpsLimit, ThemePreference},
+        core::{FpsLimit, ThemePreference, TrayDisplayMode},
         windows::i18n::UiLanguage,
     };
     use windows_sys::Win32::UI::Shell::NIN_SELECT;
@@ -601,6 +729,22 @@ mod tests {
         assert_eq!(
             event_for_command(COMMAND_FPS_40),
             Some(Event::SelectFpsLimit(FpsLimit::Fps40))
+        );
+        assert_eq!(
+            event_for_command(COMMAND_DISPLAY_CPU),
+            Some(Event::SelectDisplayMode(TrayDisplayMode::Cpu))
+        );
+        assert_eq!(
+            event_for_command(COMMAND_DISPLAY_CLAUDE_5H),
+            Some(Event::SelectDisplayMode(TrayDisplayMode::Claude5h))
+        );
+        assert_eq!(
+            event_for_command(COMMAND_DISPLAY_FABLE_WEEK),
+            Some(Event::SelectDisplayMode(TrayDisplayMode::FableWeek))
+        );
+        assert_eq!(
+            event_for_command(COMMAND_DISPLAY_CODEX_WEEK),
+            Some(Event::SelectDisplayMode(TrayDisplayMode::CodexWeek))
         );
         assert_eq!(
             event_for_command(COMMAND_TOGGLE_STARTUP),
@@ -631,6 +775,8 @@ mod tests {
     #[test]
     fn component_english_menu_copy_and_update_balloons_cover_user_visible_states() {
         let en = UiLanguage::English.menu();
+        assert_eq!(en.display, "Tray icon");
+        assert_eq!(en.display_codex_week, "Codex week");
         assert_eq!(en.startup(true), "Launch at startup: On");
         assert_eq!(en.startup(false), "Launch at startup: Off");
         assert_eq!(en.pinned_flyout(true), "Pin monitor card: On");
