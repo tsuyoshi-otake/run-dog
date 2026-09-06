@@ -198,7 +198,12 @@ mod tests {
     }
 
     fn opaque_count(pixels: &[u8]) -> usize {
-        pixels.chunks_exact(4).filter(|pixel| pixel[3] != 0).count()
+        pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|pixel| pixel[3] != 0)
+            .count()
     }
 
     #[test]
