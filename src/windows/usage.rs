@@ -59,9 +59,13 @@ use super::usage_store::FileUsageStore;
 
 pub const USAGE_TIMER_ID: usize = 4;
 pub use super::messages::USAGE_READY_MESSAGE;
+/// One-shot delay before the first JSONL ingest after the tray starts.
 pub const USAGE_FIRST_INTERVAL_MS: u32 = 8_000;
+/// Steady-state JSONL discover / read / ingest interval.
 pub const USAGE_IDLE_INTERVAL_MS: u32 = 60_000;
-pub const USAGE_CONTINUE_INTERVAL_MS: u32 = 400;
+/// Next ingest when unread bytes remain. Same floor as idle — never a
+/// sub-minute token poll (the old 400ms catch-up loop is gone).
+pub const USAGE_CONTINUE_INTERVAL_MS: u32 = USAGE_IDLE_INTERVAL_MS;
 
 const MAX_FILES_PER_TICK: usize = 3;
 const MAX_STAT_PER_TICK: usize = 12;
@@ -78,7 +82,9 @@ const CODEX_LIMITS_TAIL: u64 = 256 * 1_024;
 const CODEX_LIMITS_FILES: usize = 5;
 const CLAUDE_LIMITS_PERIOD_MS: u64 = 5 * 60 * 1_000;
 const CODEX_LIMITS_PERIOD_MS: u64 = 60 * 1_000;
-const STAT_COOLDOWN_MS: u64 = 30 * 1_000;
+/// Hot files are restatted at most this often. Kept ≥ idle so even an
+/// early caller cannot read tokens more than once a minute.
+const STAT_COOLDOWN_MS: u64 = USAGE_IDLE_INTERVAL_MS as u64;
 /// Known files that are not hot are still restatted this often. Cached
 /// mtime/size must not freeze a cursor forever.
 const COLD_RESTAT_MS: u64 = 10 * 60 * 1_000;
@@ -454,6 +460,8 @@ impl UsageCollector {
         } else {
             UsageTick::MoreWork
         };
+        // Persist after this ingest tick when totals/cursors changed.
+        // Mid-catch-up crash recovery needs that write, not a 400ms timer.
         if self.checkpoint_dirty {
             self.persist_checkpoint_if_needed(window);
         }
@@ -3072,6 +3080,15 @@ mod tests {
             max_bytes,
             &mut buf,
         )
+    }
+
+    #[test]
+    fn component_usage_read_intervals_are_at_least_one_minute() {
+        assert!(super::USAGE_IDLE_INTERVAL_MS >= 60_000);
+        assert!(super::USAGE_CONTINUE_INTERVAL_MS >= 60_000);
+        assert!(super::STAT_COOLDOWN_MS >= 60_000);
+        assert!(super::CLAUDE_LIMITS_PERIOD_MS >= 60_000);
+        assert!(super::CODEX_LIMITS_PERIOD_MS >= 60_000);
     }
 
     #[test]

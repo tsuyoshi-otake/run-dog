@@ -522,7 +522,8 @@ unsafe extern "system" fn window_proc(
             context.usage.rescan_current_month();
             context.dispatch(Event::UsageSample(context.usage.snapshot()));
             context.platform.tray.notify_month_rescan_started();
-            context.arm_usage_timer(USAGE_CONTINUE_INTERVAL_MS);
+            // User-initiated: one bounded burst now, then ≥60s if unread remains.
+            context.tick_usage();
         } else if command == COMMAND_ABOUT {
             crate::windows::i18n::open_about_page();
         } else if let Some(event) = event_for_command(command) {
