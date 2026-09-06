@@ -1,0 +1,9 @@
+tested commit SHA: a8e870c0f1cad7cf4e431f6d563c8670c5626868
+date: 2026-09-05
+OS: Windows 10.0.26200
+Rust: rustc 1.97.1 (8bab26f4f 2026-07-14)
+command: cmd /c exit 1; cmd /c exit 0; echo LASTEXITCODE
+scope: PowerShell native command chaining (same pattern as verify.yml / release.yml)
+result: after exit1 LASTEXITCODE=1; after exit0 LASTEXITCODE=0
+classification: REPRODUCED
+note: GHA windows-latest pwsh e2e of this overwrite is NOT RUN in this session
