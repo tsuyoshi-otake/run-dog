@@ -49,3 +49,17 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; Flags: unchecked
 ; in-app upgrade. The updater starts Setup with CreateProcess after SHA-256
 ; verification, then asks the existing instance to close.
 Filename: "{app}\{#AppExeName}"; Flags: nowait
+
+; RunDog-owned cache only. Do not name Claude or Codex homes here.
+[UninstallDelete]
+Type: filesandordirs; Name: "{localappdata}\SystemExe\RunDog"
+
+[Code]
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usUninstall then
+  begin
+    RegDeleteValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'RunDog');
+    RegDeleteKeyIncludingSubkeys(HKCU, 'Software\SystemExe\RunDog');
+  end;
+end;

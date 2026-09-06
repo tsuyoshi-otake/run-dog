@@ -1,0 +1,30 @@
+Phase J-b bounded fuzz  2026-09-05
+Stack: #39 50350fbe / branch feat/usage-ingest-fuzz
+origin/main unchanged: a8e870c0f1cad7cf4e431f6d563c8670c5626868
+Old pin 2c0494c is not used.
+
+cargo-fuzz / libFuzzer: NOT INSTALLED (cargo fuzz: no such command)
+Driver: deterministic XorShift seed 0x5EED_2026_0905_0003
+Default budget: 1024 cases, max input 4096 bytes
+Longer run: $env:RUN_DOG_FUZZ_CASES=N; scripts/run-usage-ingest-fuzz.ps1
+Not a GHA required long campaign.
+
+Targets
+  UsageState decode
+  legacy UsageCheckpoint decode
+  Claude JSONL parse
+  Codex JSONL parse
+  timestamp parse
+  checksum manifest
+  GitHub release JSON -> select_update
+
+Oracles
+  no panic
+  encoded output <= 64KiB
+  cursor.offset <= cursor.size
+  last_safe_complete_record_offset never past last newline
+  no Authorization / Bearer / token markers in corpus or encode
+
+Corpus: verification/evidence/fuzz-corpus/ (fixture ids only)
+
+Local: cargo fmt, clippy -D warnings, cargo test --all-targets PASS (220 lib + integrations)

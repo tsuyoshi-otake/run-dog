@@ -17,7 +17,8 @@ pub struct TokenUsage {
 }
 
 impl TokenUsage {
-    /// All input-side tokens seen while parsing provider JSONL.
+    /// Measured input-side tokens. `long_context_*` classify the same tokens
+    /// for pricing and must not be added again.
     #[must_use]
     pub const fn processed_input_tokens(self) -> u64 {
         self.input
@@ -25,14 +26,12 @@ impl TokenUsage {
             .saturating_add(self.cache_read)
             .saturating_add(self.cache_write_5m)
             .saturating_add(self.cache_write_1h)
-            .saturating_add(self.long_context_input)
-            .saturating_add(self.long_context_cached_input)
     }
 
-    /// All output-side tokens seen while parsing provider JSONL.
+    /// Measured output-side tokens. `long_context_output` is a pricing class.
     #[must_use]
     pub const fn processed_output_tokens(self) -> u64 {
-        self.output.saturating_add(self.long_context_output)
+        self.output
     }
 }
 
@@ -52,7 +51,7 @@ impl LimitWindow {
         f32::from(self.used_tenths) / 10.0
     }
 
-    /// A window whose reset has already passed is treated as unused.
+    /// Expired data, not a display instruction. Flyout text uses [`is_current`].
     #[must_use]
     pub fn effective(self, now_ms: u64) -> Self {
         if self.resets_at_ms != 0 && self.resets_at_ms <= now_ms {
@@ -76,16 +75,26 @@ impl LimitWindow {
     }
 }
 
-/// Flyout label for the Claude Fable weekly bucket.
+/// Flyout label for a rate-limit window.
 ///
 /// Expired / unknown reset times are "—" — never a fabricated 0%.
+/// Missing windows use the same dash so a failed fetch cannot look unused.
+#[must_use]
+pub fn format_limit_label(name: &str, window: Option<LimitWindow>, now_ms: u64) -> String {
+    match window {
+        Some(window) if window.is_current(now_ms) => {
+            format!("{name}: {:.0}%", window.used_percent())
+        }
+        _ => format!("{name}: —"),
+    }
+}
+
+/// Flyout label for the Claude Fable weekly bucket.
+///
+/// Same freshness contract as [`format_limit_label`].
 #[must_use]
 pub fn format_fable_limit_label(window: LimitWindow, now_ms: u64) -> String {
-    if window.is_current(now_ms) {
-        format!("Fable: {:.0}%", window.used_percent())
-    } else {
-        "Fable: —".to_owned()
-    }
+    format_limit_label("Fable", Some(window), now_ms)
 }
 
 /// Codex banked reset count. Hidden when the field is absent or zero.
@@ -105,7 +114,7 @@ pub struct ProviderUsage {
     pub month_cents: u32,
     pub month_input_tokens: u64,
     pub month_output_tokens: u64,
-    pub plan: [u8; 16],
+    pub plan: [u8; 24],
     pub plan_len: u8,
     pub primary: Option<LimitWindow>,
     pub secondary: Option<LimitWindow>,
@@ -126,7 +135,15 @@ impl ProviderUsage {
     }
 
     pub fn set_plan(&mut self, label: &str) {
-        let formatted = format_plan_label(label);
+        self.store_plan(&format_plan_label(label));
+    }
+
+    /// Codex / ChatGPT `plan_type` uses ChatGPT product names, not Claude Max 20x.
+    pub fn set_chatgpt_plan(&mut self, label: &str) {
+        self.store_plan(&format_chatgpt_plan_label(label));
+    }
+
+    fn store_plan(&mut self, formatted: &str) {
         let bytes = formatted.as_bytes();
         let len = bytes.len().min(self.plan.len());
         self.plan[..len].copy_from_slice(&bytes[..len]);
@@ -135,14 +152,29 @@ impl ProviderUsage {
 
     /// True when this month's jsonl produced an API-equivalent cost.
     ///
-    /// Limit windows alone do not count: leftover credentials can still
-    /// return 5h/7d bars without any use this month.
+    /// Limit windows alone do not count. Codex / ChatGPT flyout visibility
+    /// uses [`shows_chatgpt_card`] so a live plan or 5h/7d can still appear.
     #[must_use]
     pub const fn has_month_activity(self) -> bool {
         self.month_cents > 0
             || self.today_cents > 0
             || self.month_input_tokens > 0
             || self.month_output_tokens > 0
+    }
+
+    /// Codex / ChatGPT flyout row: month JSONL, a resolved plan, or a live 5h/7d.
+    ///
+    /// Credential files, failed fetches, and unknown/expired windows do not
+    /// qualify. Those must not be painted as 0%.
+    #[must_use]
+    pub fn shows_chatgpt_card(self, now_ms: u64) -> bool {
+        if self.has_month_activity() || self.plan_len != 0 {
+            return true;
+        }
+        [self.session_window(), self.weekly_window()]
+            .into_iter()
+            .flatten()
+            .any(|window| window.is_current(now_ms))
     }
 
     #[must_use]
@@ -169,7 +201,9 @@ impl ProviderUsage {
     }
 }
 
-/// `default_claude_max_20x` / `pro` → `Max 20x` / `Pro 20x`.
+/// Claude slug `default_claude_max_20x` → `Max 20x`. Bare `pro` is `Pro`.
+///
+/// Multipliers stay only when the slug itself contains `20x` / `5x` / `2x`.
 #[must_use]
 pub fn format_plan_label(raw: &str) -> String {
     let lower = raw.to_ascii_lowercase();
@@ -188,17 +222,69 @@ pub fn format_plan_label(raw: &str) -> String {
     } else {
         raw.trim()
     };
-    let multiplier = extract_multiplier(&lower).or_else(|| {
-        if name.eq_ignore_ascii_case("pro") {
-            Some("20x")
-        } else {
-            None
-        }
-    });
-    match multiplier {
+    match extract_multiplier(&lower) {
         Some(multiplier) if !name.is_empty() => format!("{name} {multiplier}"),
         _ if !name.is_empty() => name.to_owned(),
         _ => raw.to_owned(),
+    }
+}
+
+/// Exact ChatGPT / Codex `plan_type` tokens → flyout label.
+///
+/// `pro` / `plus` appear in repo JSONL and WHAM fixtures. `go` / `business`
+/// are official product names mapped only on exact slug match (live payload
+/// NOT RUN). Free / Team / Enterprise / Edu are not mapped: no captured ID.
+const CHATGPT_PLAN_LABELS: &[(&str, &str)] = &[
+    ("pro", "ChatGPT Pro"),
+    ("chatgpt_pro", "ChatGPT Pro"),
+    ("chatgpt-pro", "ChatGPT Pro"),
+    ("plus", "ChatGPT Plus"),
+    ("chatgpt_plus", "ChatGPT Plus"),
+    ("chatgpt-plus", "ChatGPT Plus"),
+    ("go", "ChatGPT Go"),
+    ("chatgpt_go", "ChatGPT Go"),
+    ("chatgpt-go", "ChatGPT Go"),
+    ("business", "ChatGPT Business"),
+    ("chatgpt_business", "ChatGPT Business"),
+    ("chatgpt-business", "ChatGPT Business"),
+];
+
+/// ChatGPT / Codex `plan_type` from WHAM or JSONL `rate_limits`.
+///
+/// Unknown tokens stay raw when they are a short ASCII slug. No invented
+/// product name and no Claude `Pro 20x` fallback.
+#[must_use]
+pub fn format_chatgpt_plan_label(raw: &str) -> String {
+    let key = raw.trim().to_ascii_lowercase();
+    if key.is_empty() {
+        return String::new();
+    }
+    for (id, label) in CHATGPT_PLAN_LABELS {
+        if key == *id {
+            return (*label).to_owned();
+        }
+    }
+    if key.len() <= 16
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        key
+    } else {
+        String::new()
+    }
+}
+
+/// Flyout heading: ChatGPT product names stand alone. Claude stays `Claude {plan}`.
+///
+/// Unknown Codex slugs keep the `Codex` prefix. Empty plan is just the title —
+/// no trailing space.
+#[must_use]
+pub fn format_usage_heading(title: &str, plan: Option<&str>) -> String {
+    match (title, plan) {
+        ("Codex", Some(plan)) if plan.starts_with("ChatGPT ") => plan.to_owned(),
+        (_, Some(plan)) if !plan.is_empty() => format!("{title} {plan}"),
+        _ => title.to_owned(),
     }
 }
 
@@ -484,6 +570,119 @@ fn model_matches(model: &str, key: &str) -> bool {
         && model[..model.len() - FAST.len()].starts_with(&key[..key.len() - FAST.len()])
 }
 
+/// Windows `TIME_ZONE_INFORMATION` composition.
+///
+/// `TIME_ZONE_ID_STANDARD` (1) adds `StandardBias`. `TIME_ZONE_ID_DAYLIGHT`
+/// (2) adds `DaylightBias`. Unknown / invalid keep `Bias` only — do not invent
+/// a DST transition.
+#[must_use]
+pub fn windows_tz_bias_minutes(
+    bias: i32,
+    standard_bias: i32,
+    daylight_bias: i32,
+    zone_id: u32,
+) -> i32 {
+    match zone_id {
+        1 => bias.saturating_add(standard_bias),
+        2 => bias.saturating_add(daylight_bias),
+        _ => bias,
+    }
+}
+
+/// Parse an RFC3339-like timestamp to Unix milliseconds (UTC).
+///
+/// Accepts `Z`, `+HH:MM`, `-HH:MM`, `+HHMM`, and `-HHMM`. A missing offset is
+/// not a unique instant and is rejected. The civil clock is never treated as
+/// UTC when an offset is present.
+#[must_use]
+pub fn parse_rfc3339_ms(value: &str) -> Option<u64> {
+    if value.len() < 20 {
+        return None;
+    }
+    let bytes = value.as_bytes();
+    if bytes.get(4) != Some(&b'-')
+        || bytes.get(7) != Some(&b'-')
+        || bytes.get(10) != Some(&b'T')
+        || bytes.get(13) != Some(&b':')
+        || bytes.get(16) != Some(&b':')
+    {
+        return None;
+    }
+    let year: i32 = value.get(0..4)?.parse().ok()?;
+    let month: u8 = value.get(5..7)?.parse().ok()?;
+    let day: u8 = value.get(8..10)?.parse().ok()?;
+    let hour: u8 = value.get(11..13)?.parse().ok()?;
+    let minute: u8 = value.get(14..16)?.parse().ok()?;
+    let second: u8 = value.get(17..19)?.parse().ok()?;
+    if hour > 23 || minute > 59 || second > 60 {
+        return None;
+    }
+    let mut idx = 19;
+    if bytes.get(idx) == Some(&b'.') {
+        idx += 1;
+        while idx < bytes.len() && bytes[idx].is_ascii_digit() {
+            idx += 1;
+        }
+    }
+    let offset_minutes = parse_rfc3339_offset(value.get(idx..)?)?;
+    let days = ymd_to_epoch_days(year, month, day)?;
+    let civil_ms = days
+        .saturating_mul(86_400)
+        .saturating_add(u64::from(hour) * 3_600)
+        .saturating_add(u64::from(minute) * 60)
+        .saturating_add(u64::from(second))
+        .saturating_mul(1_000);
+    let utc = i64::try_from(civil_ms)
+        .ok()?
+        .checked_sub(i64::from(offset_minutes) * 60_000)?;
+    u64::try_from(utc).ok()
+}
+
+fn parse_rfc3339_offset(value: &str) -> Option<i32> {
+    if value == "Z" || value == "z" {
+        return Some(0);
+    }
+    let sign = match value.as_bytes().first()? {
+        b'+' => 1,
+        b'-' => -1,
+        _ => return None,
+    };
+    let rest = value.get(1..)?;
+    let (hours, minutes) = if rest.len() == 5 && rest.as_bytes().get(2) == Some(&b':') {
+        (
+            rest.get(0..2)?.parse::<i32>().ok()?,
+            rest.get(3..5)?.parse::<i32>().ok()?,
+        )
+    } else if rest.len() == 4 {
+        (
+            rest.get(0..2)?.parse::<i32>().ok()?,
+            rest.get(2..4)?.parse::<i32>().ok()?,
+        )
+    } else {
+        return None;
+    };
+    if !(0..=23).contains(&hours) || !(0..=59).contains(&minutes) {
+        return None;
+    }
+    Some(sign * (hours * 60 + minutes))
+}
+
+fn ymd_to_epoch_days(year: i32, month: u8, day: u8) -> Option<u64> {
+    if !(1..=12).contains(&month) || day == 0 {
+        return None;
+    }
+    let (y, m) = if month <= 2 {
+        (year - 1, i32::from(month) + 9)
+    } else {
+        (year, i32::from(month) - 3)
+    };
+    let era = y.div_euclid(400);
+    let yoe = (y - era * 400) as u64;
+    let doy = (153 * m as u64 + 2) / 5 + u64::from(day) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some((era as i64 * 146_097 + doe as i64 - 719_468) as u64)
+}
+
 /// Civil date from Unix milliseconds shifted by a timezone bias in minutes.
 /// Windows `TIME_ZONE_INFORMATION.Bias` is UTC = local + Bias.
 #[must_use]
@@ -524,9 +723,11 @@ pub fn days_to_ymd(days: i64) -> (i32, u8, u8) {
 #[cfg(test)]
 mod tests {
     use super::{
-        cost_cents, days_to_ymd, format_banked_reset_label, format_compact_token_count,
-        format_fable_limit_label, format_plan_label, is_long_context_request, local_ymd,
-        resolve_codex_model, ymd_key, LimitWindow, ProviderUsage, TokenUsage,
+        cost_cents, days_to_ymd, format_banked_reset_label, format_chatgpt_plan_label,
+        format_compact_token_count, format_fable_limit_label, format_limit_label,
+        format_plan_label, format_usage_heading, is_long_context_request, local_ymd,
+        parse_rfc3339_ms, resolve_codex_model, windows_tz_bias_minutes, ymd_iso, ymd_key,
+        LimitWindow, ProviderUsage, TokenUsage,
     };
 
     #[test]
@@ -539,7 +740,7 @@ mod tests {
     }
 
     #[test]
-    fn component_processed_token_totals_include_cache_and_long_context_fields() {
+    fn component_processed_token_totals_are_measurement_not_pricing_class() {
         let usage = TokenUsage {
             input: 10,
             cached_input: 2,
@@ -547,12 +748,55 @@ mod tests {
             cache_write_5m: 4,
             cache_write_1h: 5,
             output: 7,
-            long_context_input: 11,
-            long_context_cached_input: 13,
-            long_context_output: 17,
+            long_context_input: 10,
+            long_context_cached_input: 2,
+            long_context_output: 7,
         };
-        assert_eq!(usage.processed_input_tokens(), 48);
-        assert_eq!(usage.processed_output_tokens(), 24);
+        assert_eq!(usage.processed_input_tokens(), 24);
+        assert_eq!(usage.processed_output_tokens(), 7);
+        let priced = TokenUsage {
+            input: 1_000_000,
+            output: 1_000_000,
+            long_context_input: 1_000_000,
+            long_context_output: 1_000_000,
+            ..TokenUsage::default()
+        };
+        let classified = cost_cents("gpt-5.4", priced, None).expect("priced");
+        let measurement_only = cost_cents(
+            "gpt-5.4",
+            TokenUsage {
+                long_context_input: 0,
+                long_context_output: 0,
+                ..priced
+            },
+            None,
+        )
+        .expect("base");
+        assert!(
+            classified > measurement_only,
+            "long-context copies still apply the pricing premium"
+        );
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn pbt_processed_tokens_ignore_long_context_copies(
+            input in 0u64..50_000u64,
+            cached in 0u64..50_000u64,
+            output in 0u64..10_000u64,
+        ) {
+            let usage = TokenUsage {
+                input,
+                cached_input: cached,
+                output,
+                long_context_input: input,
+                long_context_cached_input: cached,
+                long_context_output: output,
+                ..TokenUsage::default()
+            };
+            proptest::prop_assert_eq!(usage.processed_input_tokens(), input + cached);
+            proptest::prop_assert_eq!(usage.processed_output_tokens(), output);
+        }
     }
 
     #[test]
@@ -662,6 +906,16 @@ mod tests {
         assert_eq!(format_fable_limit_label(unknown, 1), "Fable: —");
         assert!(!format_fable_limit_label(window, 1_000).contains("0%"));
         assert!(!format_fable_limit_label(unknown, 1).contains("0%"));
+        assert_eq!(format_limit_label("5h", Some(window), 999), "5h: 41%");
+        assert_eq!(format_limit_label("5h", Some(window), 1_000), "5h: —");
+        assert_eq!(format_limit_label("7d", Some(unknown), 1), "7d: —");
+        assert_eq!(format_limit_label("5h", None, 1), "5h: —");
+        assert_ne!(format_limit_label("5h", Some(window), 1_000), "5h: 0%");
+        assert_ne!(format_limit_label("7d", Some(window), 1_000), "7d: 0%");
+        assert_eq!(
+            format_limit_label("Fable", Some(window), 1_000),
+            format_fable_limit_label(window, 1_000)
+        );
     }
 
     #[test]
@@ -672,6 +926,59 @@ mod tests {
             format_banked_reset_label(Some(2)).as_deref(),
             Some("Banked Reset: 2")
         );
+    }
+
+    #[test]
+    fn component_rfc3339_offsets_are_utc_instants_not_wall_clock() {
+        let z = parse_rfc3339_ms("2026-08-16T01:02:03Z").expect("Z");
+        let plus = parse_rfc3339_ms("2026-08-16T10:02:03+09:00").expect("+09");
+        let minus = parse_rfc3339_ms("2026-08-15T17:02:03-08:00").expect("-08");
+        let compact = parse_rfc3339_ms("2026-08-16T10:02:03+0900").expect("compact");
+        assert_eq!(z, plus);
+        assert_eq!(z, minus);
+        assert_eq!(z, compact);
+        // Fail-first: the old parser treated +09:00 civil digits as UTC.
+        assert_ne!(
+            plus,
+            parse_rfc3339_ms("2026-08-16T10:02:03Z").expect("wall Z")
+        );
+        assert!(parse_rfc3339_ms("2026-08-16T01:02:03").is_none());
+        assert!(parse_rfc3339_ms("not-a-timestamp-at-all!!").is_none());
+        assert!(parse_rfc3339_ms("2026-08-16 01:02:03Z").is_none());
+    }
+
+    #[test]
+    fn component_rfc3339_month_boundary_keeps_utc_then_local_bucket() {
+        let utc = parse_rfc3339_ms("2026-08-31T23:30:00+09:00").expect("boundary");
+        assert_eq!(local_ymd(utc, -540), (2026, 8, 31));
+        assert_eq!(local_ymd(utc, 0), (2026, 8, 31));
+        let usage = TokenUsage {
+            input: 1_000_000,
+            output: 1_000_000,
+            ..TokenUsage::default()
+        };
+        assert_eq!(
+            cost_cents("claude-sonnet-5", usage, Some(&ymd_iso(2026, 8, 31))),
+            Some(1_200)
+        );
+        assert_eq!(
+            cost_cents("claude-sonnet-5", usage, Some(&ymd_iso(2026, 9, 1))),
+            Some(1_800)
+        );
+    }
+
+    #[test]
+    fn component_windows_tz_bias_uses_standard_or_daylight_addend() {
+        // US Pacific: Bias=480, StandardBias=0, DaylightBias=-60
+        assert_eq!(windows_tz_bias_minutes(480, 0, -60, 1), 480);
+        assert_eq!(windows_tz_bias_minutes(480, 0, -60, 2), 420);
+        assert_eq!(windows_tz_bias_minutes(480, 0, -60, 0), 480);
+    }
+
+    #[test]
+    fn component_ambiguous_and_nonexistent_local_without_offset_are_rejected() {
+        assert!(parse_rfc3339_ms("2026-11-01T01:30:00").is_none());
+        assert!(parse_rfc3339_ms("2026-03-08T02:30:00").is_none());
     }
 
     #[test]
@@ -687,8 +994,56 @@ mod tests {
     fn component_plan_labels_capitalise_and_keep_rate_multipliers() {
         assert_eq!(format_plan_label("default_claude_max_20x"), "Max 20x");
         assert_eq!(format_plan_label("max"), "Max");
-        assert_eq!(format_plan_label("pro"), "Pro 20x");
+        assert_eq!(format_plan_label("pro"), "Pro");
         assert_eq!(format_plan_label("plus"), "Plus");
+    }
+
+    #[test]
+    fn component_chatgpt_plan_ids_use_product_names() {
+        assert_eq!(format_chatgpt_plan_label("pro"), "ChatGPT Pro");
+        assert_eq!(format_chatgpt_plan_label("plus"), "ChatGPT Plus");
+        assert_eq!(format_chatgpt_plan_label("go"), "ChatGPT Go");
+        assert_eq!(format_chatgpt_plan_label("business"), "ChatGPT Business");
+        assert_eq!(format_chatgpt_plan_label("chatgpt-pro"), "ChatGPT Pro");
+        assert_eq!(format_chatgpt_plan_label("team"), "team");
+        assert_eq!(format_chatgpt_plan_label("enterprise"), "enterprise");
+        assert_eq!(format_chatgpt_plan_label("free"), "free");
+        assert_eq!(format_chatgpt_plan_label("edu"), "edu");
+        assert_eq!(format_chatgpt_plan_label("not a plan!!"), "");
+        assert_ne!(format_chatgpt_plan_label("pro"), "Pro 20x");
+        assert_ne!(format_chatgpt_plan_label("pro"), "Plus");
+    }
+
+    #[test]
+    fn component_usage_heading_does_not_stack_codex_on_chatgpt() {
+        assert_eq!(
+            format_usage_heading("Codex", Some("ChatGPT Pro")),
+            "ChatGPT Pro"
+        );
+        assert_eq!(
+            format_usage_heading("Codex", Some("ChatGPT Plus")),
+            "ChatGPT Plus"
+        );
+        assert_eq!(
+            format_usage_heading("Codex", Some("ChatGPT Go")),
+            "ChatGPT Go"
+        );
+        assert_eq!(
+            format_usage_heading("Codex", Some("ChatGPT Business")),
+            "ChatGPT Business"
+        );
+        assert_eq!(format_usage_heading("Codex", Some("team")), "Codex team");
+        assert_eq!(format_usage_heading("Codex", None), "Codex");
+        assert_eq!(format_usage_heading("Codex", Some("")), "Codex");
+        assert_ne!(
+            format_usage_heading("Codex", Some("ChatGPT Pro")),
+            "Codex ChatGPT Pro"
+        );
+        assert_eq!(
+            format_usage_heading("Claude", Some("Max 20x")),
+            "Claude Max 20x"
+        );
+        assert_eq!(format_usage_heading("Claude", None), "Claude");
     }
 
     #[test]
@@ -713,5 +1068,64 @@ mod tests {
             ..ProviderUsage::default()
         }
         .has_month_activity());
+    }
+
+    #[test]
+    fn component_chatgpt_card_shows_plan_or_live_limits() {
+        const NOW: u64 = 1_786_865_940_000;
+        assert!(!ProviderUsage::default().shows_chatgpt_card(NOW));
+
+        let mut plan = ProviderUsage::default();
+        plan.set_chatgpt_plan("pro");
+        assert!(plan.shows_chatgpt_card(NOW));
+        assert!(!plan.has_month_activity());
+        assert_eq!(plan.plan_label().as_deref(), Some("ChatGPT Pro"));
+        assert_ne!(plan.plan_label().as_deref(), Some("Pro 20x"));
+
+        let live = ProviderUsage {
+            primary: Some(LimitWindow {
+                used_tenths: 30,
+                resets_at_ms: NOW + 1,
+                window_minutes: 300,
+            }),
+            ..ProviderUsage::default()
+        };
+        assert!(live.shows_chatgpt_card(NOW));
+        assert!(!live.has_month_activity());
+
+        let weekly = ProviderUsage {
+            secondary: Some(LimitWindow {
+                used_tenths: 200,
+                resets_at_ms: NOW + 1,
+                window_minutes: 10_080,
+            }),
+            ..ProviderUsage::default()
+        };
+        assert!(weekly.shows_chatgpt_card(NOW));
+
+        let expired = ProviderUsage {
+            primary: Some(LimitWindow {
+                used_tenths: 30,
+                resets_at_ms: NOW,
+                window_minutes: 300,
+            }),
+            ..ProviderUsage::default()
+        };
+        assert!(!expired.shows_chatgpt_card(NOW));
+
+        let unknown = ProviderUsage {
+            primary: Some(LimitWindow {
+                used_tenths: 30,
+                resets_at_ms: 0,
+                window_minutes: 300,
+            }),
+            ..ProviderUsage::default()
+        };
+        assert!(!unknown.shows_chatgpt_card(NOW));
+
+        let mut garbage = ProviderUsage::default();
+        garbage.set_chatgpt_plan("not a plan!!");
+        assert!(!garbage.shows_chatgpt_card(NOW));
+        assert_eq!(garbage.plan_len, 0);
     }
 }

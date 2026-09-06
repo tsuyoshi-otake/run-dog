@@ -1,0 +1,27 @@
+cargo-mutants on this PR's priority files
+  src/core/usage_state.rs
+  src/core/usage_durable.rs
+
+Command
+  cargo mutants --file src/core/usage_state.rs --file src/core/usage_durable.rs --timeout 120 --jobs 2 --output verification/evidence/mutants-usage-ingest
+
+First pass (weaker fixtures; 13m)
+  98 mutants: 15 missed, 65 caught, 18 unviable
+  Survivors were NOT treated as equivalent. Tests were added for:
+    recover_prior gap walk
+    missing current prefers highest blob
+    encode cursor order
+    non-zero provider cost fields in sample_state / PBT
+    unsafe Codex model is not persisted
+  First-pass list: phase-j-mutants-first-pass-missed.txt
+
+Second pass (after those tests; 14m)
+  98 mutants: 0 missed, 78 caught, 18 unviable, 2 timeouts
+  Timeouts (not equivalent; recover_prior decrement reversed or divided):
+    usage_durable.rs:135  -= to +=
+    usage_durable.rs:135  -= to /=
+  Those hang the gap-walk test. Timeout is detection, not a passing suite.
+
+Do not read survivors-or-timeouts as "the mutant is the same as production."
+Reader / pricing / update-verifier mutants: NOT RUN (this PR did not change them).
+Incremental reader is covered by existing component + PBT, not cargo-mutants.

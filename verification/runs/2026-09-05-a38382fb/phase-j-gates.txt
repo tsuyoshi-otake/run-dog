@@ -1,0 +1,20 @@
+Local gates 2026-09-05  rustc 1.97.1  (GHA uses 1.98)
+
+PASS  cargo fmt --all -- --check
+PASS  cargo clippy --all-targets -- -D warnings
+PASS  cargo test --all-targets --offline
+        lib 216 passed, 1 ignored (live JSONL scan)
+        app_integration 5
+        persistence_protocol_verification 11
+        registry_hive_integration 8
+        state_machine_pbt 1
+        update_protocol_integration 3
+PASS  scripts/run-usage-ingest-tlc.ps1 -Mode all
+        Fault=0 PASS (1,091,712 distinct)
+        Fault=1..4 FAIL as required
+PASS  cargo-mutants usage_state + usage_durable (second pass: 0 missed)
+NOT RUN  fuzz
+NOT RUN  cargo-mutants on windows/usage.rs reader, pricing, update verifier
+
+tla2tools.jar is local only (verification/tools/*.jar gitignored).
+GHA Verify on this PR will be recorded after open.

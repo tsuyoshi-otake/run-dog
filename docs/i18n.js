@@ -74,7 +74,7 @@ export const I18N = {
       },
       {
         q: "外部にデータを送りますか？",
-        a: "起動時に GitHub Releases へ更新確認を一度行います。Claude や Codex を使っている場合のみ、その認証情報で各社の上限 API を問い合わせます。広告や解析 SDK はありません。",
+        a: "起動時に GitHub Releases を一度確認します。Claude / Codex があるときだけ各社の上限 API を呼びます。RunDog 自身のサーバーへは送りません。生プロンプトは送りません。広告や解析 SDK はありません。",
       },
       {
         q: "SmartScreen の警告が出ますか？",
@@ -82,7 +82,7 @@ export const I18N = {
       },
       {
         q: "アンインストールできますか？",
-        a: "できます。Windows の「アプリ」から RunDog を削除してください。スタートメニューのショートカットと、スタートアップ登録も一緒に外れます。",
+        a: "できます。Windows の「アプリ」から RunDog を削除してください。プログラム、ショートカット、スタートアップ、設定、利用状況、更新キャッシュは消えます。Claude と Codex のログ・認証情報・ホームは残します。",
       },
       {
         q: "動作環境は？",
@@ -93,9 +93,11 @@ export const I18N = {
     privacyTitle: "プライバシー",
     back: "RunDog に戻る",
     privacyBody: [
-      "RunDog はアカウントを作りません。CPU・メモリ・GPU・ストレージは Windows の API で端末内だけ読みます。設定はユーザーのレジストリに保存します。",
-      "起動時に一度だけ、GitHub Releases へ新しい版があるか確認します。ダウンロードと導入は、メニューから明示したときだけです。",
-      "Claude Code や Codex CLI を使っている場合、そのホームディレクトリのログと、すでに端末にある認証情報で各社の上限を問い合わせることがあります。トークンを第三者と共有することはありません。",
+      "RunDog はアカウントを作りません。CPU・メモリ・GPU・ストレージは Windows の API で端末内だけ読みます。設定は HKCU\\Software\\SystemExe\\RunDog に保存します。",
+      "読むファイルは Claude の projects JSONL と .credentials.json、Codex の sessions JSONL と auth.json、および RunDog 自身の %LOCALAPPDATA%\\SystemExe\\RunDog です。JSONL の生プロンプトや応答を上限取得で送りません。",
+      "送信先は GitHub（api.github.com / github.com、起動時の更新確認と明示した導入）、Anthropic（api.anthropic.com の usage、必要時のみ platform.claude.com または console.anthropic.com の token refresh）、OpenAI（chatgpt.com の wham/usage）です。RunDog 自身のサーバーへは送りません。",
+      "Claude の上限問い合わせは約 5 分ごと、Codex は約 60 秒ごとです。期限切れや認証失敗のとき Claude の refresh が走り、.credentials.json を ReplaceFileW で更新することがあります。Codex の auth.json は読み取りのみです。",
+      "ベンダー上限の自動問い合わせは、Claude / Codex が端末にあるとき従来どおり On です。新しい「Automatic vendor usage-limit queries」設定はメニューと UX を壊すので見送りました。止めたい場合は認証情報か CLI を外してください。",
       "広告、解析、クラッシュ報告の SDK は入れていません。",
       "This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.",
     ],
@@ -160,7 +162,7 @@ export const I18N = {
       },
       {
         q: "Does it send data off the machine?",
-        a: "It checks GitHub Releases once at startup. If you use Claude or Codex, it may query their limit APIs with credentials already on the PC. There is no ads or analytics SDK.",
+        a: "It checks GitHub Releases once at startup. If Claude or Codex is present it queries those vendors' limit APIs. Nothing goes to a RunDog-owned server. Raw prompts are not sent. There is no ads or analytics SDK.",
       },
       {
         q: "Will SmartScreen warn me?",
@@ -168,7 +170,7 @@ export const I18N = {
       },
       {
         q: "How do I uninstall?",
-        a: "Windows Settings → Apps → RunDog. That also removes Start Menu shortcuts and the optional startup entry.",
+        a: "Windows Settings → Apps → RunDog. That removes the program, shortcuts, startup entry, settings, usage store, and update cache. Claude and Codex logs, credentials, and homes stay.",
       },
       {
         q: "What are the requirements?",
@@ -179,9 +181,11 @@ export const I18N = {
     privacyTitle: "Privacy",
     back: "Back to RunDog",
     privacyBody: [
-      "RunDog does not create an account. CPU, memory, GPU, and storage are read locally through Windows APIs. Settings live in the current user's registry.",
-      "At startup it checks GitHub Releases once for a newer build. Download and install happen only when you choose them from the menu.",
-      "If you use Claude Code or Codex CLI, RunDog may read their local logs and query vendor limit APIs with credentials already on the machine. Tokens are never shared with third parties.",
+      "RunDog does not create an account. CPU, memory, GPU, and storage are read locally through Windows APIs. Settings live in HKCU\\Software\\SystemExe\\RunDog.",
+      "It may read Claude projects JSONL and .credentials.json, Codex sessions JSONL and auth.json, plus RunDog's own %LOCALAPPDATA%\\SystemExe\\RunDog store. Limit fetch does not send raw prompts or responses.",
+      "Destinations are GitHub (api.github.com / github.com — startup update check and explicit Install), Anthropic (api.anthropic.com usage; token refresh on platform.claude.com or console.anthropic.com when needed), and OpenAI (chatgpt.com wham/usage). There is no RunDog-owned server.",
+      "Claude limit queries run about every 5 minutes; Codex about every 60 seconds. An expired or unauthorized Claude token may refresh and rewrite .credentials.json via ReplaceFileW. Codex auth.json is read-only.",
+      "Automatic vendor limit queries stay On when those CLIs are present. A new Automatic vendor usage-limit queries setting is deferred so the tray UX is not broken. Remove credentials or the CLI to stop queries.",
       "There is no advertising, analytics, or crash-reporting SDK.",
       "This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.",
     ],
@@ -253,7 +257,7 @@ export const I18N = {
       },
       {
         q: "如何卸载？",
-        a: "在 Windows「应用」中删除 RunDog。开始菜单快捷方式和可选的开机启动项会一并移除。",
+        a: "在 Windows「应用」中删除 RunDog。程序、快捷方式、开机启动、设置、用量数据和更新缓存会删除。Claude 与 Codex 的日志、凭据和主目录会保留。",
       },
       {
         q: "运行环境是什么？",
@@ -264,10 +268,10 @@ export const I18N = {
     privacyTitle: "隐私",
     back: "返回 RunDog",
     privacyBody: [
-      "RunDog 不创建账户。CPU、内存、GPU 和存储只通过 Windows API 在本机读取。设置保存在当前用户的注册表中。",
-      "启动时只会向 GitHub Releases 检查一次是否有新版本。下载和安装仅在你从菜单明确选择时进行。",
-      "如果使用 Claude Code 或 Codex CLI，可能会读取其主目录中的日志，并用本机已有的凭据查询厂商限额 API。令牌不会提供给第三方。",
-      "不包含广告、分析或崩溃报告 SDK。",
+      "RunDog 不创建账户。CPU、内存、GPU 和存储只通过 Windows API 在本机读取。设置保存在 HKCU\\Software\\SystemExe\\RunDog。",
+      "可能读取 Claude 的 projects JSONL 与 .credentials.json、Codex 的 sessions JSONL 与 auth.json，以及 RunDog 自己的 LOCALAPPDATA 存储。限额查询不会发送原始提示或回复。",
+      "发送目标是 GitHub、Anthropic（api.anthropic.com，必要时 token refresh）和 chatgpt.com。没有 RunDog 自己的服务器。Claude 约每 5 分钟、Codex 约每 60 秒查询一次；过期时可能改写 .credentials.json。",
+      "有 CLI 时自动查询限额保持开启。未新增会破坏菜单的开关。不包含广告、分析或崩溃报告 SDK。",
       "This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.",
     ],
   },
@@ -338,7 +342,7 @@ export const I18N = {
       },
       {
         q: "如何解除安裝？",
-        a: "在 Windows「應用程式」中刪除 RunDog。開始功能表捷徑和選用的開機啟動項目會一併移除。",
+        a: "在 Windows「應用程式」中刪除 RunDog。程式、捷徑、開機啟動、設定、用量資料和更新快取會刪除。Claude 與 Codex 的紀錄、憑證和主目錄會保留。",
       },
       {
         q: "執行環境是什麼？",
@@ -349,10 +353,10 @@ export const I18N = {
     privacyTitle: "隱私權",
     back: "返回 RunDog",
     privacyBody: [
-      "RunDog 不建立帳戶。CPU、記憶體、GPU 和儲存只透過 Windows API 在本機讀取。設定保存在目前使用者的登錄檔中。",
-      "啟動時只會向 GitHub Releases 檢查一次是否有新版本。下載和安裝僅在你從選單明確選擇時進行。",
-      "如果使用 Claude Code 或 Codex CLI，可能會讀取其主目錄中的紀錄，並用本機既有的認證資料查詢廠商限額 API。權杖不會提供給第三方。",
-      "不包含廣告、分析或當機回報 SDK。",
+      "RunDog 不建立帳戶。CPU、記憶體、GPU 和儲存只透過 Windows API 在本機讀取。設定保存在 HKCU\\Software\\SystemExe\\RunDog。",
+      "可能讀取 Claude 的 projects JSONL 與 .credentials.json、Codex 的 sessions JSONL 與 auth.json，以及 RunDog 自己的 LOCALAPPDATA。限額查詢不會傳送原始提示或回覆。",
+      "傳送目標是 GitHub、Anthropic 與 chatgpt.com。沒有 RunDog 自己的伺服器。Claude 約每 5 分鐘、Codex 約每 60 秒查一次；過期時可能改寫 .credentials.json。",
+      "有 CLI 時自動查詢維持開啟。未新增會破壞選單的開關。不含廣告、分析或當機回報 SDK。",
       "This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.",
     ],
   },
@@ -423,7 +427,7 @@ export const I18N = {
       },
       {
         q: "어떻게 제거하나요?",
-        a: "Windows 설정 → 앱에서 RunDog를 제거하세요. 시작 메뉴 바로 가기와 선택적 시작 프로그램 등록도 함께 삭제됩니다.",
+        a: "Windows 설정 → 앱에서 RunDog를 제거하세요. 프로그램, 바로 가기, 시작 등록, 설정, 사용량, 업데이트 캐시는 삭제됩니다. Claude와 Codex의 로그, 자격 증명, 홈은 남습니다.",
       },
       {
         q: "동작 환경은?",
@@ -434,10 +438,10 @@ export const I18N = {
     privacyTitle: "개인정보",
     back: "RunDog로 돌아가기",
     privacyBody: [
-      "RunDog는 계정을 만들지 않습니다. CPU·메모리·GPU·저장소는 Windows API로 기기 안에서만 읽습니다. 설정은 현재 사용자 레지스트리에 저장됩니다.",
-      "시작할 때 GitHub Releases에서 새 버전이 있는지 한 번만 확인합니다. 다운로드와 설치는 메뉴에서 명시적으로 선택할 때만 진행됩니다.",
-      "Claude Code나 Codex CLI를 사용하는 경우 홈 디렉터리 로그와 이미 기기에 있는 자격 증명으로 공급업체 한도 API를 조회할 수 있습니다. 토큰을 제3자와 공유하지 않습니다.",
-      "광고, 분석, 충돌 보고 SDK는 포함되어 있지 않습니다.",
+      "RunDog는 계정을 만들지 않습니다. CPU·메모리·GPU·저장소는 Windows API로 기기 안에서만 읽습니다. 설정은 HKCU\\Software\\SystemExe\\RunDog에 있습니다.",
+      "Claude projects JSONL과 .credentials.json, Codex sessions JSONL과 auth.json, RunDog LOCALAPPDATA 저장소를 읽을 수 있습니다. 한도 조회에 raw prompt/response는 보내지 않습니다.",
+      "전송처는 GitHub, Anthropic, chatgpt.com입니다. RunDog 자체 서버는 없습니다. Claude는 약 5분, Codex는 약 60초마다 조회하며, 만료 시 .credentials.json을 다시 쓸 수 있습니다.",
+      "CLI가 있으면 자동 한도 조회는 그대로 On입니다. 메뉴를 깨는 새 설정은 넣지 않았습니다. 광고·분석·충돌 SDK는 없습니다.",
       "This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.",
     ],
   },
@@ -509,7 +513,7 @@ export const I18N = {
       },
       {
         q: "Gỡ cài đặt thế nào?",
-        a: "Windows Cài đặt → Ứng dụng → RunDog. Lối tắt menu Start và mục khởi động tùy chọn cũng bị xóa.",
+        a: "Windows Cài đặt → Ứng dụng → RunDog. Chương trình, lối tắt, khởi động, cài đặt, dữ liệu usage và cache cập nhật bị xóa. Nhật ký, thông tin đăng nhập và thư mục nhà của Claude/Codex được giữ lại.",
       },
       {
         q: "Yêu cầu hệ thống?",
@@ -520,10 +524,10 @@ export const I18N = {
     privacyTitle: "Quyền riêng tư",
     back: "Quay lại RunDog",
     privacyBody: [
-      "RunDog không tạo tài khoản. CPU, bộ nhớ, GPU và lưu trữ được đọc cục bộ qua API Windows. Cài đặt lưu trong registry của người dùng hiện tại.",
-      "Khi khởi động chỉ kiểm tra GitHub Releases một lần xem có bản mới không. Tải và cài chỉ khi bạn chọn rõ từ menu.",
-      "Nếu dùng Claude Code hoặc Codex CLI, có thể đọc nhật ký cục bộ và gọi API hạn mức của nhà cung cấp với thông tin xác thực đã có trên máy. Token không chia sẻ với bên thứ ba.",
-      "Không có SDK quảng cáo, phân tích hay báo cáo sự cố.",
+      "RunDog không tạo tài khoản. CPU, bộ nhớ, GPU và lưu trữ đọc cục bộ qua API Windows. Cài đặt ở HKCU\\Software\\SystemExe\\RunDog.",
+      "Có thể đọc JSONL/projects và .credentials.json của Claude, JSONL/sessions và auth.json của Codex, cùng kho LOCALAPPDATA của RunDog. Truy vấn hạn mức không gửi raw prompt/response.",
+      "Đích đến: GitHub, Anthropic, chatgpt.com. Không có máy chủ của RunDog. Claude khoảng 5 phút, Codex khoảng 60 giây; hết hạn có thể ghi lại .credentials.json.",
+      "Khi có CLI, truy vấn hạn mức tự động vẫn On. Không thêm toggle làm hỏng menu. Không có SDK quảng cáo, phân tích hay sự cố.",
       "This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.",
     ],
   },
@@ -595,7 +599,7 @@ export const I18N = {
       },
       {
         q: "Comment désinstaller ?",
-        a: "Paramètres Windows → Applications → RunDog. Les raccourcis du menu Démarrer et l'entrée de démarrage facultative sont aussi retirés.",
+        a: "Paramètres Windows → Applications → RunDog. Programme, raccourcis, démarrage, réglages, état d'usage et cache de mise à jour sont retirés. Journaux, identifiants et dossiers Claude/Codex restent.",
       },
       {
         q: "Quelle configuration ?",
@@ -606,10 +610,10 @@ export const I18N = {
     privacyTitle: "Confidentialité",
     back: "Retour à RunDog",
     privacyBody: [
-      "RunDog ne crée pas de compte. CPU, mémoire, GPU et stockage sont lus localement via les API Windows. Les réglages sont dans le registre de l'utilisateur.",
-      "Au démarrage, il vérifie une fois GitHub Releases. Le téléchargement et l'installation n'ont lieu que si vous les choisissez dans le menu.",
-      "Si vous utilisez Claude Code ou Codex CLI, RunDog peut lire leurs journaux locaux et interroger les API de plafond avec des identifiants déjà sur la machine. Les jetons ne sont pas partagés avec des tiers.",
-      "Aucun SDK de publicité, d'analyse ou de rapport de plantage.",
+      "RunDog ne crée pas de compte. CPU, mémoire, GPU et stockage sont lus localement via les API Windows. Réglages : HKCU\\Software\\SystemExe\\RunDog.",
+      "Il peut lire les JSONL projects et .credentials.json de Claude, les JSONL sessions et auth.json de Codex, plus le store LOCALAPPDATA de RunDog. Les plafonds n'envoient pas les prompts/réponses bruts.",
+      "Destinations : GitHub, Anthropic, chatgpt.com. Pas de serveur RunDog. Claude ~5 min, Codex ~60 s ; un jeton expiré peut réécrire .credentials.json.",
+      "Les requêtes automatiques restent activées si les CLI sont présents. Pas de nouveau bascule qui casserait le menu. Aucun SDK pub, analyse ou plantage.",
       "This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.",
     ],
   },
@@ -681,7 +685,7 @@ export const I18N = {
       },
       {
         q: "Wie deinstalliere ich?",
-        a: "Windows-Einstellungen → Apps → RunDog. Startmenü-Verknüpfungen und der optionale Autostart-Eintrag werden mit entfernt.",
+        a: "Windows-Einstellungen → Apps → RunDog. Programm, Verknüpfungen, Autostart, Einstellungen, Nutzungsstand und Update-Cache werden entfernt. Claude- und Codex-Logs, Anmeldedaten und Home-Ordner bleiben.",
       },
       {
         q: "Welche Voraussetzungen?",
@@ -692,10 +696,10 @@ export const I18N = {
     privacyTitle: "Datenschutz",
     back: "Zurück zu RunDog",
     privacyBody: [
-      "RunDog legt kein Konto an. CPU, Speicher, GPU und Datenträger werden lokal über Windows-APIs gelesen. Einstellungen liegen in der Registry des aktuellen Benutzers.",
-      "Beim Start prüft es einmal GitHub Releases auf eine neuere Version. Download und Installation nur, wenn Sie sie im Menü wählen.",
-      "Wenn Sie Claude Code oder Codex CLI nutzen, kann RunDog lokale Protokolle lesen und Limit-APIs der Anbieter mit bereits vorhandenen Anmeldedaten abfragen. Tokens werden nicht an Dritte weitergegeben.",
-      "Kein SDK für Werbung, Analyse oder Absturzberichte.",
+      "RunDog legt kein Konto an. CPU, Speicher, GPU und Datenträger werden lokal über Windows-APIs gelesen. Einstellungen: HKCU\\Software\\SystemExe\\RunDog.",
+      "Es kann Claude-projects-JSONL und .credentials.json, Codex-sessions-JSONL und auth.json sowie den RunDog-LOCALAPPDATA-Store lesen. Limit-Abfragen senden keine Roh-Prompts oder Antworten.",
+      "Ziele: GitHub, Anthropic, chatgpt.com. Kein eigener RunDog-Server. Claude ~5 Min., Codex ~60 s; abgelaufene Tokens können .credentials.json neu schreiben.",
+      "Automatische Limit-Abfragen bleiben an, wenn die CLIs da sind. Kein neues Menü-Toggle. Kein Werbe-, Analyse- oder Absturz-SDK.",
       "This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.",
     ],
   },
@@ -767,7 +771,7 @@ export const I18N = {
       },
       {
         q: "¿Cómo se desinstala?",
-        a: "Configuración de Windows → Aplicaciones → RunDog. También se quitan los accesos del menú Inicio y el inicio opcional.",
+        a: "Configuración de Windows → Aplicaciones → RunDog. Se eliminan el programa, accesos, inicio, ajustes, estado de uso y caché de actualizaciones. Los registros, credenciales y carpetas de Claude/Codex se conservan.",
       },
       {
         q: "¿Qué se necesita?",
@@ -778,10 +782,10 @@ export const I18N = {
     privacyTitle: "Privacidad",
     back: "Volver a RunDog",
     privacyBody: [
-      "RunDog no crea una cuenta. CPU, memoria, GPU y almacenamiento se leen en el equipo con las API de Windows. Los ajustes viven en el registro del usuario actual.",
-      "Al arrancar comprueba GitHub Releases una sola vez. La descarga e instalación solo ocurren si las eliges en el menú.",
-      "Si usas Claude Code o Codex CLI, puede leer sus registros locales y consultar las API de límites con credenciales ya en el equipo. Los tokens no se comparten con terceros.",
-      "No incluye SDK de publicidad, analítica ni informes de fallos.",
+      "RunDog no crea una cuenta. CPU, memoria, GPU y almacenamiento se leen en el equipo con las API de Windows. Ajustes: HKCU\\Software\\SystemExe\\RunDog.",
+      "Puede leer JSONL de projects y .credentials.json de Claude, JSONL de sessions y auth.json de Codex, y el almacén LOCALAPPDATA de RunDog. La consulta de límites no envía prompts ni respuestas en bruto.",
+      "Destinos: GitHub, Anthropic, chatgpt.com. No hay servidor propio de RunDog. Claude ~5 min, Codex ~60 s; un token caducado puede reescribir .credentials.json.",
+      "Las consultas automáticas siguen activas si están los CLI. No se añade un interruptor que rompa el menú. Sin SDK de anuncios, analítica ni fallos.",
       "This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.",
     ],
   },
@@ -853,7 +857,7 @@ export const I18N = {
       },
       {
         q: "Как удалить?",
-        a: "Параметры Windows → Приложения → RunDog. Ярлыки меню «Пуск» и необязательный автозапуск тоже снимаются.",
+        a: "Параметры Windows → Приложения → RunDog. Удаляются программа, ярлыки, автозапуск, настройки, состояние usage и кэш обновлений. Журналы, учётные данные и домашние папки Claude/Codex остаются.",
       },
       {
         q: "Какие требования?",
@@ -864,10 +868,10 @@ export const I18N = {
     privacyTitle: "Конфиденциальность",
     back: "Назад к RunDog",
     privacyBody: [
-      "RunDog не создаёт учётную запись. CPU, память, GPU и диск читаются локально через API Windows. Настройки хранятся в реестре текущего пользователя.",
-      "При запуске один раз проверяет GitHub Releases. Загрузка и установка только если вы выберете их в меню.",
-      "Если вы пользуетесь Claude Code или Codex CLI, RunDog может читать локальные журналы и запрашивать API лимитов с уже имеющимися учётными данными. Токены третьим лицам не передаются.",
-      "Нет SDK рекламы, аналитики или отчётов о сбоях.",
+      "RunDog не создаёт учётную запись. CPU, память, GPU и диск читаются локально через API Windows. Настройки: HKCU\\Software\\SystemExe\\RunDog.",
+      "Может читать projects JSONL и .credentials.json Claude, sessions JSONL и auth.json Codex, плюс LOCALAPPDATA RunDog. Запрос лимитов не отправляет сырые промпты и ответы.",
+      "Адреса: GitHub, Anthropic, chatgpt.com. Своего сервера RunDog нет. Claude примерно каждые 5 мин, Codex — 60 с; при истечении может перезаписать .credentials.json.",
+      "Автозапросы лимитов остаются включёнными, если CLI есть. Новый переключатель в меню не добавляли. Нет SDK рекламы, аналитики или сбоев.",
       "This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.",
     ],
   },
@@ -939,7 +943,7 @@ export const I18N = {
       },
       {
         q: "Come si disinstalla?",
-        a: "Impostazioni Windows → App → RunDog. Si rimuovono anche i collegamenti del menu Start e l'avvio opzionale.",
+        a: "Impostazioni Windows → App → RunDog. Si rimuovono programma, collegamenti, avvio, impostazioni, stato usage e cache degli aggiornamenti. Log, credenziali e home di Claude/Codex restano.",
       },
       {
         q: "Requisiti?",
@@ -950,10 +954,10 @@ export const I18N = {
     privacyTitle: "Privacy",
     back: "Torna a RunDog",
     privacyBody: [
-      "RunDog non crea un account. CPU, memoria, GPU e archiviazione si leggono in locale tramite le API di Windows. Le impostazioni stanno nel registro dell'utente corrente.",
-      "All'avvio controlla GitHub Releases una sola volta. Download e installazione solo se li scegli dal menu.",
-      "Se usi Claude Code o Codex CLI, può leggere i registri locali e interrogare le API dei limiti con credenziali già sul PC. I token non si condividono con terzi.",
-      "Nessun SDK di pubblicità, analitica o segnalazione crash.",
+      "RunDog non crea un account. CPU, memoria, GPU e archiviazione si leggono in locale tramite le API di Windows. Impostazioni: HKCU\\Software\\SystemExe\\RunDog.",
+      "Può leggere JSONL projects e .credentials.json di Claude, JSONL sessions e auth.json di Codex, più lo store LOCALAPPDATA di RunDog. Il fetch dei limiti non invia prompt o risposte grezzi.",
+      "Destinazioni: GitHub, Anthropic, chatgpt.com. Nessun server di RunDog. Claude ~5 min, Codex ~60 s; un token scaduto può riscrivere .credentials.json.",
+      "Le query automatiche restano attive se i CLI sono presenti. Nessun nuovo interruttore nel menu. Nessun SDK di pubblicità, analitica o crash.",
       "This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.",
     ],
   },
@@ -1025,7 +1029,7 @@ export const I18N = {
       },
       {
         q: "ถอนการติดตั้งอย่างไร?",
-        a: "การตั้งค่า Windows → แอป → RunDog ทางลัดเมนูเริ่มต้นและรายการเริ่มอัตโนมัติแบบเลือกได้จะถูกลบด้วย",
+        a: "การตั้งค่า Windows → แอป → RunDog โปรแกรม ทางลัด การเริ่มอัตโนมัติ การตั้งค่า ข้อมูล usage และแคชอัปเดตจะถูกลบ บันทึก ข้อมูลรับรอง และโฟลเดอร์บ้านของ Claude/Codex จะคงไว้"
       },
       {
         q: "ความต้องการของระบบ?",
@@ -1036,10 +1040,10 @@ export const I18N = {
     privacyTitle: "ความเป็นส่วนตัว",
     back: "กลับไป RunDog",
     privacyBody: [
-      "RunDog ไม่สร้างบัญชี CPU หน่วยความจำ GPU และที่เก็บข้อมูลอ่านในเครื่องผ่าน Windows API การตั้งค่าอยู่ในรีจิสทรีของผู้ใช้ปัจจุบัน",
-      "ตอนเริ่มจะเช็ก GitHub Releases ครั้งเดียวว่ามีรุ่นใหม่หรือไม่ การดาวน์โหลดและติดตั้งเกิดเมื่อคุณเลือกจากเมนูเท่านั้น",
-      "ถ้าใช้ Claude Code หรือ Codex CLI อาจอ่านล็อกในเครื่องและเรียก API โควตาด้วยข้อมูลรับรองที่มีอยู่แล้ว ไม่แชร์โทเค็นกับบุคคลที่สาม",
-      "ไม่มี SDK โฆษณา วิเคราะห์ หรือรายงานข้อผิดพลาด",
+      "RunDog ไม่สร้างบัญชี CPU หน่วยความจำ GPU และที่เก็บข้อมูลอ่านในเครื่องผ่าน Windows API การตั้งค่าอยู่ที่ HKCU\\Software\\SystemExe\\RunDog",
+      "อาจอ่าน projects JSONL กับ .credentials.json ของ Claude, sessions JSONL กับ auth.json ของ Codex และที่เก็บ LOCALAPPDATA ของ RunDog การขอโควตาไม่ส่งพรอมต์หรือคำตอบดิบ",
+      "ปลายทางคือ GitHub, Anthropic, chatgpt.com ไม่มีเซิร์ฟเวอร์ของ RunDog เอง Claude ประมาณ 5 นาที Codex ประมาณ 60 วินาที หมดอายุแล้วอาจเขียน .credentials.json ใหม่",
+      "ถ้ามี CLI การถามโควตาอัตโนมัติยังเปิดอยู่ ไม่เพิ่มสวิตช์ที่ทำเมนูพัง ไม่มี SDK โฆษณา วิเคราะห์ หรือรายงานข้อผิดพลาด",
       "This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.",
     ],
   },

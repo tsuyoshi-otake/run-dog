@@ -38,6 +38,18 @@ submitted for signing.
 
 Repository access uses GitHub multi-factor authentication.
 
+## After approval (verification)
+
+SHA-256 sidecars stay mandatory. Signing is not a substitute for the
+checksum contract.
+
+When SignPath starts signing CI installers, run
+[`scripts/verify-authenticode.ps1`](scripts/verify-authenticode.ps1) on
+`dist\RunDog-Setup-x64.exe` and require `Get-AuthenticodeSignature`
+`Status = Valid` before `gh release create`. Do not add that gate to
+Verify or Release while assets are still unsigned. Toolchain and Inno
+pins: [`docs/REPRODUCIBILITY.md`](docs/REPRODUCIBILITY.md).
+
 ## Distribution
 
 - Homepage / download: <https://tsuyoshi-otake.github.io/run-dog/>
@@ -51,16 +63,21 @@ specifically requested by the user or the person installing or operating it.
 
 Details: [privacy page](https://tsuyoshi-otake.github.io/run-dog/privacy.html).
 
-Network use that the user or installer requests:
+Network use that the user or installer requests is listed in
+[docs/PRIVACY.md](docs/PRIVACY.md). Short form:
 
-- Checking GitHub Releases for a newer version (once at startup, or when the user
-  chooses Check again). Download and install run only after the user chooses
-  Install from the menu.
-- If Claude Code or Codex CLI is already installed, reading local logs and querying
-  those vendors' usage-limit APIs with credentials already on the machine. Tokens
-  are never sent to this project or to SignPath.
+- GitHub Releases (`api.github.com` / `github.com`): once at startup, or Check
+  again. Download only after Install.
+- Claude: `api.anthropic.com` `/api/oauth/usage` about every 5 minutes; token
+  refresh may rewrite `.credentials.json`.
+- Codex: `chatgpt.com` `/backend-api/wham/usage` about every 60 seconds.
+  `auth.json` is read-only.
+- There is **no RunDog-owned server**. Limit fetch does not send raw prompts or
+  responses. Tokens are never sent to this project or to SignPath.
 
-There is no advertising, analytics, or crash-reporting SDK.
+There is no advertising, analytics, or crash-reporting SDK. A new
+`Automatic vendor usage-limit queries` setting is deferred so existing
+auto-query UX is not turned Off.
 
 ## System changes and uninstall
 
@@ -70,5 +87,9 @@ registry value when the user enables launch at logon. Updates replace the same
 install path and may close a running `RunDog.exe`.
 
 Uninstall from Windows Settings → Apps → Installed apps → RunDog, or from
-Add or Remove Programs. That removes the program files, shortcuts, and the
-uninstaller entry.
+Add or Remove Programs. That removes the program files, shortcuts, the
+uninstaller entry, the startup Run value, HKCU settings, the usage store, and
+the update cache. Claude Code and Codex CLI logs, credentials, and homes are
+left untouched. Item-by-item delete / preserve is in
+[docs/UNINSTALL.md](docs/UNINSTALL.md). Live uninstall was **NOT RUN** for
+this revision.
