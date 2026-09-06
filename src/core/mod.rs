@@ -30,7 +30,10 @@ pub use cpu::{
     breakdown_between, process_share, usage_between, CpuBreakdown, CpuLoad, CpuSampler,
     ProcessStatus, ProcessTimes, SystemTimes,
 };
-pub use display::TrayDisplayMode;
+pub use display::{
+    format_tray_glyph, format_tray_limit, format_tray_percent, TrayDisplayMode, TrayGlyph,
+    TrayMetrics,
+};
 pub use gpu::GpuStatus;
 pub use memory::MemoryStatus;
 pub use settings::{AppSettings, PendingJournal, SettingsRecord};
