@@ -1042,9 +1042,9 @@ impl UsageCollector {
                 }
             }
             let day_iso = ymd_iso(year, month, day_of_month);
-            let Some(cents) = cost_cents(&event.model, event.usage, Some(&day_iso)) else {
-                continue;
-            };
+            // Unknown models have no API-equivalent dollars. Still count tokens
+            // so month activity is visible even when Today cannot be priced.
+            let cents = cost_cents(&event.model, event.usage, Some(&day_iso)).unwrap_or(0);
             let target = match kind {
                 SourceKind::Claude => &mut self.snapshot.claude,
                 SourceKind::Codex => &mut self.snapshot.codex,
@@ -2950,9 +2950,20 @@ mod tests {
     }
 
     fn write_codex_session(root: &Path, name: &str, lines: &[String]) -> PathBuf {
+        write_codex_session_with_model(root, name, "gpt-5.4", lines)
+    }
+
+    fn write_codex_session_with_model(
+        root: &Path,
+        name: &str,
+        model: &str,
+        lines: &[String],
+    ) -> PathBuf {
         let session = current_codex_session(root, name);
         let mut body = String::new();
-        body.push_str(TURN_CONTEXT);
+        body.push_str(&format!(
+            r#"{{"type":"turn_context","payload":{{"model":"{model}"}}}}"#
+        ));
         body.push('\n');
         for line in lines {
             body.push_str(line);
@@ -3229,6 +3240,53 @@ mod tests {
             let event = parse_codex_usage_line(&line, Some("gpt-5.4")).expect("token_count");
             proptest::prop_assert_eq!(event.usage.output, output);
         }
+    }
+
+    #[test]
+    fn component_codex_gpt6_astra_today_cost_is_priced() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-codex-astra-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let stamp = current_stamp();
+        write_codex_session_with_model(
+            &root,
+            "rollout.jsonl",
+            "gpt-6-astra",
+            &[token_count_line(
+                &stamp, 100_000, 0, 100_000, 100_000, 0, 100_000,
+            )],
+        );
+        let usage = collect_codex(&root);
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(usage.today_cents, 600);
+        assert_eq!(usage.month_cents, 600);
+        assert_eq!(usage.month_output_tokens, 100_000);
+        assert_eq!(usage.month_input_tokens, 100_000);
+    }
+
+    #[test]
+    fn component_codex_unpriced_model_still_counts_tokens() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-codex-unpriced-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let stamp = current_stamp();
+        write_codex_session_with_model(
+            &root,
+            "rollout.jsonl",
+            "mystery-model",
+            &[token_count_line(&stamp, 80, 20, 5, 80, 20, 5)],
+        );
+        let usage = collect_codex(&root);
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(usage.today_cents, 0);
+        assert_eq!(usage.month_cents, 0);
+        assert_eq!(usage.month_input_tokens, 80);
+        assert_eq!(usage.month_output_tokens, 5);
+        assert!(usage.has_month_activity());
     }
 
     #[test]
