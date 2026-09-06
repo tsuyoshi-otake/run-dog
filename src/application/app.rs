@@ -505,13 +505,13 @@ fn format_tooltip(
 #[cfg(test)]
 mod tests {
     use super::{App, CPU_SAMPLE_INTERVAL_MS};
-    use         crate::{
-            application::{CommitStatus, Effect, Event, TimerKind},
-            core::{
-                AppSettings, FpsLimit, MemoryStatus, ResolvedTheme, SystemTimes, ThemePreference,
-                TrayDisplayMode,
-            },
-        };
+    use crate::{
+        application::{CommitStatus, Effect, Event, TimerKind},
+        core::{
+            AppSettings, FpsLimit, MemoryStatus, ResolvedTheme, SystemTimes, ThemePreference,
+            TrayDisplayMode,
+        },
+    };
 
     fn started_app() -> App {
         let mut app = App::new(AppSettings::default(), ResolvedTheme::Dark);
@@ -576,10 +576,7 @@ mod tests {
                 ..
             }]
         ));
-        assert_eq!(
-            app.snapshot().settings.display_mode,
-            TrayDisplayMode::Dog
-        );
+        assert_eq!(app.snapshot().settings.display_mode, TrayDisplayMode::Dog);
         assert!(app
             .dispatch(Event::SelectDisplayMode(TrayDisplayMode::Memory))
             .is_empty());
@@ -595,10 +592,7 @@ mod tests {
         });
         assert!(effects.contains(&Effect::SetDisplayMenu(TrayDisplayMode::Cpu)));
         assert!(effects.contains(&Effect::ModifyTray(app.tray_icon())));
-        assert_eq!(
-            app.snapshot().settings.display_mode,
-            TrayDisplayMode::Cpu
-        );
+        assert_eq!(app.snapshot().settings.display_mode, TrayDisplayMode::Cpu);
 
         assert!(app.dispatch(Event::AnimationTimerElapsed).is_empty());
         assert_eq!(app.snapshot().frame, 1);

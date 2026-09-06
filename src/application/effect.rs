@@ -36,6 +36,10 @@ impl TrayIcon {
             cpu_percent: self.cpu_breakdown.map(|breakdown| breakdown.total.value()),
             memory_percent: self.memory.and_then(MemoryStatus::usage_percent),
             gpu_percent: self.gpu.and_then(GpuStatus::utilization_percent),
+            claude_session: self.usage.claude.session_window(),
+            claude_week: self.usage.claude.weekly_window(),
+            claude_fable: self.usage.claude.fable,
+            codex_session: self.usage.codex.session_window(),
             codex_week: self.usage.codex.weekly_window(),
         }
     }
@@ -112,8 +116,31 @@ mod tests {
                     .with_utilization(Some(9.2)),
             ),
             usage: UsageSnapshot {
+                claude: ProviderUsage {
+                    primary: Some(LimitWindow {
+                        used_tenths: 180,
+                        resets_at_ms: 9_000,
+                        window_minutes: 300,
+                    }),
+                    secondary: Some(LimitWindow {
+                        used_tenths: 620,
+                        resets_at_ms: 9_000,
+                        window_minutes: 10_080,
+                    }),
+                    fable: Some(LimitWindow {
+                        used_tenths: 275,
+                        resets_at_ms: 9_000,
+                        window_minutes: 10_080,
+                    }),
+                    ..ProviderUsage::default()
+                },
                 codex: ProviderUsage {
                     primary: Some(LimitWindow {
+                        used_tenths: 90,
+                        resets_at_ms: 9_000,
+                        window_minutes: 300,
+                    }),
+                    secondary: Some(LimitWindow {
                         used_tenths: 255,
                         resets_at_ms: 9_000,
                         window_minutes: 10_080,
@@ -128,6 +155,22 @@ mod tests {
         assert_eq!(metrics.cpu_percent, Some(41.6));
         assert_eq!(metrics.memory_percent, Some(75.0));
         assert_eq!(metrics.gpu_percent, Some(9.2));
+        assert_eq!(
+            metrics.claude_session.map(|window| window.used_tenths),
+            Some(180)
+        );
+        assert_eq!(
+            metrics.claude_week.map(|window| window.used_tenths),
+            Some(620)
+        );
+        assert_eq!(
+            metrics.claude_fable.map(|window| window.used_tenths),
+            Some(275)
+        );
+        assert_eq!(
+            metrics.codex_session.map(|window| window.used_tenths),
+            Some(90)
+        );
         assert_eq!(
             metrics.codex_week.map(|window| window.used_tenths),
             Some(255)

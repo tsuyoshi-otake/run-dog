@@ -134,6 +134,12 @@ fn glyph_rows(ch: char) -> Option<[u8; FONT_HEIGHT]> {
         '9' => [
             0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00001, 0b01110,
         ],
+        'A' => [
+            0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001,
+        ],
+        'B' => [
+            0b11110, 0b10001, 0b10001, 0b11110, 0b10001, 0b10001, 0b11110,
+        ],
         'C' => [
             0b01110, 0b10001, 0b10000, 0b10000, 0b10000, 0b10001, 0b01110,
         ],
@@ -143,8 +149,14 @@ fn glyph_rows(ch: char) -> Option<[u8; FONT_HEIGHT]> {
         'E' => [
             0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111,
         ],
+        'F' => [
+            0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000,
+        ],
         'G' => [
             0b01110, 0b10001, 0b10000, 0b10111, 0b10001, 0b10001, 0b01110,
+        ],
+        'H' => [
+            0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001,
         ],
         'M' => [
             0b10001, 0b11011, 0b10101, 0b10001, 0b10001, 0b10001, 0b10001,
@@ -154,6 +166,9 @@ fn glyph_rows(ch: char) -> Option<[u8; FONT_HEIGHT]> {
         ],
         'U' => [
             0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110,
+        ],
+        'X' => [
+            0b10001, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0b10001,
         ],
         '-' => [
             0b00000, 0b00000, 0b00000, 0b01110, 0b00000, 0b00000, 0b00000,
@@ -220,6 +235,21 @@ mod tests {
         assert_eq!(pixels.len(), TRAY_ICON_SIZE * TRAY_ICON_SIZE * 4);
         assert!(opaque_count(&pixels) > 20);
         assert_eq!(pixel(&pixels, 0, 31)[3], 0);
+    }
+
+    #[test]
+    fn component_limit_tags_paint_new_letters() {
+        for tag in ["C5H", "C7D", "FAB", "X5H", "X7D"] {
+            let glyph = TrayGlyph {
+                tag,
+                value: "73".to_owned(),
+            };
+            let pixels = rasterize_tray_glyph(&glyph, ResolvedTheme::Dark);
+            assert!(
+                opaque_count(&pixels) > 20,
+                "{tag} should paint visible pixels"
+            );
+        }
     }
 
     #[test]

@@ -207,7 +207,10 @@ impl PendingJournal {
                         lines.next()?,
                         "desired_fps",
                     )?)?,
-                    launch_at_startup: parse_bool01(parse_field(lines.next()?, "desired_startup")?)?,
+                    launch_at_startup: parse_bool01(parse_field(
+                        lines.next()?,
+                        "desired_startup",
+                    )?)?,
                     display_mode: TrayDisplayMode::parse_persisted(parse_field(
                         lines.next()?,
                         "desired_display",
@@ -253,7 +256,10 @@ impl PendingJournal {
                         lines.next()?,
                         "desired_fps",
                     )?)?,
-                    launch_at_startup: parse_bool01(parse_field(lines.next()?, "desired_startup")?)?,
+                    launch_at_startup: parse_bool01(parse_field(
+                        lines.next()?,
+                        "desired_startup",
+                    )?)?,
                     display_mode: TrayDisplayMode::Dog,
                 };
                 let previous = AppSettings {
@@ -342,7 +348,8 @@ mod tests {
         );
         assert_eq!(SettingsRecord::decode(&record.encode()), Some(record));
 
-        let legacy_v2 = "rundog-settings-2\ngeneration=4\noperation_id=8\ntheme=light\nfps=10\nstartup=1\n";
+        let legacy_v2 =
+            "rundog-settings-2\ngeneration=4\noperation_id=8\ntheme=light\nfps=10\nstartup=1\n";
         assert_eq!(
             SettingsRecord::decode(legacy_v2),
             Some(SettingsRecord::new(
