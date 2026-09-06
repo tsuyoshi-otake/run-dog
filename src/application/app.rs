@@ -540,6 +540,7 @@ mod tests {
                 operation_id: 1,
                 settings: AppSettings {
                     theme: ThemePreference::Dark,
+                    display_mode: crate::core::TrayDisplayMode::Dog,
                     ..
                 },
                 expected_generation: 0,
