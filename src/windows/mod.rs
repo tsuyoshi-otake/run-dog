@@ -272,6 +272,7 @@ impl WindowsPlatform {
                 settings.theme,
                 settings.fps_limit,
                 settings.launch_at_startup,
+                settings.display_mode,
             ),
             store,
         }

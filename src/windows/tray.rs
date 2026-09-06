@@ -10,18 +10,23 @@ use windows_sys::Win32::{
         },
         WindowsAndMessaging::{
             AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, KillTimer, PostMessageW,
-            SetForegroundWindow, SetTimer, TrackPopupMenu, HMENU, MF_CHECKED, MF_GRAYED, MF_POPUP,
-            MF_SEPARATOR, MF_STRING, MF_UNCHECKED, TPM_RIGHTBUTTON, WM_CONTEXTMENU, WM_NULL,
+            SetForegroundWindow, SetTimer, TrackPopupMenu, HICON, HMENU, MF_CHECKED, MF_GRAYED,
+            MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, TPM_RIGHTBUTTON, WM_CONTEXTMENU,
+            WM_NULL,
         },
     },
 };
 
 use crate::{
     application::{Effect, Event, TimerKind, TrayIcon},
-    core::{FpsLimit, ThemePreference},
+    core::{format_tray_glyph, FpsLimit, ThemePreference, TrayDisplayMode},
 };
 
-use super::{flyout::HoverFlyout, icons::IconFrames, update::UpdateMenuState};
+use super::{
+    flyout::HoverFlyout,
+    icons::{GeneratedIcon, IconFrames},
+    update::UpdateMenuState,
+};
 
 pub use super::messages::TRAY_CALLBACK_MESSAGE;
 /// One-shot retries while Explorer populates `NotifyIconSettings`.
@@ -68,12 +73,15 @@ pub struct TrayAdapter {
     icons: IconFrames,
     theme: ThemePreference,
     fps_limit: FpsLimit,
+    display_mode: TrayDisplayMode,
     startup_enabled: bool,
     flyout_pinned: bool,
     added: bool,
     promote_attempts: u8,
     flyout: HoverFlyout,
     last_icon: Option<TrayIcon>,
+    text_icon: Option<GeneratedIcon>,
+    text_key: Option<(crate::core::ResolvedTheme, String)>,
 }
 
 impl TrayAdapter {
@@ -83,18 +91,22 @@ impl TrayAdapter {
         theme: ThemePreference,
         fps_limit: FpsLimit,
         startup: bool,
+        display_mode: TrayDisplayMode,
     ) -> Self {
         Self {
             hwnd: ptr::null_mut(),
             icons,
             theme,
             fps_limit,
+            display_mode,
             startup_enabled: startup,
             flyout_pinned: super::registry::load_pinned_flyout(),
             added: false,
             promote_attempts: 0,
             flyout: HoverFlyout::new(),
             last_icon: None,
+            text_icon: None,
+            text_key: None,
         }
     }
 
@@ -116,11 +128,13 @@ impl TrayAdapter {
                 self.stop_promote();
                 self.flyout.destroy();
                 self.last_icon = None;
+                self.text_icon = None;
+                self.text_key = None;
                 self.remove();
             }
             Effect::SetThemeMenu(theme) => self.theme = *theme,
             Effect::SetFpsMenu(limit) => self.fps_limit = *limit,
-            Effect::SetDisplayMenu(_) => {}
+            Effect::SetDisplayMenu(mode) => self.display_mode = *mode,
             Effect::SetStartupMenu(enabled) => self.startup_enabled = *enabled,
             Effect::NotifyStartupChanged(enabled) => {
                 let text = super::i18n::current().menu();
@@ -409,14 +423,39 @@ impl TrayAdapter {
         self.added = false;
     }
 
-    fn notification_data(&self, icon: &TrayIcon) -> NOTIFYICONDATAW {
+    fn icon_handle(&mut self, icon: &TrayIcon) -> HICON {
+        if icon.display_mode.uses_animation() {
+            return self.icons.icon(icon.theme, icon.frame);
+        }
+        let Some(glyph) = format_tray_glyph(icon.display_mode, icon.metrics(), unix_now_ms())
+        else {
+            return self.icons.icon(icon.theme, icon.frame);
+        };
+        let key = (icon.theme, format!("{}:{}", glyph.tag, glyph.value));
+        if self.text_key.as_ref() == Some(&key) {
+            if let Some(icon) = self.text_icon.as_ref() {
+                return icon.raw();
+            }
+        }
+        match GeneratedIcon::from_glyph(icon.theme, &glyph) {
+            Ok(generated) => {
+                let handle = generated.raw();
+                self.text_icon = Some(generated);
+                self.text_key = Some(key);
+                handle
+            }
+            Err(_) => self.icons.icon(icon.theme, icon.frame),
+        }
+    }
+
+    fn notification_data(&mut self, icon: &TrayIcon) -> NOTIFYICONDATAW {
         let mut data = NOTIFYICONDATAW {
             cbSize: size_of::<NOTIFYICONDATAW>() as u32,
             hWnd: self.hwnd,
             uID: 1,
             uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP,
             uCallbackMessage: TRAY_CALLBACK_MESSAGE,
-            hIcon: self.icons.icon(icon.theme, icon.frame),
+            hIcon: self.icon_handle(icon),
             ..NOTIFYICONDATAW::default()
         };
         let limit = data.szTip.len() - 1;
@@ -450,14 +489,14 @@ impl TrayAdapter {
         );
     }
 
-    fn show_balloon(&self, title: &str, body: &str) {
+    fn show_balloon(&mut self, title: &str, body: &str) {
         if !self.added {
             return;
         }
-        let Some(icon) = self.last_icon.as_ref() else {
+        let Some(icon) = self.last_icon.clone() else {
             return;
         };
-        let mut data = self.notification_data(icon);
+        let mut data = self.notification_data(&icon);
         data.uFlags |= NIF_INFO;
         data.dwInfoFlags = NIIF_INFO | NIIF_NOSOUND;
         copy_utf16(title, &mut data.szInfoTitle);
@@ -562,6 +601,13 @@ fn update_balloon_text(
         UpdateMenuState::Failed if notify_always => Some(text.balloon_check_failed.to_owned()),
         _ => None,
     }
+}
+
+fn unix_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn copy_utf16(value: &str, dest: &mut [u16]) {

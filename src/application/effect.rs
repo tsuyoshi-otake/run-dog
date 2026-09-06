@@ -1,6 +1,6 @@
 use crate::core::{
     AppSettings, CpuBreakdown, FpsLimit, GpuStatus, MemoryStatus, ProcessStatus, ResolvedTheme,
-    Sparkline, StorageStatus, ThemePreference, TrayDisplayMode, UsageSnapshot,
+    Sparkline, StorageStatus, ThemePreference, TrayDisplayMode, TrayMetrics, UsageSnapshot,
 };
 
 /// Timer identities are stable values, so the Windows adapter never needs to
@@ -27,6 +27,18 @@ pub struct TrayIcon {
     pub gpu: Option<GpuStatus>,
     pub usage: UsageSnapshot,
     pub process: Option<ProcessStatus>,
+}
+
+impl TrayIcon {
+    #[must_use]
+    pub fn metrics(&self) -> TrayMetrics {
+        TrayMetrics {
+            cpu_percent: self.cpu_breakdown.map(|breakdown| breakdown.total.value()),
+            memory_percent: self.memory.and_then(MemoryStatus::usage_percent),
+            gpu_percent: self.gpu.and_then(GpuStatus::utilization_percent),
+            codex_week: self.usage.codex.weekly_window(),
+        }
+    }
 }
 
 /// Default wall-clock budget for one settings/Run commit saga.
@@ -67,4 +79,58 @@ pub enum Effect {
     NotifyStartupChanged(bool),
     LaunchTaskManager,
     Quit,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TrayIcon;
+    use crate::core::{
+        CpuBreakdown, CpuLoad, GpuStatus, LimitWindow, MemoryStatus, ProviderUsage, ResolvedTheme,
+        Sparkline, TrayDisplayMode, UsageSnapshot,
+    };
+
+    #[test]
+    fn component_tray_metrics_read_cpu_memory_gpu_and_codex_week() {
+        let icon = TrayIcon {
+            theme: ResolvedTheme::Dark,
+            frame: 0,
+            display_mode: TrayDisplayMode::Cpu,
+            tooltip: String::new(),
+            cpu_sparkline: Sparkline::new(),
+            memory_sparkline: Sparkline::new(),
+            gpu_sparkline: Sparkline::new(),
+            cpu_breakdown: Some(CpuBreakdown {
+                total: CpuLoad::percent(41.6),
+                system: CpuLoad::percent(10.0),
+                user: CpuLoad::percent(31.6),
+                idle: CpuLoad::percent(58.4),
+            }),
+            memory: Some(MemoryStatus::new(8_u64 << 30, 2_u64 << 30)),
+            storage: None,
+            gpu: Some(
+                GpuStatus::new(8_u64 << 30, 1_u64 << 30, 16_u64 << 30, 0)
+                    .with_utilization(Some(9.2)),
+            ),
+            usage: UsageSnapshot {
+                codex: ProviderUsage {
+                    primary: Some(LimitWindow {
+                        used_tenths: 255,
+                        resets_at_ms: 9_000,
+                        window_minutes: 10_080,
+                    }),
+                    ..ProviderUsage::default()
+                },
+                ..UsageSnapshot::default()
+            },
+            process: None,
+        };
+        let metrics = icon.metrics();
+        assert_eq!(metrics.cpu_percent, Some(41.6));
+        assert_eq!(metrics.memory_percent, Some(75.0));
+        assert_eq!(metrics.gpu_percent, Some(9.2));
+        assert_eq!(
+            metrics.codex_week.map(|window| window.used_tenths),
+            Some(255)
+        );
+    }
 }
