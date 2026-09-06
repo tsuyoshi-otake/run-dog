@@ -275,6 +275,19 @@ pub fn format_chatgpt_plan_label(raw: &str) -> String {
     }
 }
 
+/// Flyout heading: ChatGPT product names stand alone. Claude stays `Claude {plan}`.
+///
+/// Unknown Codex slugs keep the `Codex` prefix. Empty plan is just the title —
+/// no trailing space.
+#[must_use]
+pub fn format_usage_heading(title: &str, plan: Option<&str>) -> String {
+    match (title, plan) {
+        ("Codex", Some(plan)) if plan.starts_with("ChatGPT ") => plan.to_owned(),
+        (_, Some(plan)) if !plan.is_empty() => format!("{title} {plan}"),
+        _ => title.to_owned(),
+    }
+}
+
 fn extract_multiplier(lower: &str) -> Option<&'static str> {
     ["20x", "5x", "2x"]
         .into_iter()
@@ -712,9 +725,9 @@ mod tests {
     use super::{
         cost_cents, days_to_ymd, format_banked_reset_label, format_chatgpt_plan_label,
         format_compact_token_count, format_fable_limit_label, format_limit_label,
-        format_plan_label, is_long_context_request, local_ymd, parse_rfc3339_ms,
-        resolve_codex_model, windows_tz_bias_minutes, ymd_iso, ymd_key, LimitWindow, ProviderUsage,
-        TokenUsage,
+        format_plan_label, format_usage_heading, is_long_context_request, local_ymd,
+        parse_rfc3339_ms, resolve_codex_model, windows_tz_bias_minutes, ymd_iso, ymd_key,
+        LimitWindow, ProviderUsage, TokenUsage,
     };
 
     #[test]
@@ -999,6 +1012,38 @@ mod tests {
         assert_eq!(format_chatgpt_plan_label("not a plan!!"), "");
         assert_ne!(format_chatgpt_plan_label("pro"), "Pro 20x");
         assert_ne!(format_chatgpt_plan_label("pro"), "Plus");
+    }
+
+    #[test]
+    fn component_usage_heading_does_not_stack_codex_on_chatgpt() {
+        assert_eq!(
+            format_usage_heading("Codex", Some("ChatGPT Pro")),
+            "ChatGPT Pro"
+        );
+        assert_eq!(
+            format_usage_heading("Codex", Some("ChatGPT Plus")),
+            "ChatGPT Plus"
+        );
+        assert_eq!(
+            format_usage_heading("Codex", Some("ChatGPT Go")),
+            "ChatGPT Go"
+        );
+        assert_eq!(
+            format_usage_heading("Codex", Some("ChatGPT Business")),
+            "ChatGPT Business"
+        );
+        assert_eq!(format_usage_heading("Codex", Some("team")), "Codex team");
+        assert_eq!(format_usage_heading("Codex", None), "Codex");
+        assert_eq!(format_usage_heading("Codex", Some("")), "Codex");
+        assert_ne!(
+            format_usage_heading("Codex", Some("ChatGPT Pro")),
+            "Codex ChatGPT Pro"
+        );
+        assert_eq!(
+            format_usage_heading("Claude", Some("Max 20x")),
+            "Claude Max 20x"
+        );
+        assert_eq!(format_usage_heading("Claude", None), "Claude");
     }
 
     #[test]

@@ -42,9 +42,9 @@ use crate::{
     application::TrayIcon,
     core::{
         format_banked_reset_label, format_compact_token_count, format_fable_limit_label,
-        format_limit_label, local_hms, local_ymd, GpuStatus, LimitWindow, MemoryStatus,
-        ProcessStatus, ProviderUsage, ResolvedTheme, Sparkline, StorageStatus, UsageSnapshot,
-        SPARKLINE_CAPACITY,
+        format_limit_label, format_usage_heading, local_hms, local_ymd, GpuStatus, LimitWindow,
+        MemoryStatus, ProcessStatus, ProviderUsage, ResolvedTheme, Sparkline, StorageStatus,
+        UsageSnapshot, SPARKLINE_CAPACITY,
     },
 };
 
@@ -1013,10 +1013,7 @@ fn paint_usage_row(
         UsageMark::Codex => super::brand::draw_openai(hdc, icon, palette.text),
     }
 
-    let heading = match usage.plan_label() {
-        Some(plan) => format!("{title} {plan}"),
-        None => title.to_owned(),
-    };
+    let heading = format_usage_heading(title, usage.plan_label().as_deref());
     select_font(hdc, title_font);
     let _ = unsafe { SetTextColor(hdc, palette.text) };
     draw_text(
@@ -1956,6 +1953,10 @@ mod tests {
         };
         assert!(!usage.codex.has_month_activity());
         assert_eq!(usage.codex.plan_label().as_deref(), Some("ChatGPT Pro"));
+        assert_eq!(
+            crate::core::format_usage_heading("Codex", usage.codex.plan_label().as_deref()),
+            "ChatGPT Pro"
+        );
         assert_eq!(visible_usage_count(usage), 1);
         assert_eq!(
             window_size(96, Some(usage), false),
