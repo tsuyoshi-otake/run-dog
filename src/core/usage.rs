@@ -152,14 +152,29 @@ impl ProviderUsage {
 
     /// True when this month's jsonl produced an API-equivalent cost.
     ///
-    /// Limit windows alone do not count: leftover credentials can still
-    /// return 5h/7d bars without any use this month.
+    /// Limit windows alone do not count. Codex / ChatGPT flyout visibility
+    /// uses [`shows_chatgpt_card`] so a live plan or 5h/7d can still appear.
     #[must_use]
     pub const fn has_month_activity(self) -> bool {
         self.month_cents > 0
             || self.today_cents > 0
             || self.month_input_tokens > 0
             || self.month_output_tokens > 0
+    }
+
+    /// Codex / ChatGPT flyout row: month JSONL, a resolved plan, or a live 5h/7d.
+    ///
+    /// Credential files, failed fetches, and unknown/expired windows do not
+    /// qualify. Those must not be painted as 0%.
+    #[must_use]
+    pub fn shows_chatgpt_card(self, now_ms: u64) -> bool {
+        if self.has_month_activity() || self.plan_len != 0 {
+            return true;
+        }
+        [self.session_window(), self.weekly_window()]
+            .into_iter()
+            .flatten()
+            .any(|window| window.is_current(now_ms))
     }
 
     #[must_use]
@@ -1008,5 +1023,64 @@ mod tests {
             ..ProviderUsage::default()
         }
         .has_month_activity());
+    }
+
+    #[test]
+    fn component_chatgpt_card_shows_plan_or_live_limits() {
+        const NOW: u64 = 1_786_865_940_000;
+        assert!(!ProviderUsage::default().shows_chatgpt_card(NOW));
+
+        let mut plan = ProviderUsage::default();
+        plan.set_chatgpt_plan("pro");
+        assert!(plan.shows_chatgpt_card(NOW));
+        assert!(!plan.has_month_activity());
+        assert_eq!(plan.plan_label().as_deref(), Some("ChatGPT Pro"));
+        assert_ne!(plan.plan_label().as_deref(), Some("Pro 20x"));
+
+        let live = ProviderUsage {
+            primary: Some(LimitWindow {
+                used_tenths: 30,
+                resets_at_ms: NOW + 1,
+                window_minutes: 300,
+            }),
+            ..ProviderUsage::default()
+        };
+        assert!(live.shows_chatgpt_card(NOW));
+        assert!(!live.has_month_activity());
+
+        let weekly = ProviderUsage {
+            secondary: Some(LimitWindow {
+                used_tenths: 200,
+                resets_at_ms: NOW + 1,
+                window_minutes: 10_080,
+            }),
+            ..ProviderUsage::default()
+        };
+        assert!(weekly.shows_chatgpt_card(NOW));
+
+        let expired = ProviderUsage {
+            primary: Some(LimitWindow {
+                used_tenths: 30,
+                resets_at_ms: NOW,
+                window_minutes: 300,
+            }),
+            ..ProviderUsage::default()
+        };
+        assert!(!expired.shows_chatgpt_card(NOW));
+
+        let unknown = ProviderUsage {
+            primary: Some(LimitWindow {
+                used_tenths: 30,
+                resets_at_ms: 0,
+                window_minutes: 300,
+            }),
+            ..ProviderUsage::default()
+        };
+        assert!(!unknown.shows_chatgpt_card(NOW));
+
+        let mut garbage = ProviderUsage::default();
+        garbage.set_chatgpt_plan("not a plan!!");
+        assert!(!garbage.shows_chatgpt_card(NOW));
+        assert_eq!(garbage.plan_len, 0);
     }
 }

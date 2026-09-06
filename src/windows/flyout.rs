@@ -370,7 +370,7 @@ fn visible_usage_count(usage: UsageSnapshot) -> usize {
         2
     } else {
         usize::from(usage.claude.has_month_activity())
-            + usize::from(usage.codex.has_month_activity())
+            + usize::from(usage.codex.shows_chatgpt_card(flyout_now_ms()))
     }
 }
 
@@ -978,7 +978,7 @@ fn visible_usage_rows(usage: UsageSnapshot) -> Vec<VisibleUsageRow> {
             mark: UsageMark::Claude,
         });
     }
-    if usage.codex.has_month_activity() || scanning {
+    if usage.codex.shows_chatgpt_card(flyout_now_ms()) || scanning {
         rows.push(VisibleUsageRow {
             title: "Codex",
             usage: usage.codex,
@@ -1944,6 +1944,76 @@ mod tests {
             window_size(96, Some(usage), false),
             (CARD_WIDTH, CARD_HEIGHT + CARD_USAGE_BLOCK_HEIGHT * 2)
         );
+    }
+
+    #[test]
+    fn component_flyout_shows_codex_when_chatgpt_plan_or_live_limits() {
+        let mut plan_only = ProviderUsage::default();
+        plan_only.set_chatgpt_plan("pro");
+        let usage = UsageSnapshot {
+            codex: plan_only,
+            ..UsageSnapshot::default()
+        };
+        assert!(!usage.codex.has_month_activity());
+        assert_eq!(usage.codex.plan_label().as_deref(), Some("ChatGPT Pro"));
+        assert_eq!(visible_usage_count(usage), 1);
+        assert_eq!(
+            window_size(96, Some(usage), false),
+            (CARD_WIDTH, CARD_HEIGHT + CARD_USAGE_BLOCK_HEIGHT)
+        );
+
+        let expired = UsageSnapshot {
+            codex: ProviderUsage {
+                primary: Some(LimitWindow {
+                    used_tenths: 30,
+                    resets_at_ms: 1,
+                    window_minutes: 300,
+                }),
+                ..ProviderUsage::default()
+            },
+            ..UsageSnapshot::default()
+        };
+        assert_eq!(visible_usage_count(expired), 0);
+
+        let unknown = UsageSnapshot {
+            codex: ProviderUsage {
+                primary: Some(LimitWindow {
+                    used_tenths: 30,
+                    resets_at_ms: 0,
+                    window_minutes: 300,
+                }),
+                secondary: Some(LimitWindow {
+                    used_tenths: 200,
+                    resets_at_ms: 0,
+                    window_minutes: 10_080,
+                }),
+                ..ProviderUsage::default()
+            },
+            ..UsageSnapshot::default()
+        };
+        assert_eq!(visible_usage_count(unknown), 0);
+
+        let live = UsageSnapshot {
+            codex: ProviderUsage {
+                secondary: Some(LimitWindow {
+                    used_tenths: 200,
+                    resets_at_ms: u64::MAX,
+                    window_minutes: 10_080,
+                }),
+                ..ProviderUsage::default()
+            },
+            ..UsageSnapshot::default()
+        };
+        assert!(!live.codex.has_month_activity());
+        assert_eq!(visible_usage_count(live), 1);
+
+        let mut claude_plan = ProviderUsage::default();
+        claude_plan.set_plan("default_claude_max_20x");
+        let claude_only = UsageSnapshot {
+            claude: claude_plan,
+            ..UsageSnapshot::default()
+        };
+        assert_eq!(visible_usage_count(claude_only), 0);
     }
 
     #[test]
