@@ -412,7 +412,7 @@ fn entry_long_context(key: &'static str, input: f64, cached: f64, output: f64) -
     pricing
 }
 
-fn pricing_table() -> [ModelPricing; 56] {
+fn pricing_table() -> [ModelPricing; 57] {
     [
         entry_cache_read("claude-fable-5-1", 10.0, 0.25, 50.0),
         entry_cache_read("claude-mythos-5-1", 10.0, 0.25, 50.0),
@@ -440,6 +440,7 @@ fn pricing_table() -> [ModelPricing; 56] {
         entry("claude-3-opus", 15.0, 75.0),
         entry("claude-3-sonnet", 3.0, 15.0),
         entry("claude-3-haiku", 0.25, 1.25),
+        entry_long_context("gpt-6-astra", 10.0, 1.0, 50.0),
         entry_long_context("gpt-5.6-sol", 5.0, 0.5, 30.0),
         entry_long_context("gpt-5.6-terra", 2.5, 0.25, 15.0),
         entry_long_context("gpt-5.6-luna", 1.0, 0.1, 6.0),
@@ -876,6 +877,35 @@ mod tests {
             cost_cents("mystery-model", TokenUsage::default(), None),
             None
         );
+    }
+
+    #[test]
+    fn component_gpt6_astra_matches_published_standard_and_long_context_rates() {
+        let usage = TokenUsage {
+            input: 1_000_000,
+            output: 1_000_000,
+            ..TokenUsage::default()
+        };
+        assert_eq!(cost_cents("gpt-6-astra", usage, None), Some(6_000));
+        assert_eq!(
+            cost_cents("gpt-6-astra-20260904", usage, None),
+            Some(6_000)
+        );
+        let cached = TokenUsage {
+            cached_input: 1_000_000,
+            ..TokenUsage::default()
+        };
+        assert_eq!(cost_cents("gpt-6-astra", cached, None), Some(100));
+        let long = TokenUsage {
+            input: 1_000_000,
+            output: 1_000_000,
+            long_context_input: 1_000_000,
+            long_context_output: 1_000_000,
+            ..TokenUsage::default()
+        };
+        assert_eq!(cost_cents("gpt-6-astra", long, None), Some(9_500));
+        assert!(is_long_context_request("gpt-6-astra", 272_001));
+        assert!(!is_long_context_request("gpt-6-astra", 272_000));
     }
 
     #[test]
