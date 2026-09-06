@@ -89,7 +89,7 @@ pub fn hex_decode(text: &str) -> Option<[u8; 16]> {
         return None;
     }
     let mut out = [0_u8; 16];
-    for (index, chunk) in text.as_bytes().chunks_exact(2).enumerate() {
+    for (index, chunk) in text.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         out[index] = u8::from_str_radix(core::str::from_utf8(chunk).ok()?, 16).ok()?;
     }
     Some(out)
