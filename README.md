@@ -12,12 +12,13 @@
   <img src="assets/rundog-flyout.png" alt="ホバー時の RunDog カード" width="320">
 </p>
 
-`RunDog` は、Windows の通知領域で CPU 使用率に応じて犬の 3 フレーム・アニメーションを表示する、Rust 製の常駐アプリケーションです。GUI フレームワークもランタイムも余分なスレッドもなく、リリースは LTO で最適化しているので、常駐しても CPU もメモリもほとんど使いません。犬にポインターを重ねると、CPU / メモリ / GPU / ストレージ、Claude Code / Codex CLI の利用状況、RunDog 自身の CPU とメモリがカードで開きます。右クリックメニューは Windows の表示言語に合わせ、日本語・英語・韓国語・中国語（簡体字）・中国語（繁体字）・ベトナム語・フランス語・ドイツ語・スペイン語・ロシア語・イタリア語・タイ語を出します。`RunDog について` から [紹介ページ](https://tsuyoshi-otake.github.io/run-dog/) が開きます。
+`RunDog` は、Windows の通知領域で CPU 使用率に応じて犬の 3 フレーム・アニメーションを表示する、Rust 製の常駐アプリケーションです。GUI フレームワークもランタイムも余分なスレッドもなく、リリースは LTO で最適化しているので、常駐しても CPU もメモリもほとんど使いません。右クリックの `トレイ表示` から、犬の代わりに CPU / メモリ / GPU 使用率や Claude / Codex の 5 時間・週次、Fable 週次リミットを数値アイコンで出せます。犬や数値にポインターを重ねると、CPU / メモリ / GPU / ストレージ、Claude Code / Codex CLI の利用状況、RunDog 自身の CPU とメモリがカードで開きます。右クリックメニューは Windows の表示言語に合わせ、日本語・英語・韓国語・中国語（簡体字）・中国語（繁体字）・ベトナム語・フランス語・ドイツ語・スペイン語・ロシア語・イタリア語・タイ語を出します。`RunDog について` から [紹介ページ](https://tsuyoshi-otake.github.io/run-dog/) が開きます。
 
 ## 機能
 
 - `GetSystemTimes` の累積値差分による全体 CPU 使用率と、`GlobalMemoryStatusEx` によるメモリ使用率、システムボリュームの使用量、GPU エンジン使用率と専用 / 共有ビデオメモリ。ホバーで CPU / メモリ / GPU / ストレージのカードと直近 1 分のスパークライン、Claude Code / Codex CLI のサブスクリミットと API 相当利用料、RunDog 自身の CPU 割合とプライベートメモリを表示
 - CPU 使用率に応じた 5–40 FPS のアニメーション（既定の上限は 40 FPS）
+- 右クリックのトレイ表示切替（犬 / CPU / メモリ / GPU / Claude 5時間 / Claude 週 / Fable 週 / Codex 5時間 / Codex 週）。数値モードは 32×32 の整数パーセント。古い・無いリミットは `--` で、0% は作らない。設定は残る
 - System / Light / Dark テーマ、アニメーション上限、スタートアップ、カード固定、更新確認、今月の利用状況の再スキャン、About、終了の右クリックメニュー（Windows の表示言語に追従）
 - Windows のスタートアップで起動、初回トレイ登録時の通知領域ピン留め（ユーザーが隠した場合は維持）、左クリックでモニターカードの常時表示と TOP 固定トグル、Explorer 再起動後の tray 再登録
 - GitHub Releases の stable release を起動時に一度だけ非同期確認し、検証済みの新版をサイレント導入
@@ -116,7 +117,7 @@ cargo +nightly llvm-cov --all-targets --json --summary-only --output-path target
 
 ## 範囲
 
-対象は Windows 10 / 11 64-bit の通知領域モニターです。CPU / メモリ / GPU / ストレージ、Claude Code / Codex の利用状況、トレイメニューの多言語化、GitHub Releases からの更新確認を含みます。ゲームや、犬以外の Runner 種別はこの対象外です。
+対象は Windows 10 / 11 64-bit の通知領域モニターです。CPU / メモリ / GPU / ストレージ、Claude Code / Codex の利用状況、トレイの数値表示、トレイメニューの多言語化、GitHub Releases からの更新確認を含みます。ゲームや、犬以外の Runner 種別はこの対象外です。
 
 ## 謝辞
 

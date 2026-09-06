@@ -272,6 +272,7 @@ impl WindowsPlatform {
                 settings.theme,
                 settings.fps_limit,
                 settings.launch_at_startup,
+                settings.display_mode,
             ),
             store,
         }
@@ -301,6 +302,7 @@ impl EffectPort for WindowsPlatform {
             | Effect::RemoveTray
             | Effect::SetThemeMenu(_)
             | Effect::SetFpsMenu(_)
+            | Effect::SetDisplayMenu(_)
             | Effect::SetStartupMenu(_)
             | Effect::NotifyStartupChanged(_)
             | Effect::CommitSettings { .. }

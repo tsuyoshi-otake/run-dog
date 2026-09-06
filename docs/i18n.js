@@ -19,7 +19,7 @@ export const I18N = {
     description:
       "通知領域で犬を飼ってみませんか？走る速さで Windows の CPU 負荷がわかります。",
     tagline: "通知領域で犬を飼ってみませんか？",
-    lead: "犬の走る速さで Windows の CPU 負荷がわかります。Rust で最適化しているので、常駐してもほとんど負荷をかけません。",
+    lead: "犬の走る速さで Windows の CPU 負荷がわかります。右クリックのトレイ表示から、CPU / メモリ / GPU や Claude / Codex の 5 時間・週次、Fable 週次を数値アイコンにもできます。Rust で最適化しているので、常駐してもほとんど負荷をかけません。",
     download: "Windows 向けにダウンロード",
     requirement: "Windows 10 / 11（64-bit）",
     viewGithub: "GitHub で見る",
@@ -33,7 +33,11 @@ export const I18N = {
       },
       {
         title: "ひと目で負荷がわかる",
-        body: "CPU が忙しくなるほど犬は速く走り、落ち着いているときはゆっくり歩きます。数字を読む必要はありません。",
+        body: "CPU が忙しくなるほど犬は速く走り、落ち着いているときはゆっくり歩きます。右クリックのトレイ表示から、数字を通知領域に出すこともできます。",
+      },
+      {
+        title: "トレイを数値にもできる",
+        body: "トレイ表示で犬、CPU、メモリ、GPU、Claude 5時間、Claude 週、Fable 週、Codex 5時間、Codex 週を切り替えます。古い・無いリミットは -- で、0% は作りません。設定は残ります。",
       },
       {
         title: "必要なメトリクスをカードで",
@@ -45,7 +49,7 @@ export const I18N = {
       },
     ],
     metricsTitle: "ホバーカード",
-    metricsLead: "犬にポインターを重ねるとカードが開きます。数字を探しに行く必要はありません。",
+    metricsLead: "犬や数値アイコンにポインターを重ねるとカードが開きます。トレイの数字は右クリックのトレイ表示からも出せます。",
     metrics: [
       "CPU 使用率と System / User / Idle",
       "メモリ使用量",
@@ -63,6 +67,10 @@ export const I18N = {
       {
         q: "対応している言語は？",
         a: "紹介ページは日本語、英語、簡体字中国語、繁体字中国語、韓国語、ベトナム語、フランス語、ドイツ語、スペイン語、ロシア語、イタリア語、タイ語に対応しています。右クリックメニューは Windows の表示言語に合わせます。ホバーカードの表記は英語です。",
+      },
+      {
+        q: "トレイに数字を出せますか？",
+        a: "はい。右クリックのトレイ表示から、犬のアニメーションと、CPU / メモリ / GPU の整数パーセント、Claude 5時間・Claude 週、Fable 週、Codex 5時間・Codex 週を切り替えられます。古い・無いリミットは -- です。設定は残ります。",
       },
       {
         q: "RunCat と同じものですか？",
@@ -107,7 +115,7 @@ export const I18N = {
     description:
       "A dog in the notification area. How fast it runs tells you the CPU load on Windows.",
     tagline: "A dog living in the notification area.",
-    lead: "The dog tells you Windows CPU usage by how fast it runs. Written in Rust and optimized so it barely uses CPU or memory while it lives in the tray.",
+    lead: "The dog tells you Windows CPU usage by how fast it runs. From the right-click Tray icon menu you can also put CPU, memory, GPU, Claude or Codex 5-hour and weekly limits, or Fable week in the notification-area icon. Written in Rust and optimized so it barely uses CPU or memory while it lives in the tray.",
     download: "Download for Windows",
     requirement: "Windows 10 / 11 (64-bit)",
     viewGithub: "View on GitHub",
@@ -121,7 +129,11 @@ export const I18N = {
       },
       {
         title: "Load at a glance",
-        body: "The dog speeds up as your CPU gets busier and slows to a stroll when things are calm. No numbers to read — just watch it run.",
+        body: "The dog speeds up as your CPU gets busier and slows to a stroll when things are calm. Or put numbers in the tray from the right-click Tray icon menu.",
+      },
+      {
+        title: "Numbers in the tray",
+        body: "Tray icon switches among Dog, CPU, Memory, GPU, Claude 5h, Claude week, Fable week, Codex 5h, and Codex week. Stale or missing limits show --, never a fabricated 0%. The setting persists.",
       },
       {
         title: "A compact system card",
@@ -133,7 +145,7 @@ export const I18N = {
       },
     ],
     metricsTitle: "Hover card",
-    metricsLead: "Point at the dog and the card opens. You do not have to go hunting for numbers.",
+    metricsLead: "Point at the dog or a number icon and the card opens. You can also put those percents in the tray from the right-click Tray icon menu.",
     metrics: [
       "CPU usage with System / User / Idle",
       "Memory use",
@@ -151,6 +163,10 @@ export const I18N = {
       {
         q: "What languages does it support?",
         a: "This site is in Japanese, English, Simplified Chinese, Traditional Chinese, Korean, Vietnamese, French, German, Spanish, Russian, Italian, and Thai. The tray menu follows the Windows display language. The hover card remains in English.",
+      },
+      {
+        q: "Can the tray show numbers?",
+        a: "Yes. Right-click Tray icon to switch among the running dog and integer percents for CPU, Memory, GPU, Claude 5h, Claude week, Fable week, Codex 5h, and Codex week. Stale or missing limits show --. The choice is saved.",
       },
       {
         q: "Is this the same as RunCat?",
@@ -194,7 +210,7 @@ export const I18N = {
     title: "RunDog",
     description: "要不要在通知区域养一只小狗？跑得越快，说明 Windows 的 CPU 越忙。",
     tagline: "要不要在通知区域养一只小狗？",
-    lead: "小狗跑得越快，说明 Windows 的 CPU 越忙。用 Rust 优化，常驻时几乎不占用 CPU 和内存。",
+    lead: "小狗跑得越快，说明 Windows 的 CPU 越忙。也可以在右键「托盘图标」里，把通知区改成 CPU / 内存 / GPU 百分比，或 Claude / Codex 的 5 小时与每周限额、Fable 每周限额。用 Rust 优化，常驻时几乎不占用 CPU 和内存。",
     download: "下载 Windows 版",
     requirement: "Windows 10 / 11（64 位）",
     viewGithub: "在 GitHub 上查看",
@@ -208,7 +224,11 @@ export const I18N = {
       },
       {
         title: "一眼看出负载",
-        body: "CPU 越忙，狗跑得越快；空闲时就慢慢走。不用读数字，看它跑就行。",
+        body: "CPU 越忙，狗跑得越快；空闲时就慢慢走。也可以从右键「托盘图标」把数字放到通知区。",
+      },
+      {
+        title: "托盘也可以显示数字",
+        body: "「托盘图标」可在狗、CPU、内存、GPU、Claude 5 小时、Claude 每周、Fable 每周、Codex 5 小时、Codex 每周之间切换。过期或缺失的限额显示 --，不会编造 0%。选择会保留。",
       },
       {
         title: "卡片里的系统信息",
@@ -220,7 +240,7 @@ export const I18N = {
       },
     ],
     metricsTitle: "悬停卡片",
-    metricsLead: "把指针放到小狗上，卡片就会打开。不必到处找数字。",
+    metricsLead: "把指针放到小狗或数字图标上，卡片就会打开。也可以从右键「托盘图标」把这些百分比放到托盘里。",
     metrics: [
       "CPU 使用率以及 System / User / Idle",
       "内存用量",
@@ -238,6 +258,10 @@ export const I18N = {
       {
         q: "支持哪些语言？",
         a: "本介绍页支持日语、英语、简体中文、繁体中文、韩语、越南语、法语、德语、西班牙语、俄语、意大利语和泰语。右键菜单跟随 Windows 显示语言。悬停卡片上的文字为英语。",
+      },
+      {
+        q: "托盘能显示数字吗？",
+        a: "可以。右键「托盘图标」可在奔跑的小狗和 CPU、内存、GPU、Claude 5 小时、Claude 每周、Fable 每周、Codex 5 小时、Codex 每周的整数百分比之间切换。过期或缺失的限额显示 --。选择会保存。",
       },
       {
         q: "和 RunCat 是同一个软件吗？",
@@ -279,7 +303,7 @@ export const I18N = {
     title: "RunDog",
     description: "要不要在通知區域養一隻小狗？跑得越快，代表 Windows 的 CPU 越忙。",
     tagline: "要不要在通知區域養一隻小狗？",
-    lead: "小狗跑得越快，代表 Windows 的 CPU 越忙。用 Rust 最佳化，常駐時幾乎不佔用 CPU 和記憶體。",
+    lead: "小狗跑得越快，代表 Windows 的 CPU 越忙。也可以在右鍵「工作列圖示」裡，把通知區改成 CPU / 記憶體 / GPU 百分比，或 Claude / Codex 的 5 小時與每週限額、Fable 每週限額。用 Rust 最佳化，常駐時幾乎不佔用 CPU 和記憶體。",
     download: "下載 Windows 版",
     requirement: "Windows 10 / 11（64 位元）",
     viewGithub: "在 GitHub 上查看",
@@ -293,7 +317,11 @@ export const I18N = {
       },
       {
         title: "一眼看出負載",
-        body: "CPU 越忙，狗跑得越快；空閒時就慢慢走。不用讀數字，看它跑就行。",
+        body: "CPU 越忙，狗跑得越快；空閒時就慢慢走。也可以從右鍵「工作列圖示」把數字放到通知區。",
+      },
+      {
+        title: "工作列也可以顯示數字",
+        body: "「工作列圖示」可在狗、CPU、記憶體、GPU、Claude 5 小時、Claude 每週、Fable 每週、Codex 5 小時、Codex 每週之間切換。過期或缺失的限額顯示 --，不會編造 0%。選擇會保留。",
       },
       {
         title: "卡片裡的系統資訊",
@@ -305,7 +333,7 @@ export const I18N = {
       },
     ],
     metricsTitle: "懸停卡片",
-    metricsLead: "把指標放到小狗上，卡片就會打開。不必到處找數字。",
+    metricsLead: "把指標放到小狗或數字圖示上，卡片就會打開。也可以從右鍵「工作列圖示」把這些百分比放到工作列。",
     metrics: [
       "CPU 使用率以及 System / User / Idle",
       "記憶體用量",
@@ -323,6 +351,10 @@ export const I18N = {
       {
         q: "支援哪些語言？",
         a: "本介紹頁支援日文、英文、簡體中文、繁體中文、韓文、越南文、法文、德文、西班牙文、俄文、義大利文和泰文。右鍵選單會跟隨 Windows 顯示語言。懸停卡片上的文字為英文。",
+      },
+      {
+        q: "工作列能顯示數字嗎？",
+        a: "可以。右鍵「工作列圖示」可在奔跑的小狗和 CPU、記憶體、GPU、Claude 5 小時、Claude 每週、Fable 每週、Codex 5 小時、Codex 每週的整數百分比之間切換。過期或缺失的限額顯示 --。選擇會儲存。",
       },
       {
         q: "和 RunCat 是同一個軟體嗎？",
@@ -364,7 +396,7 @@ export const I18N = {
     title: "RunDog",
     description: "알림 영역에서 강아지를 키워 보시겠어요? 뛰는 속도로 Windows CPU 부하를 알 수 있습니다.",
     tagline: "알림 영역에서 강아지를 키워 보시겠어요?",
-    lead: "강아지가 뛰는 속도로 Windows CPU 사용량을 알 수 있습니다. Rust로 최적화해서 상주해도 CPU와 메모리를 거의 쓰지 않습니다.",
+    lead: "강아지가 뛰는 속도로 Windows CPU 사용량을 알 수 있습니다. 오른쪽 클릭 트레이 아이콘에서 CPU / 메모리 / GPU 퍼센트나 Claude / Codex 5시간·주간, Fable 주간 한도를 알림 영역 아이콘으로 바꿀 수도 있습니다. Rust로 최적화해서 상주해도 CPU와 메모리를 거의 쓰지 않습니다.",
     download: "Windows용 다운로드",
     requirement: "Windows 10 / 11 (64비트)",
     viewGithub: "GitHub에서 보기",
@@ -378,7 +410,11 @@ export const I18N = {
       },
       {
         title: "한눈에 부하를 알 수 있습니다",
-        body: "CPU가 바빠질수록 강아지는 빨리 달리고, 한가할 때는 천천히 걷습니다. 숫자를 읽을 필요는 없습니다.",
+        body: "CPU가 바빠질수록 강아지는 빨리 달리고, 한가할 때는 천천히 걷습니다. 오른쪽 클릭 트레이 아이콘에서 숫자를 알림 영역에 둘 수도 있습니다.",
+      },
+      {
+        title: "트레이에 숫자도 표시",
+        body: "트레이 아이콘에서 개, CPU, 메모리, GPU, Claude 5시간, Claude 주간, Fable 주간, Codex 5시간, Codex 주간을 전환합니다. 오래되거나 없는 한도는 --이며, 0%를 만들지 않습니다. 설정은 유지됩니다.",
       },
       {
         title: "필요한 지표를 카드로",
@@ -390,7 +426,7 @@ export const I18N = {
       },
     ],
     metricsTitle: "호버 카드",
-    metricsLead: "강아지에 포인터를 올리면 카드가 열립니다. 숫자를 찾아다닐 필요가 없습니다.",
+    metricsLead: "강아지나 숫자 아이콘에 포인터를 올리면 카드가 열립니다. 오른쪽 클릭 트레이 아이콘에서 그 퍼센트를 트레이에 둘 수도 있습니다.",
     metrics: [
       "CPU 사용률과 System / User / Idle",
       "메모리 사용량",
@@ -408,6 +444,10 @@ export const I18N = {
       {
         q: "어떤 언어를 지원하나요?",
         a: "이 소개 페이지는 일본어, 영어, 중국어, 한국어, 베트남어, 프랑스어, 독일어, 스페인어, 러시아어, 이탈리아어, 태국어를 지원합니다. 오른쪽 클릭 메뉴는 Windows 표시 언어를 따릅니다. 호버 카드의 표기는 영어입니다.",
+      },
+      {
+        q: "트레이에 숫자를 표시할 수 있나요?",
+        a: "네. 오른쪽 클릭 트레이 아이콘에서 달리는 개와 CPU, 메모리, GPU, Claude 5시간, Claude 주간, Fable 주간, Codex 5시간, Codex 주간의 정수 퍼센트를 전환합니다. 오래되거나 없는 한도는 --입니다. 선택은 저장됩니다.",
       },
       {
         q: "RunCat과 같은 앱인가요?",
@@ -450,7 +490,7 @@ export const I18N = {
     description:
       "Nuôi một chú chó trên khay hệ thống. Tốc độ chạy cho biết CPU của Windows.",
     tagline: "Nuôi một chú chó trên khay hệ thống nhé?",
-    lead: "Tốc độ chạy của chú chó cho biết CPU của Windows. Viết bằng Rust và tối ưu để khi chạy nền gần như không tốn CPU hay bộ nhớ.",
+    lead: "Tốc độ chạy của chú chó cho biết CPU của Windows. Menu chuột phải Biểu tượng khay cũng có thể đưa phần trăm CPU / bộ nhớ / GPU, hạn mức 5 giờ và tuần của Claude / Codex, và hạn mức tuần Fable lên biểu tượng khay. Viết bằng Rust và tối ưu để khi chạy nền gần như không tốn CPU hay bộ nhớ.",
     download: "Tải cho Windows",
     requirement: "Windows 10 / 11 (64-bit)",
     viewGithub: "Xem trên GitHub",
@@ -464,7 +504,11 @@ export const I18N = {
       },
       {
         title: "Nhìn một cái là biết tải",
-        body: "CPU càng bận chó chạy càng nhanh, lúc rảnh thì đi chậm. Không cần đọc số — cứ nhìn nó chạy.",
+        body: "CPU càng bận chó chạy càng nhanh, lúc rảnh thì đi chậm. Cũng có thể đưa số lên khay từ menu chuột phải Biểu tượng khay.",
+      },
+      {
+        title: "Số trên khay",
+        body: "Biểu tượng khay chuyển giữa Chó, CPU, Bộ nhớ, GPU, Claude 5 giờ, Claude tuần, Fable tuần, Codex 5 giờ và Codex tuần. Hạn mức cũ hoặc thiếu hiện --, không bịa 0%. Lựa chọn được lưu.",
       },
       {
         title: "Thông số hệ thống trên thẻ",
@@ -476,7 +520,7 @@ export const I18N = {
       },
     ],
     metricsTitle: "Thẻ khi di chuột",
-    metricsLead: "Đưa con trỏ vào chú chó là thẻ mở ra. Không phải đi tìm số liệu.",
+    metricsLead: "Đưa con trỏ vào chú chó hoặc biểu tượng số là thẻ mở ra. Cũng có thể đưa các phần trăm đó lên khay từ menu chuột phải Biểu tượng khay.",
     metrics: [
       "Mức dùng CPU với System / User / Idle",
       "Bộ nhớ",
@@ -494,6 +538,10 @@ export const I18N = {
       {
         q: "Hỗ trợ ngôn ngữ nào?",
         a: "Trang giới thiệu có tiếng Nhật, Anh, Trung, Hàn, Việt, Pháp, Đức, Tây Ban Nha, Nga, Ý và Thái. Menu chuột phải theo ngôn ngữ hiển thị của Windows. Nhãn trên thẻ khi di chuột là tiếng Anh.",
+      },
+      {
+        q: "Khay có hiện số được không?",
+        a: "Có. Chuột phải Biểu tượng khay để chuyển giữa chó chạy và phần trăm nguyên của CPU, Bộ nhớ, GPU, Claude 5 giờ, Claude tuần, Fable tuần, Codex 5 giờ và Codex tuần. Hạn mức cũ hoặc thiếu hiện --. Lựa chọn được lưu.",
       },
       {
         q: "Có phải RunCat không?",
@@ -536,7 +584,7 @@ export const I18N = {
     description:
       "Un chien dans la zone de notification. Sa vitesse indique la charge CPU de Windows.",
     tagline: "Et si vous adoptiez un chien dans la zone de notification ?",
-    lead: "La vitesse du chien indique la charge CPU de Windows. Écrit en Rust et optimisé pour n'utiliser presque ni CPU ni mémoire en résidence.",
+    lead: "La vitesse du chien indique la charge CPU de Windows. Le menu contextuel Icône de notification permet aussi d'afficher CPU, mémoire, GPU, ou les plafonds 5 h et semaine de Claude / Codex plus Fable semaine dans l'icône. Écrit en Rust et optimisé pour n'utiliser presque ni CPU ni mémoire en résidence.",
     download: "Télécharger pour Windows",
     requirement: "Windows 10 / 11 (64 bits)",
     viewGithub: "Voir sur GitHub",
@@ -550,7 +598,11 @@ export const I18N = {
       },
       {
         title: "La charge d'un coup d'œil",
-        body: "Plus le CPU est occupé, plus le chien court vite. Au calme, il se promène. Pas besoin de lire des chiffres.",
+        body: "Plus le CPU est occupé, plus le chien court vite. Au calme, il se promène. Vous pouvez aussi afficher des chiffres via le menu contextuel Icône de notification.",
+      },
+      {
+        title: "Des chiffres dans la barre",
+        body: "Icône de notification bascule entre Chien, CPU, Mémoire, GPU, Claude 5 h, Claude semaine, Fable semaine, Codex 5 h et Codex semaine. Un plafond périmé ou absent affiche --, jamais un 0 % inventé. Le choix est conservé.",
       },
       {
         title: "Une carte système compacte",
@@ -562,7 +614,7 @@ export const I18N = {
       },
     ],
     metricsTitle: "Carte au survol",
-    metricsLead: "Pointez le chien : la carte s'ouvre. Inutile d'aller chercher les chiffres.",
+    metricsLead: "Pointez le chien ou l'icône chiffrée : la carte s'ouvre. Ces pourcentages peuvent aussi aller dans la barre via le menu contextuel Icône de notification.",
     metrics: [
       "Utilisation CPU avec System / User / Idle",
       "Mémoire",
@@ -580,6 +632,10 @@ export const I18N = {
       {
         q: "Quelles langues sont prises en charge ?",
         a: "Ce site existe en japonais, anglais, chinois, coréen, vietnamien, français, allemand, espagnol, russe, italien et thaï. Le menu contextuel suit la langue d'affichage de Windows. Les libellés de la carte au survol restent en anglais.",
+      },
+      {
+        q: "La barre peut-elle afficher des chiffres ?",
+        a: "Oui. Clic droit Icône de notification pour passer du chien aux pourcentages entiers CPU, Mémoire, GPU, Claude 5 h, Claude semaine, Fable semaine, Codex 5 h et Codex semaine. Un plafond périmé ou absent affiche --. Le choix est enregistré.",
       },
       {
         q: "Est-ce le même logiciel que RunCat ?",
@@ -622,7 +678,7 @@ export const I18N = {
     description:
       "Ein Hund im Infobereich. Wie schnell er läuft, zeigt die CPU-Last von Windows.",
     tagline: "Möchten Sie einen Hund im Infobereich halten?",
-    lead: "Wie schnell der Hund läuft, zeigt die CPU-Last von Windows. In Rust optimiert, damit es im Infobereich kaum CPU oder Speicher braucht.",
+    lead: "Wie schnell der Hund läuft, zeigt die CPU-Last von Windows. Über das Rechtsklick-Menü Infobereich können Sie auch CPU, Speicher, GPU oder Claude-/Codex-Limits (5 Std. und Woche) plus Fable-Woche als Zahlen-Icon anzeigen. In Rust optimiert, damit es im Infobereich kaum CPU oder Speicher braucht.",
     download: "Für Windows herunterladen",
     requirement: "Windows 10 / 11 (64-Bit)",
     viewGithub: "Auf GitHub ansehen",
@@ -636,7 +692,11 @@ export const I18N = {
       },
       {
         title: "Last auf einen Blick",
-        body: "Je beschäftigter die CPU, desto schneller läuft der Hund. In Ruhe geht er spazieren. Keine Zahlen lesen — einfach zusehen.",
+        body: "Je beschäftigter die CPU, desto schneller läuft der Hund. In Ruhe geht er spazieren. Über das Rechtsklick-Menü Infobereich können Sie auch Zahlen ins Icon legen.",
+      },
+      {
+        title: "Zahlen im Infobereich",
+        body: "Infobereich wechselt zwischen Hund, CPU, Speicher, GPU, Claude 5 Std., Claude-Woche, Fable-Woche, Codex 5 Std. und Codex-Woche. Abgelaufene oder fehlende Limits zeigen --, nie ein erfundenes 0 %. Die Einstellung bleibt.",
       },
       {
         title: "Kompakte Systemkarte",
@@ -648,7 +708,7 @@ export const I18N = {
       },
     ],
     metricsTitle: "Karte beim Zeigen",
-    metricsLead: "Zeigen Sie auf den Hund, und die Karte öffnet sich. Zahlen muss man nicht suchen.",
+    metricsLead: "Zeigen Sie auf den Hund oder das Zahlen-Icon, und die Karte öffnet sich. Dieselben Prozente können Sie über das Rechtsklick-Menü Infobereich ins Icon legen.",
     metrics: [
       "CPU-Auslastung mit System / User / Idle",
       "Speicher",
@@ -666,6 +726,10 @@ export const I18N = {
       {
         q: "Welche Sprachen werden unterstützt?",
         a: "Diese Seite gibt es auf Japanisch, Englisch, Chinesisch, Koreanisch, Vietnamesisch, Französisch, Deutsch, Spanisch, Russisch, Italienisch und Thai. Das Kontextmenü folgt der Windows-Anzeigesprache. Die Kartenbeschriftung bleibt Englisch.",
+      },
+      {
+        q: "Kann der Infobereich Zahlen zeigen?",
+        a: "Ja. Rechtsklick Infobereich wechselt zwischen dem laufenden Hund und ganzen Prozenten für CPU, Speicher, GPU, Claude 5 Std., Claude-Woche, Fable-Woche, Codex 5 Std. und Codex-Woche. Abgelaufene oder fehlende Limits zeigen --. Die Wahl wird gespeichert.",
       },
       {
         q: "Ist das dasselbe wie RunCat?",
@@ -708,7 +772,7 @@ export const I18N = {
     description:
       "Un perro en el área de notificación. Su velocidad indica la carga de CPU de Windows.",
     tagline: "¿Y si crías un perro en el área de notificación?",
-    lead: "La velocidad del perro indica la carga de CPU de Windows. Escrito en Rust y optimizado para usar casi nada de CPU ni memoria mientras vive en la bandeja.",
+    lead: "La velocidad del perro indica la carga de CPU de Windows. En el menú contextual Icono de notificación también puedes poner CPU, memoria, GPU, o los límites de 5 h y semanales de Claude / Codex más Fable semanal en el icono. Escrito en Rust y optimizado para usar casi nada de CPU ni memoria mientras vive en la bandeja.",
     download: "Descargar para Windows",
     requirement: "Windows 10 / 11 (64 bits)",
     viewGithub: "Ver en GitHub",
@@ -722,7 +786,11 @@ export const I18N = {
       },
       {
         title: "La carga de un vistazo",
-        body: "Cuanto más ocupada está la CPU, más rápido corre el perro. En calma, pasea. No hace falta leer números.",
+        body: "Cuanto más ocupada está la CPU, más rápido corre el perro. En calma, pasea. También puedes poner números en el icono desde el menú contextual Icono de notificación.",
+      },
+      {
+        title: "Números en la bandeja",
+        body: "Icono de notificación cambia entre Perro, CPU, Memoria, GPU, Claude 5 h, Claude semanal, Fable semanal, Codex 5 h y Codex semanal. Un límite caducado o ausente muestra --, nunca un 0 % inventado. La opción se guarda.",
       },
       {
         title: "Una tarjeta de sistema compacta",
@@ -734,7 +802,7 @@ export const I18N = {
       },
     ],
     metricsTitle: "Tarjeta al pasar el puntero",
-    metricsLead: "Apunta al perro y se abre la tarjeta. No hay que ir a buscar los números.",
+    metricsLead: "Apunta al perro o al icono numérico y se abre la tarjeta. Esos porcentajes también pueden ir a la bandeja desde el menú contextual Icono de notificación.",
     metrics: [
       "Uso de CPU con System / User / Idle",
       "Memoria",
@@ -752,6 +820,10 @@ export const I18N = {
       {
         q: "¿Qué idiomas admite?",
         a: "Este sitio está en japonés, inglés, chino, coreano, vietnamita, francés, alemán, español, ruso, italiano y tailandés. El menú contextual sigue el idioma de Windows. Las etiquetas de la tarjeta al pasar el puntero siguen en inglés.",
+      },
+      {
+        q: "¿La bandeja puede mostrar números?",
+        a: "Sí. Clic derecho en Icono de notificación para cambiar entre el perro y porcentajes enteros de CPU, Memoria, GPU, Claude 5 h, Claude semanal, Fable semanal, Codex 5 h y Codex semanal. Un límite caducado o ausente muestra --. La elección se guarda.",
       },
       {
         q: "¿Es lo mismo que RunCat?",
@@ -794,7 +866,7 @@ export const I18N = {
     description:
       "Собака в области уведомлений. По скорости бега видно нагрузку CPU в Windows.",
     tagline: "Завести собаку в области уведомлений?",
-    lead: "Скорость бега показывает загрузку CPU в Windows. Написано на Rust и оптимизировано так, чтобы в трее почти не занимать CPU и память.",
+    lead: "Скорость бега показывает загрузку CPU в Windows. В меню правой кнопки «Значок в трее» можно также вывести CPU, память, GPU или лимиты Claude / Codex на 5 ч и неделю плюс Fable за неделю в значок. Написано на Rust и оптимизировано так, чтобы в трее почти не занимать CPU и память.",
     download: "Скачать для Windows",
     requirement: "Windows 10 / 11 (64-бит)",
     viewGithub: "Смотреть на GitHub",
@@ -808,7 +880,11 @@ export const I18N = {
       },
       {
         title: "Нагрузка с одного взгляда",
-        body: "Чем занятее CPU, тем быстрее бежит собака. В покое она идёт шагом. Цифры читать не обязательно.",
+        body: "Чем занятее CPU, тем быстрее бежит собака. В покое она идёт шагом. Цифры можно вынести в трей через меню «Значок в трее».",
+      },
+      {
+        title: "Цифры в трее",
+        body: "«Значок в трее» переключает Собака, CPU, Память, GPU, Claude 5 ч, Claude за неделю, Fable за неделю, Codex 5 ч и Codex за неделю. Просроченный или отсутствующий лимит — --, выдуманных 0% нет. Выбор сохраняется.",
       },
       {
         title: "Компактная системная карточка",
@@ -820,7 +896,7 @@ export const I18N = {
       },
     ],
     metricsTitle: "Карточка при наведении",
-    metricsLead: "Наведите на собаку — карточка откроется. Искать цифры не нужно.",
+    metricsLead: "Наведите на собаку или числовой значок — карточка откроется. Те же проценты можно вынести в трей через меню «Значок в трее».",
     metrics: [
       "Загрузка CPU: System / User / Idle",
       "Память",
@@ -838,6 +914,10 @@ export const I18N = {
       {
         q: "Какие языки поддерживаются?",
         a: "Сайт есть на японском, английском, китайском, корейском, вьетнамском, французском, немецком, испанском, русском, итальянском и тайском. Контекстное меню следует языку интерфейса Windows. Подписи карточки остаются на английском.",
+      },
+      {
+        q: "Может ли трей показывать цифры?",
+        a: "Да. Правый щелчок «Значок в трее» переключает бегущую собаку и целые проценты CPU, Память, GPU, Claude 5 ч, Claude за неделю, Fable за неделю, Codex 5 ч и Codex за неделю. Просроченный или отсутствующий лимит — --. Выбор сохраняется.",
       },
       {
         q: "Это то же самое, что RunCat?",
@@ -880,7 +960,7 @@ export const I18N = {
     description:
       "Un cane nell'area di notifica. Quanto corre indica il carico CPU di Windows.",
     tagline: "Adottare un cane nell'area di notifica?",
-    lead: "La velocità del cane indica il carico CPU di Windows. Scritto in Rust e ottimizzato per usare quasi zero CPU e memoria mentre resta nel vassoio.",
+    lead: "La velocità del cane indica il carico CPU di Windows. Dal menu contestuale Icona di notifica puoi anche mettere CPU, memoria, GPU, o i limiti 5 ore e settimanali di Claude / Codex più Fable settimanale nell'icona. Scritto in Rust e ottimizzato per usare quasi zero CPU e memoria mentre resta nel vassoio.",
     download: "Scarica per Windows",
     requirement: "Windows 10 / 11 (64 bit)",
     viewGithub: "Vedi su GitHub",
@@ -894,7 +974,11 @@ export const I18N = {
       },
       {
         title: "Il carico a colpo d'occhio",
-        body: "Più la CPU è occupata, più il cane corre. Quando è calmo, cammina. Non serve leggere i numeri.",
+        body: "Più la CPU è occupata, più il cane corre. Quando è calmo, cammina. Puoi anche mettere i numeri nell'icona dal menu contestuale Icona di notifica.",
+      },
+      {
+        title: "Numeri nel vassoio",
+        body: "Icona di notifica passa tra Cane, CPU, Memoria, GPU, Claude 5 ore, Claude settimanale, Fable settimanale, Codex 5 ore e Codex settimanale. Un limite scaduto o assente mostra --, mai uno 0% inventato. La scelta resta.",
       },
       {
         title: "Una scheda di sistema compatta",
@@ -906,7 +990,7 @@ export const I18N = {
       },
     ],
     metricsTitle: "Scheda al passaggio",
-    metricsLead: "Punta il cane e la scheda si apre. Non devi andare a caccia di numeri.",
+    metricsLead: "Punta il cane o l'icona numerica e la scheda si apre. Quelle percentuali possono andare anche nel vassoio dal menu contestuale Icona di notifica.",
     metrics: [
       "Uso CPU con System / User / Idle",
       "Memoria",
@@ -924,6 +1008,10 @@ export const I18N = {
       {
         q: "Quali lingue sono supportate?",
         a: "Il sito è in giapponese, inglese, cinese, coreano, vietnamita, francese, tedesco, spagnolo, russo, italiano e thai. Il menu contestuale segue la lingua di visualizzazione di Windows. Le etichette della scheda restano in inglese.",
+      },
+      {
+        q: "Il vassoio può mostrare i numeri?",
+        a: "Sì. Clic destro su Icona di notifica per passare dal cane ai percentuali interi di CPU, Memoria, GPU, Claude 5 ore, Claude settimanale, Fable settimanale, Codex 5 ore e Codex settimanale. Un limite scaduto o assente mostra --. La scelta viene salvata.",
       },
       {
         q: "È lo stesso di RunCat?",
@@ -966,7 +1054,7 @@ export const I18N = {
     description:
       "สุนัขในพื้นที่แจ้งเตือน ความเร็วที่วิ่งบอกภาระ CPU ของ Windows",
     tagline: "เลี้ยงสุนัขในพื้นที่แจ้งเตือนไหม?",
-    lead: "ความเร็วที่สุนัขวิ่งบอกการใช้ CPU ของ Windows เขียนด้วย Rust และปรับให้ตอนอยู่ในถาดระบบแทบไม่กิน CPU หรือหน่วยความจำ",
+    lead: "ความเร็วที่สุนัขวิ่งบอกการใช้ CPU ของ Windows จากเมนูคลิกขวาไอคอนถาด คุณยังใส่เปอร์เซ็นต์ CPU / หน่วยความจำ / GPU หรือโควตา 5 ชม. และรายสัปดาห์ของ Claude / Codex รวมถึง Fable รายสัปดาห์ลงในไอคอนได้ เขียนด้วย Rust และปรับให้ตอนอยู่ในถาดระบบแทบไม่กิน CPU หรือหน่วยความจำ",
     download: "ดาวน์โหลดสำหรับ Windows",
     requirement: "Windows 10 / 11 (64 บิต)",
     viewGithub: "ดูบน GitHub",
@@ -980,7 +1068,11 @@ export const I18N = {
       },
       {
         title: "เห็นภาระในพริบตา",
-        body: "CPU ยิ่งยุ่ง สุนัขยิ่งวิ่งเร็ว ตอนว่างก็เดินช้า ไม่ต้องอ่านตัวเลข",
+        body: "CPU ยิ่งยุ่ง สุนัขยิ่งวิ่งเร็ว ตอนว่างก็เดินช้า จากเมนูคลิกขวาไอคอนถาด คุณยังใส่ตัวเลขในพื้นที่แจ้งเตือนได้",
+      },
+      {
+        title: "ตัวเลขในถาดระบบ",
+        body: "ไอคอนถาดสลับระหว่างสุนัข CPU หน่วยความจำ GPU Claude 5 ชม. Claude รายสัปดาห์ Fable รายสัปดาห์ Codex 5 ชม. และ Codex รายสัปดาห์ โควตาที่หมดอายุหรือไม่มีแสดง -- ไม่สร้าง 0% การตั้งค่าจะคงอยู่",
       },
       {
         title: "การ์ดระบบแบบกระชับ",
@@ -992,7 +1084,7 @@ export const I18N = {
       },
     ],
     metricsTitle: "การ์ดเมื่อชี้เมาส์",
-    metricsLead: "ชี้ที่สุนัขแล้วการ์ดจะเปิด ไม่ต้องไปหาตัวเลข",
+    metricsLead: "ชี้ที่สุนัขหรือไอคอนตัวเลขแล้วการ์ดจะเปิด เปอร์เซ็นต์เดียวกันใส่ในถาดได้จากเมนูคลิกขวาไอคอนถาด",
     metrics: [
       "การใช้ CPU พร้อม System / User / Idle",
       "หน่วยความจำ",
@@ -1010,6 +1102,10 @@ export const I18N = {
       {
         q: "รองรับภาษาอะไรบ้าง?",
         a: "หน้านี้มีภาษาญี่ปุ่น อังกฤษ จีน เกาหลี เวียดนาม ฝรั่งเศส เยอรมัน สเปน รัสเซีย อิตาลี และไทย เมนูคลิกขวาตามภาษาที่แสดงของ Windows ข้อความบนการ์ดยังเป็นภาษาอังกฤษ",
+      },
+      {
+        q: "ถาดระบบแสดงตัวเลขได้ไหม?",
+        a: "ได้ คลิกขวาไอคอนถาดเพื่อสลับระหว่างสุนัขที่วิ่งกับเปอร์เซ็นต์จำนวนเต็มของ CPU หน่วยความจำ GPU Claude 5 ชม. Claude รายสัปดาห์ Fable รายสัปดาห์ Codex 5 ชม. และ Codex รายสัปดาห์ โควตาที่หมดอายุหรือไม่มีแสดง -- ตัวเลือกจะถูกบันทึก",
       },
       {
         q: "เป็นตัวเดียวกับ RunCat หรือไม่?",

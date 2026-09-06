@@ -8,11 +8,13 @@ use windows_sys::Win32::{
     UI::WindowsAndMessaging::{CreateIconIndirect, DestroyIcon, HICON, ICONINFO},
 };
 
-use crate::core::ResolvedTheme;
+use crate::core::{rasterize_tray_glyph, ResolvedTheme, TrayGlyph, TRAY_ICON_SIZE};
 
 const FRAME_WIDTH: i32 = 32;
 const FRAME_HEIGHT: i32 = 32;
 const BYTES_PER_PIXEL: usize = 4;
+const _: () = assert!(FRAME_WIDTH as usize == TRAY_ICON_SIZE);
+const _: () = assert!(FRAME_HEIGHT as usize == TRAY_ICON_SIZE);
 
 /// HICONs created once during startup and reused for every tray update.
 pub struct IconFrames {
@@ -76,6 +78,24 @@ impl OwnedIcon {
     #[must_use]
     const fn raw(&self) -> HICON {
         self.0
+    }
+}
+
+/// HICON created from a numeric tray glyph. Dropped when the cache replaces it.
+pub struct GeneratedIcon(OwnedIcon);
+
+impl GeneratedIcon {
+    pub fn from_glyph(theme: ResolvedTheme, glyph: &TrayGlyph) -> Result<Self, String> {
+        let pixels = rasterize_tray_glyph(glyph, theme);
+        if pixels.len() != TRAY_ICON_SIZE * TRAY_ICON_SIZE * BYTES_PER_PIXEL {
+            return Err("numeric tray glyph has the wrong pixel count".to_owned());
+        }
+        create_icon(&BgraBitmap { pixels }).map(Self)
+    }
+
+    #[must_use]
+    pub const fn raw(&self) -> HICON {
+        self.0.raw()
     }
 }
 
@@ -188,7 +208,7 @@ fn create_icon(bitmap: &BgraBitmap) -> Result<OwnedIcon, String> {
         )
     };
     if color_bitmap.is_null() || destination.is_null() {
-        return Err("could not create a colour bitmap for a dog frame".to_owned());
+        return Err("could not create a colour bitmap for a tray icon".to_owned());
     }
 
     unsafe {
@@ -211,7 +231,7 @@ fn create_icon(bitmap: &BgraBitmap) -> Result<OwnedIcon, String> {
     };
     if mask_bitmap.is_null() {
         let _ = unsafe { DeleteObject(color_bitmap) };
-        return Err("could not create a transparency mask for a dog frame".to_owned());
+        return Err("could not create a transparency mask for a tray icon".to_owned());
     }
 
     let icon_info = ICONINFO {
@@ -225,7 +245,7 @@ fn create_icon(bitmap: &BgraBitmap) -> Result<OwnedIcon, String> {
     let _ = unsafe { DeleteObject(mask_bitmap) };
     let _ = unsafe { DeleteObject(color_bitmap) };
     if icon.is_null() {
-        return Err("could not create a dog icon".to_owned());
+        return Err("could not create a tray icon".to_owned());
     }
     Ok(OwnedIcon(icon))
 }
