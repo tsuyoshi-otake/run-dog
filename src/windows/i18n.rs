@@ -202,7 +202,7 @@ impl MenuText {
 
 const JA: MenuText = MenuText {
     display: "トレイ表示",
-    display_dog: "犬",
+    display_dog: "犬（CPU）",
     display_cpu: "CPU",
     display_memory: "メモリ",
     display_gpu: "GPU",
@@ -247,7 +247,7 @@ const JA: MenuText = MenuText {
 
 const EN: MenuText = MenuText {
     display: "Tray icon",
-    display_dog: "Dog",
+    display_dog: "Dog (CPU)",
     display_cpu: "CPU",
     display_memory: "Memory",
     display_gpu: "GPU",
@@ -292,7 +292,7 @@ const EN: MenuText = MenuText {
 
 const KO: MenuText = MenuText {
     display: "트레이 아이콘",
-    display_dog: "개",
+    display_dog: "개 (CPU)",
     display_cpu: "CPU",
     display_memory: "메모리",
     display_gpu: "GPU",
@@ -337,7 +337,7 @@ const KO: MenuText = MenuText {
 
 const ZH: MenuText = MenuText {
     display: "托盘图标",
-    display_dog: "狗",
+    display_dog: "狗（CPU）",
     display_cpu: "CPU",
     display_memory: "内存",
     display_gpu: "GPU",
@@ -382,7 +382,7 @@ const ZH: MenuText = MenuText {
 
 const ZH_HANT: MenuText = MenuText {
     display: "工作列圖示",
-    display_dog: "狗",
+    display_dog: "狗（CPU）",
     display_cpu: "CPU",
     display_memory: "記憶體",
     display_gpu: "GPU",
@@ -427,7 +427,7 @@ const ZH_HANT: MenuText = MenuText {
 
 const VI: MenuText = MenuText {
     display: "Biểu tượng khay",
-    display_dog: "Chó",
+    display_dog: "Chó (CPU)",
     display_cpu: "CPU",
     display_memory: "Bộ nhớ",
     display_gpu: "GPU",
@@ -472,7 +472,7 @@ const VI: MenuText = MenuText {
 
 const FR: MenuText = MenuText {
     display: "Icône de notification",
-    display_dog: "Chien",
+    display_dog: "Chien (CPU)",
     display_cpu: "CPU",
     display_memory: "Mémoire",
     display_gpu: "GPU",
@@ -517,7 +517,7 @@ const FR: MenuText = MenuText {
 
 const DE: MenuText = MenuText {
     display: "Infobereich",
-    display_dog: "Hund",
+    display_dog: "Hund (CPU)",
     display_cpu: "CPU",
     display_memory: "Speicher",
     display_gpu: "GPU",
@@ -562,7 +562,7 @@ const DE: MenuText = MenuText {
 
 const ES: MenuText = MenuText {
     display: "Icono de notificación",
-    display_dog: "Perro",
+    display_dog: "Perro (CPU)",
     display_cpu: "CPU",
     display_memory: "Memoria",
     display_gpu: "GPU",
@@ -607,7 +607,7 @@ const ES: MenuText = MenuText {
 
 const RU: MenuText = MenuText {
     display: "Значок в трее",
-    display_dog: "Собака",
+    display_dog: "Собака (CPU)",
     display_cpu: "CPU",
     display_memory: "Память",
     display_gpu: "GPU",
@@ -652,7 +652,7 @@ const RU: MenuText = MenuText {
 
 const IT: MenuText = MenuText {
     display: "Icona di notifica",
-    display_dog: "Cane",
+    display_dog: "Cane (CPU)",
     display_cpu: "CPU",
     display_memory: "Memoria",
     display_gpu: "GPU",
@@ -697,7 +697,7 @@ const IT: MenuText = MenuText {
 
 const TH: MenuText = MenuText {
     display: "ไอคอนถาด",
-    display_dog: "สุนัข",
+    display_dog: "สุนัข (CPU)",
     display_cpu: "CPU",
     display_memory: "หน่วยความจำ",
     display_gpu: "GPU",
@@ -788,6 +788,8 @@ mod tests {
         );
         assert_eq!(UiLanguage::Japanese.menu().about, "RunDog について");
         assert_eq!(UiLanguage::Japanese.menu().display, "トレイ表示");
+        assert_eq!(UiLanguage::Japanese.menu().display_dog, "犬（CPU）");
+        assert_eq!(en.display_dog, "Dog (CPU)");
         assert_eq!(
             UiLanguage::Japanese.menu().display_claude_5h,
             "Claude 5時間"
