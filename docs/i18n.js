@@ -37,7 +37,7 @@ export const I18N = {
       },
       {
         title: "トレイを数値にもできる",
-        body: "トレイ表示で犬、CPU、メモリ、GPU、Claude 5時間、Claude 週、Fable 週、Codex 5時間、Codex 週を切り替えます。古い・無いリミットは -- で、0% は作りません。設定は残ります。",
+        body: "トレイ表示で犬（CPU）、CPU、メモリ、GPU、Claude 5時間、Claude 週、Fable 週、Codex 5時間、Codex 週を切り替えます。古い・無いリミットは -- で、0% は作りません。設定は残ります。",
       },
       {
         title: "必要なメトリクスをカードで",
@@ -133,7 +133,7 @@ export const I18N = {
       },
       {
         title: "Numbers in the tray",
-        body: "Tray icon switches among Dog, CPU, Memory, GPU, Claude 5h, Claude week, Fable week, Codex 5h, and Codex week. Stale or missing limits show --, never a fabricated 0%. The setting persists.",
+        body: "Tray icon switches among Dog (CPU), CPU, Memory, GPU, Claude 5h, Claude week, Fable week, Codex 5h, and Codex week. Stale or missing limits show --, never a fabricated 0%. The setting persists.",
       },
       {
         title: "A compact system card",
@@ -228,7 +228,7 @@ export const I18N = {
       },
       {
         title: "托盘也可以显示数字",
-        body: "「托盘图标」可在狗、CPU、内存、GPU、Claude 5 小时、Claude 每周、Fable 每周、Codex 5 小时、Codex 每周之间切换。过期或缺失的限额显示 --，不会编造 0%。选择会保留。",
+        body: "「托盘图标」可在狗（CPU）、CPU、内存、GPU、Claude 5 小时、Claude 每周、Fable 每周、Codex 5 小时、Codex 每周之间切换。过期或缺失的限额显示 --，不会编造 0%。选择会保留。",
       },
       {
         title: "卡片里的系统信息",
@@ -321,7 +321,7 @@ export const I18N = {
       },
       {
         title: "工作列也可以顯示數字",
-        body: "「工作列圖示」可在狗、CPU、記憶體、GPU、Claude 5 小時、Claude 每週、Fable 每週、Codex 5 小時、Codex 每週之間切換。過期或缺失的限額顯示 --，不會編造 0%。選擇會保留。",
+        body: "「工作列圖示」可在狗（CPU）、CPU、記憶體、GPU、Claude 5 小時、Claude 每週、Fable 每週、Codex 5 小時、Codex 每週之間切換。過期或缺失的限額顯示 --，不會編造 0%。選擇會保留。",
       },
       {
         title: "卡片裡的系統資訊",
@@ -414,7 +414,7 @@ export const I18N = {
       },
       {
         title: "트레이에 숫자도 표시",
-        body: "트레이 아이콘에서 개, CPU, 메모리, GPU, Claude 5시간, Claude 주간, Fable 주간, Codex 5시간, Codex 주간을 전환합니다. 오래되거나 없는 한도는 --이며, 0%를 만들지 않습니다. 설정은 유지됩니다.",
+        body: "트레이 아이콘에서 개 (CPU), CPU, 메모리, GPU, Claude 5시간, Claude 주간, Fable 주간, Codex 5시간, Codex 주간을 전환합니다. 오래되거나 없는 한도는 --이며, 0%를 만들지 않습니다. 설정은 유지됩니다.",
       },
       {
         title: "필요한 지표를 카드로",
@@ -508,7 +508,7 @@ export const I18N = {
       },
       {
         title: "Số trên khay",
-        body: "Biểu tượng khay chuyển giữa Chó, CPU, Bộ nhớ, GPU, Claude 5 giờ, Claude tuần, Fable tuần, Codex 5 giờ và Codex tuần. Hạn mức cũ hoặc thiếu hiện --, không bịa 0%. Lựa chọn được lưu.",
+        body: "Biểu tượng khay chuyển giữa Chó (CPU), CPU, Bộ nhớ, GPU, Claude 5 giờ, Claude tuần, Fable tuần, Codex 5 giờ và Codex tuần. Hạn mức cũ hoặc thiếu hiện --, không bịa 0%. Lựa chọn được lưu.",
       },
       {
         title: "Thông số hệ thống trên thẻ",
@@ -602,7 +602,7 @@ export const I18N = {
       },
       {
         title: "Des chiffres dans la barre",
-        body: "Icône de notification bascule entre Chien, CPU, Mémoire, GPU, Claude 5 h, Claude semaine, Fable semaine, Codex 5 h et Codex semaine. Un plafond périmé ou absent affiche --, jamais un 0 % inventé. Le choix est conservé.",
+        body: "Icône de notification bascule entre Chien (CPU), CPU, Mémoire, GPU, Claude 5 h, Claude semaine, Fable semaine, Codex 5 h et Codex semaine. Un plafond périmé ou absent affiche --, jamais un 0 % inventé. Le choix est conservé.",
       },
       {
         title: "Une carte système compacte",
@@ -696,7 +696,7 @@ export const I18N = {
       },
       {
         title: "Zahlen im Infobereich",
-        body: "Infobereich wechselt zwischen Hund, CPU, Speicher, GPU, Claude 5 Std., Claude-Woche, Fable-Woche, Codex 5 Std. und Codex-Woche. Abgelaufene oder fehlende Limits zeigen --, nie ein erfundenes 0 %. Die Einstellung bleibt.",
+        body: "Infobereich wechselt zwischen Hund (CPU), CPU, Speicher, GPU, Claude 5 Std., Claude-Woche, Fable-Woche, Codex 5 Std. und Codex-Woche. Abgelaufene oder fehlende Limits zeigen --, nie ein erfundenes 0 %. Die Einstellung bleibt.",
       },
       {
         title: "Kompakte Systemkarte",
@@ -790,7 +790,7 @@ export const I18N = {
       },
       {
         title: "Números en la bandeja",
-        body: "Icono de notificación cambia entre Perro, CPU, Memoria, GPU, Claude 5 h, Claude semanal, Fable semanal, Codex 5 h y Codex semanal. Un límite caducado o ausente muestra --, nunca un 0 % inventado. La opción se guarda.",
+        body: "Icono de notificación cambia entre Perro (CPU), CPU, Memoria, GPU, Claude 5 h, Claude semanal, Fable semanal, Codex 5 h y Codex semanal. Un límite caducado o ausente muestra --, nunca un 0 % inventado. La opción se guarda.",
       },
       {
         title: "Una tarjeta de sistema compacta",
@@ -884,7 +884,7 @@ export const I18N = {
       },
       {
         title: "Цифры в трее",
-        body: "«Значок в трее» переключает Собака, CPU, Память, GPU, Claude 5 ч, Claude за неделю, Fable за неделю, Codex 5 ч и Codex за неделю. Просроченный или отсутствующий лимит — --, выдуманных 0% нет. Выбор сохраняется.",
+        body: "«Значок в трее» переключает Собака (CPU), CPU, Память, GPU, Claude 5 ч, Claude за неделю, Fable за неделю, Codex 5 ч и Codex за неделю. Просроченный или отсутствующий лимит — --, выдуманных 0% нет. Выбор сохраняется.",
       },
       {
         title: "Компактная системная карточка",
@@ -978,7 +978,7 @@ export const I18N = {
       },
       {
         title: "Numeri nel vassoio",
-        body: "Icona di notifica passa tra Cane, CPU, Memoria, GPU, Claude 5 ore, Claude settimanale, Fable settimanale, Codex 5 ore e Codex settimanale. Un limite scaduto o assente mostra --, mai uno 0% inventato. La scelta resta.",
+        body: "Icona di notifica passa tra Cane (CPU), CPU, Memoria, GPU, Claude 5 ore, Claude settimanale, Fable settimanale, Codex 5 ore e Codex settimanale. Un limite scaduto o assente mostra --, mai uno 0% inventato. La scelta resta.",
       },
       {
         title: "Una scheda di sistema compatta",
@@ -1072,7 +1072,7 @@ export const I18N = {
       },
       {
         title: "ตัวเลขในถาดระบบ",
-        body: "ไอคอนถาดสลับระหว่างสุนัข CPU หน่วยความจำ GPU Claude 5 ชม. Claude รายสัปดาห์ Fable รายสัปดาห์ Codex 5 ชม. และ Codex รายสัปดาห์ โควตาที่หมดอายุหรือไม่มีแสดง -- ไม่สร้าง 0% การตั้งค่าจะคงอยู่",
+        body: "ไอคอนถาดสลับระหว่างสุนัข (CPU) CPU หน่วยความจำ GPU Claude 5 ชม. Claude รายสัปดาห์ Fable รายสัปดาห์ Codex 5 ชม. และ Codex รายสัปดาห์ โควตาที่หมดอายุหรือไม่มีแสดง -- ไม่สร้าง 0% การตั้งค่าจะคงอยู่",
       },
       {
         title: "การ์ดระบบแบบกระชับ",
