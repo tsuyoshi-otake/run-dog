@@ -58,7 +58,7 @@ use crate::core::UsageCheckpoint;
 use super::usage_store::FileUsageStore;
 
 pub const USAGE_TIMER_ID: usize = 4;
-pub const USAGE_READY_MESSAGE: u32 = 0x8000 + 3;
+pub use super::messages::USAGE_READY_MESSAGE;
 pub const USAGE_FIRST_INTERVAL_MS: u32 = 8_000;
 pub const USAGE_IDLE_INTERVAL_MS: u32 = 60_000;
 pub const USAGE_CONTINUE_INTERVAL_MS: u32 = 400;

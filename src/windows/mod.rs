@@ -8,6 +8,7 @@ mod gpu;
 mod i18n;
 mod icons;
 mod memory;
+mod messages;
 mod notify_icon;
 mod process;
 pub mod registry;
@@ -57,15 +58,19 @@ use crate::{
 use self::{
     cpu::WindowsCpuSource,
     icons::IconFrames,
+    messages::{
+        UPDATE_CHECK_DONE_MESSAGE, UPDATE_REQUEST_EXIT_MESSAGE, USAGE_READY_MESSAGE,
+        WM_SHOW_TRAY_MENU,
+    },
     tray::{
         event_for_command, TrayAdapter, COMMAND_ABOUT, COMMAND_CHECK_FOR_UPDATES,
         COMMAND_INSTALL_UPDATE, COMMAND_RESCAN_MONTH_USAGE, COMMAND_TOGGLE_PINNED_FLYOUT,
         PROMOTE_TIMER_ID, TRAY_CALLBACK_MESSAGE,
     },
-    update::{UpdateController, UPDATE_CHECK_DONE_MESSAGE, UPDATE_REQUEST_EXIT_MESSAGE},
+    update::UpdateController,
     usage::{
         UsageCollector, UsageTick, USAGE_CONTINUE_INTERVAL_MS, USAGE_FIRST_INTERVAL_MS,
-        USAGE_IDLE_INTERVAL_MS, USAGE_READY_MESSAGE, USAGE_TIMER_ID,
+        USAGE_IDLE_INTERVAL_MS, USAGE_TIMER_ID,
     },
 };
 
@@ -74,9 +79,6 @@ const MUTEX_NAME: &str = "Local\\SystemExe.RunDog";
 const TASKBAR_CREATED_MESSAGE: &str = "TaskbarCreated";
 const TIMER_CPU: usize = 1;
 const TIMER_ANIMATION: usize = 2;
-/// Deferred tray context menu. Posted from the shell callback so the opening
-/// right-button release cannot activate a menu item underneath the cursor.
-const WM_SHOW_TRAY_MENU: u32 = 0x8000 + 2;
 
 /// Creates the hidden message window and runs the single-threaded tray loop.
 pub fn run() -> Result<(), String> {
