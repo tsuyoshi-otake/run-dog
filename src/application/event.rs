@@ -21,6 +21,7 @@ pub enum Event {
     SelectFpsLimit(FpsLimit),
     SelectDisplayMode(TrayDisplayMode),
     ToggleStartup,
+    ToggleAutoUpdate,
     SettingsCommitFinished {
         settings: AppSettings,
         status: CommitStatus,

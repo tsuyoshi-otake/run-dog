@@ -8,6 +8,7 @@ pub struct AppSettings {
     pub fps_limit: FpsLimit,
     pub launch_at_startup: bool,
     pub display_mode: TrayDisplayMode,
+    pub auto_update_on_startup: bool,
 }
 
 impl Default for AppSettings {
@@ -17,6 +18,7 @@ impl Default for AppSettings {
             fps_limit: FpsLimit::default(),
             launch_at_startup: false,
             display_mode: TrayDisplayMode::default(),
+            auto_update_on_startup: true,
         }
     }
 }
@@ -28,6 +30,7 @@ impl AppSettings {
         fps_limit: Option<&str>,
         launch_at_startup: Option<bool>,
         display_mode: Option<&str>,
+        auto_update_on_startup: Option<bool>,
     ) -> Self {
         Self {
             theme: theme
@@ -40,6 +43,7 @@ impl AppSettings {
             display_mode: display_mode
                 .and_then(TrayDisplayMode::parse_persisted)
                 .unwrap_or_default(),
+            auto_update_on_startup: auto_update_on_startup.unwrap_or(true),
         }
     }
 }
@@ -56,6 +60,7 @@ pub struct SettingsRecord {
 const RECORD_HEADER_V1: &str = "rundog-settings-1";
 const RECORD_HEADER_V2: &str = "rundog-settings-2";
 const RECORD_HEADER_V3: &str = "rundog-settings-3";
+const RECORD_HEADER_V4: &str = "rundog-settings-4";
 
 impl SettingsRecord {
     #[must_use]
@@ -70,13 +75,14 @@ impl SettingsRecord {
     #[must_use]
     pub fn encode(self) -> String {
         format!(
-            "{RECORD_HEADER_V3}\ngeneration={}\noperation_id={}\ntheme={}\nfps={}\nstartup={}\ndisplay={}\n",
+            "{RECORD_HEADER_V4}\ngeneration={}\noperation_id={}\ntheme={}\nfps={}\nstartup={}\ndisplay={}\nauto_update={}\n",
             self.generation,
             self.last_operation_id,
             self.settings.theme.persisted_name(),
             self.settings.fps_limit.persisted_name(),
             u8::from(self.settings.launch_at_startup),
             self.settings.display_mode.persisted_name(),
+            u8::from(self.settings.auto_update_on_startup),
         )
     }
 
@@ -85,6 +91,30 @@ impl SettingsRecord {
         let mut lines = payload.lines();
         let header = lines.next()?;
         match header {
+            RECORD_HEADER_V4 => {
+                let generation = parse_field(lines.next()?, "generation")?.parse().ok()?;
+                let last_operation_id = parse_field(lines.next()?, "operation_id")?.parse().ok()?;
+                let theme = ThemePreference::parse_persisted(parse_field(lines.next()?, "theme")?)?;
+                let fps_limit = FpsLimit::parse_persisted(parse_field(lines.next()?, "fps")?)?;
+                let startup = parse_bool01(parse_field(lines.next()?, "startup")?)?;
+                let display_mode =
+                    TrayDisplayMode::parse_persisted(parse_field(lines.next()?, "display")?)?;
+                let auto_update = parse_bool01(parse_field(lines.next()?, "auto_update")?)?;
+                if lines.next().is_some() {
+                    return None;
+                }
+                Some(Self {
+                    generation,
+                    last_operation_id,
+                    settings: AppSettings {
+                        theme,
+                        fps_limit,
+                        launch_at_startup: startup,
+                        display_mode,
+                        auto_update_on_startup: auto_update,
+                    },
+                })
+            }
             RECORD_HEADER_V3 => {
                 let generation = parse_field(lines.next()?, "generation")?.parse().ok()?;
                 let last_operation_id = parse_field(lines.next()?, "operation_id")?.parse().ok()?;
@@ -104,6 +134,7 @@ impl SettingsRecord {
                         fps_limit,
                         launch_at_startup: startup,
                         display_mode,
+                        auto_update_on_startup: true,
                     },
                 })
             }
@@ -124,6 +155,7 @@ impl SettingsRecord {
                         fps_limit,
                         launch_at_startup: startup,
                         display_mode: TrayDisplayMode::Dog,
+                        auto_update_on_startup: true,
                     },
                 })
             }
@@ -143,6 +175,7 @@ impl SettingsRecord {
                         fps_limit,
                         launch_at_startup: startup,
                         display_mode: TrayDisplayMode::Dog,
+                        auto_update_on_startup: true,
                     },
                 })
             }
@@ -165,12 +198,13 @@ pub struct PendingJournal {
 
 const PENDING_HEADER_V1: &str = "rundog-pending-1";
 const PENDING_HEADER_V2: &str = "rundog-pending-2";
+const PENDING_HEADER_V3: &str = "rundog-pending-3";
 
 impl PendingJournal {
     #[must_use]
     pub fn encode(self) -> String {
         format!(
-            "{PENDING_HEADER_V2}\noperation_id={}\nbase_generation={}\nsync_run={}\ndeadline={}\ndesired_theme={}\ndesired_fps={}\ndesired_startup={}\ndesired_display={}\nprevious_theme={}\nprevious_fps={}\nprevious_startup={}\nprevious_display={}\n",
+            "{PENDING_HEADER_V3}\noperation_id={}\nbase_generation={}\nsync_run={}\ndeadline={}\ndesired_theme={}\ndesired_fps={}\ndesired_startup={}\ndesired_display={}\ndesired_auto_update={}\nprevious_theme={}\nprevious_fps={}\nprevious_startup={}\nprevious_display={}\nprevious_auto_update={}\n",
             self.operation_id,
             self.base_generation,
             u8::from(self.sync_run_entry),
@@ -179,10 +213,12 @@ impl PendingJournal {
             self.desired.fps_limit.persisted_name(),
             u8::from(self.desired.launch_at_startup),
             self.desired.display_mode.persisted_name(),
+            u8::from(self.desired.auto_update_on_startup),
             self.previous.theme.persisted_name(),
             self.previous.fps_limit.persisted_name(),
             u8::from(self.previous.launch_at_startup),
             self.previous.display_mode.persisted_name(),
+            u8::from(self.previous.auto_update_on_startup),
         )
     }
 
@@ -197,7 +233,7 @@ impl PendingJournal {
         let sync_run_entry = parse_bool01(parse_field(lines.next()?, "sync_run")?)?;
         let deadline_millis = parse_field(lines.next()?, "deadline")?.parse().ok()?;
         match header {
-            PENDING_HEADER_V2 => {
+            PENDING_HEADER_V3 => {
                 let desired = AppSettings {
                     theme: ThemePreference::parse_persisted(parse_field(
                         lines.next()?,
@@ -214,6 +250,10 @@ impl PendingJournal {
                     display_mode: TrayDisplayMode::parse_persisted(parse_field(
                         lines.next()?,
                         "desired_display",
+                    )?)?,
+                    auto_update_on_startup: parse_bool01(parse_field(
+                        lines.next()?,
+                        "desired_auto_update",
                     )?)?,
                 };
                 let previous = AppSettings {
@@ -233,6 +273,61 @@ impl PendingJournal {
                         lines.next()?,
                         "previous_display",
                     )?)?,
+                    auto_update_on_startup: parse_bool01(parse_field(
+                        lines.next()?,
+                        "previous_auto_update",
+                    )?)?,
+                };
+                if lines.next().is_some() {
+                    return None;
+                }
+                Some(Self {
+                    operation_id,
+                    base_generation,
+                    desired,
+                    previous,
+                    sync_run_entry,
+                    deadline_millis,
+                })
+            }
+            PENDING_HEADER_V2 => {
+                let desired = AppSettings {
+                    theme: ThemePreference::parse_persisted(parse_field(
+                        lines.next()?,
+                        "desired_theme",
+                    )?)?,
+                    fps_limit: FpsLimit::parse_persisted(parse_field(
+                        lines.next()?,
+                        "desired_fps",
+                    )?)?,
+                    launch_at_startup: parse_bool01(parse_field(
+                        lines.next()?,
+                        "desired_startup",
+                    )?)?,
+                    display_mode: TrayDisplayMode::parse_persisted(parse_field(
+                        lines.next()?,
+                        "desired_display",
+                    )?)?,
+                    auto_update_on_startup: true,
+                };
+                let previous = AppSettings {
+                    theme: ThemePreference::parse_persisted(parse_field(
+                        lines.next()?,
+                        "previous_theme",
+                    )?)?,
+                    fps_limit: FpsLimit::parse_persisted(parse_field(
+                        lines.next()?,
+                        "previous_fps",
+                    )?)?,
+                    launch_at_startup: parse_bool01(parse_field(
+                        lines.next()?,
+                        "previous_startup",
+                    )?)?,
+                    display_mode: TrayDisplayMode::parse_persisted(parse_field(
+                        lines.next()?,
+                        "previous_display",
+                    )?)?,
+                    auto_update_on_startup: true,
                 };
                 if lines.next().is_some() {
                     return None;
@@ -261,6 +356,7 @@ impl PendingJournal {
                         "desired_startup",
                     )?)?,
                     display_mode: TrayDisplayMode::Dog,
+                    auto_update_on_startup: true,
                 };
                 let previous = AppSettings {
                     theme: ThemePreference::parse_persisted(parse_field(
@@ -276,6 +372,7 @@ impl PendingJournal {
                         "previous_startup",
                     )?)?,
                     display_mode: TrayDisplayMode::Dog,
+                    auto_update_on_startup: true,
                 };
                 if lines.next().is_some() {
                     return None;
@@ -316,26 +413,40 @@ mod tests {
     #[test]
     fn c2_persisted_settings_cover_valid_and_invalid_optional_values() {
         assert_eq!(
-            AppSettings::from_persisted(None, None, None, None),
+            AppSettings::from_persisted(None, None, None, None, None),
             AppSettings::default()
         );
+        assert!(AppSettings::default().auto_update_on_startup);
         assert_eq!(
-            AppSettings::from_persisted(Some("dark"), Some("30"), Some(true), Some("cpu")),
+            AppSettings::from_persisted(
+                Some("dark"),
+                Some("30"),
+                Some(true),
+                Some("cpu"),
+                Some(false)
+            ),
             AppSettings {
                 theme: ThemePreference::Dark,
                 fps_limit: FpsLimit::Fps30,
                 launch_at_startup: true,
                 display_mode: TrayDisplayMode::Cpu,
+                auto_update_on_startup: false,
             }
         );
         assert_eq!(
-            AppSettings::from_persisted(Some("invalid"), Some("999"), Some(false), Some("parrot")),
+            AppSettings::from_persisted(
+                Some("invalid"),
+                Some("999"),
+                Some(false),
+                Some("parrot"),
+                None
+            ),
             AppSettings::default()
         );
     }
 
     #[test]
-    fn c2_settings_record_round_trips_v3_and_accepts_older_upgrades() {
+    fn c2_settings_record_round_trips_v4_and_accepts_older_upgrades() {
         let record = SettingsRecord::new(
             7,
             11,
@@ -344,9 +455,27 @@ mod tests {
                 fps_limit: FpsLimit::Fps40,
                 launch_at_startup: true,
                 display_mode: TrayDisplayMode::CodexWeek,
+                auto_update_on_startup: false,
             },
         );
         assert_eq!(SettingsRecord::decode(&record.encode()), Some(record));
+        assert!(record.encode().starts_with("rundog-settings-4\n"));
+
+        let legacy_v3 = "rundog-settings-3\ngeneration=5\noperation_id=9\ntheme=dark\nfps=20\nstartup=0\ndisplay=cpu\n";
+        assert_eq!(
+            SettingsRecord::decode(legacy_v3),
+            Some(SettingsRecord::new(
+                5,
+                9,
+                AppSettings {
+                    theme: ThemePreference::Dark,
+                    fps_limit: FpsLimit::Fps20,
+                    launch_at_startup: false,
+                    display_mode: TrayDisplayMode::Cpu,
+                    auto_update_on_startup: true,
+                }
+            ))
+        );
 
         let legacy_v2 =
             "rundog-settings-2\ngeneration=4\noperation_id=8\ntheme=light\nfps=10\nstartup=1\n";
@@ -360,6 +489,7 @@ mod tests {
                     fps_limit: FpsLimit::Fps10,
                     launch_at_startup: true,
                     display_mode: TrayDisplayMode::Dog,
+                    auto_update_on_startup: true,
                 }
             ))
         );
@@ -375,11 +505,16 @@ mod tests {
                     fps_limit: FpsLimit::Fps20,
                     launch_at_startup: false,
                     display_mode: TrayDisplayMode::Dog,
+                    auto_update_on_startup: true,
                 }
             ))
         );
         assert_eq!(
             SettingsRecord::decode("rundog-settings-3\ngeneration=1\n"),
+            None
+        );
+        assert_eq!(
+            SettingsRecord::decode("rundog-settings-4\ngeneration=1\n"),
             None
         );
     }
@@ -394,6 +529,7 @@ mod tests {
                 fps_limit: FpsLimit::Fps30,
                 launch_at_startup: true,
                 display_mode: TrayDisplayMode::Memory,
+                auto_update_on_startup: false,
             },
             previous: AppSettings::default(),
             sync_run_entry: true,
@@ -412,6 +548,7 @@ mod tests {
                     fps_limit: FpsLimit::Fps10,
                     launch_at_startup: true,
                     display_mode: TrayDisplayMode::Dog,
+                    auto_update_on_startup: true,
                 },
                 previous: AppSettings::default(),
                 sync_run_entry: false,
@@ -427,17 +564,20 @@ mod tests {
             fps in "[^\\x00]{0,40}",
             startup in any::<bool>(),
             display in "[^\\x00]{0,40}",
+            auto_update in any::<bool>(),
         ) {
             let settings = AppSettings::from_persisted(
                 Some(&theme),
                 Some(&fps),
                 Some(startup),
                 Some(&display),
+                Some(auto_update),
             );
             prop_assert!(ThemePreference::ALL.contains(&settings.theme));
             prop_assert!(FpsLimit::ALL.contains(&settings.fps_limit));
             prop_assert_eq!(settings.launch_at_startup, startup);
             prop_assert!(TrayDisplayMode::ALL.contains(&settings.display_mode));
+            prop_assert_eq!(settings.auto_update_on_startup, auto_update);
         }
 
         #[test]
@@ -448,6 +588,7 @@ mod tests {
             fps_limit in prop::sample::select(FpsLimit::ALL.to_vec()),
             launch_at_startup in any::<bool>(),
             display_mode in prop::sample::select(TrayDisplayMode::ALL.to_vec()),
+            auto_update_on_startup in any::<bool>(),
         ) {
             let record = SettingsRecord::new(
                 generation,
@@ -457,6 +598,7 @@ mod tests {
                     fps_limit,
                     launch_at_startup,
                     display_mode,
+                    auto_update_on_startup,
                 },
             );
             prop_assert_eq!(SettingsRecord::decode(&record.encode()), Some(record));

@@ -103,7 +103,7 @@ impl EffectPort for NonLivePort {
 }
 
 fn event_from_code(code: u8, times: &mut SystemTimes) -> Event {
-    match code % 12 {
+    match code % 13 {
         0 => {
             let kernel_delta = 100_u64;
             let idle_delta = u64::from(code) * 10;
@@ -127,8 +127,9 @@ fn event_from_code(code: u8, times: &mut SystemTimes) -> Event {
         6 => Event::SelectTheme(ThemePreference::Dark),
         7 => Event::SelectFpsLimit(FpsLimit::Fps10),
         8 => Event::ToggleStartup,
-        9 => Event::SelectDisplayMode(TrayDisplayMode::Cpu),
-        10 => Event::SelectDisplayMode(TrayDisplayMode::CodexWeek),
+        9 => Event::ToggleAutoUpdate,
+        10 => Event::SelectDisplayMode(TrayDisplayMode::Cpu),
+        11 => Event::SelectDisplayMode(TrayDisplayMode::CodexWeek),
         _ => Event::TaskbarRecreated,
     }
 }
