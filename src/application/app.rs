@@ -168,6 +168,10 @@ impl App {
             Effect::SetFpsMenu(self.settings.fps_limit),
             Effect::SetDisplayMenu(self.settings.display_mode),
             Effect::SetStartupMenu(self.settings.launch_at_startup),
+            Effect::SetAutoUpdateMenu(self.settings.auto_update_on_startup),
+            Effect::CheckForUpdates {
+                auto_install: self.settings.auto_update_on_startup,
+            },
         ]
     }
 
@@ -199,6 +203,7 @@ impl App {
             Event::SelectFpsLimit(limit) => self.handle_fps_selection(limit),
             Event::SelectDisplayMode(mode) => self.handle_display_selection(mode),
             Event::ToggleStartup => self.handle_startup_toggle(),
+            Event::ToggleAutoUpdate => self.handle_auto_update_toggle(),
             Event::SettingsCommitFinished {
                 settings,
                 status,
@@ -339,6 +344,21 @@ impl App {
         effects
     }
 
+    fn handle_auto_update_toggle(&mut self) -> Vec<Effect> {
+        if self.pending_commit.is_some() {
+            return Vec::new();
+        }
+        let previous = self.settings;
+        let mut settings = self.settings;
+        settings.auto_update_on_startup = !settings.auto_update_on_startup;
+        let mut effects = self.begin_commit(settings, previous, false);
+        effects.insert(
+            0,
+            Effect::SetAutoUpdateMenu(settings.auto_update_on_startup),
+        );
+        effects
+    }
+
     fn begin_commit(
         &mut self,
         settings: AppSettings,
@@ -390,6 +410,7 @@ impl App {
                 Effect::SetFpsMenu(self.settings.fps_limit),
                 Effect::SetDisplayMenu(self.settings.display_mode),
                 Effect::SetStartupMenu(self.settings.launch_at_startup),
+                Effect::SetAutoUpdateMenu(self.settings.auto_update_on_startup),
             ];
         }
 
@@ -400,6 +421,7 @@ impl App {
                 Effect::SetFpsMenu(self.settings.fps_limit),
                 Effect::SetDisplayMenu(self.settings.display_mode),
                 Effect::SetStartupMenu(self.settings.launch_at_startup),
+                Effect::SetAutoUpdateMenu(self.settings.auto_update_on_startup),
             ];
         }
 
@@ -415,10 +437,16 @@ impl App {
             Effect::SetFpsMenu(self.settings.fps_limit),
             Effect::SetDisplayMenu(self.settings.display_mode),
             Effect::SetStartupMenu(self.settings.launch_at_startup),
+            Effect::SetAutoUpdateMenu(self.settings.auto_update_on_startup),
         ];
         if notify_startup {
             effects.push(Effect::NotifyStartupChanged(
                 self.settings.launch_at_startup,
+            ));
+        }
+        if pending.previous.auto_update_on_startup != self.settings.auto_update_on_startup {
+            effects.push(Effect::NotifyAutoUpdateChanged(
+                self.settings.auto_update_on_startup,
             ));
         }
         if previous_resolved_theme != self.resolved_theme
@@ -531,7 +559,61 @@ mod tests {
             kind: TimerKind::Animation,
             interval_ms: 200,
         }));
+        assert!(effects.contains(&Effect::CheckForUpdates { auto_install: true }));
+        assert!(effects.contains(&Effect::SetAutoUpdateMenu(true)));
         assert!(app.start().is_empty());
+    }
+
+    #[test]
+    fn c2_startup_auto_update_off_still_checks_but_does_not_auto_install() {
+        let mut app = App::new(
+            AppSettings {
+                auto_update_on_startup: false,
+                ..AppSettings::default()
+            },
+            ResolvedTheme::Dark,
+        );
+        let effects = app.start();
+        assert!(effects.contains(&Effect::CheckForUpdates {
+            auto_install: false
+        }));
+        assert!(effects.contains(&Effect::SetAutoUpdateMenu(false)));
+    }
+
+    #[test]
+    fn c2_auto_update_toggle_waits_for_durable_ack() {
+        let mut app = started_app();
+        assert!(app.snapshot().settings.auto_update_on_startup);
+        let effects = app.dispatch(Event::ToggleAutoUpdate);
+        assert!(effects.contains(&Effect::SetAutoUpdateMenu(false)));
+        assert!(matches!(
+            effects
+                .iter()
+                .find(|effect| matches!(effect, Effect::CommitSettings { .. })),
+            Some(Effect::CommitSettings {
+                settings: AppSettings {
+                    auto_update_on_startup: false,
+                    ..
+                },
+                sync_run_entry: false,
+                ..
+            })
+        ));
+        assert!(app.snapshot().settings.auto_update_on_startup);
+        assert!(app.dispatch(Event::ToggleAutoUpdate).is_empty());
+
+        let effects = app.dispatch(Event::SettingsCommitFinished {
+            settings: AppSettings {
+                auto_update_on_startup: false,
+                ..AppSettings::default()
+            },
+            status: CommitStatus::Applied,
+            new_generation: 1,
+            last_operation_id: 1,
+        });
+        assert!(!app.snapshot().settings.auto_update_on_startup);
+        assert!(effects.contains(&Effect::SetAutoUpdateMenu(false)));
+        assert!(effects.contains(&Effect::NotifyAutoUpdateChanged(false)));
     }
 
     #[test]

@@ -229,6 +229,9 @@ impl EffectPort for FakePlatform {
             | Effect::SetDisplayMenu(_)
             | Effect::SetStartupMenu(_)
             | Effect::NotifyStartupChanged(_)
+            | Effect::SetAutoUpdateMenu(_)
+            | Effect::NotifyAutoUpdateChanged(_)
+            | Effect::CheckForUpdates { .. }
             | Effect::CommitSettings { .. }
             | Effect::CancelCommit { .. } => {}
         }
@@ -308,6 +311,37 @@ fn integration_boot_uses_only_fake_ports_and_configures_the_two_timers() {
         Some("CPU: --.-%\nMemory: --.-%")
     );
     assert_eq!(rig.app.snapshot().frame, 0);
+    assert!(rig.app.snapshot().settings.auto_update_on_startup);
+    assert!(rig
+        .platform
+        .effects
+        .contains(&Effect::CheckForUpdates { auto_install: true }));
+}
+
+#[test]
+fn integration_auto_update_toggle_persists_and_off_still_checks_on_boot() {
+    let mut rig = TestRig::boot(AppSettings::default(), ResolvedTheme::Dark, [], []);
+    assert!(rig.app.snapshot().settings.auto_update_on_startup);
+
+    rig.event(Event::ToggleAutoUpdate);
+    assert!(!rig.app.snapshot().settings.auto_update_on_startup);
+    assert!(!rig.platform.record.settings.auto_update_on_startup);
+    assert_eq!(
+        rig.platform
+            .saved_settings
+            .last()
+            .map(|settings| settings.auto_update_on_startup),
+        Some(false)
+    );
+
+    let recovered = TestRig::boot(rig.platform.record.settings, ResolvedTheme::Dark, [], []);
+    assert!(!recovered.app.snapshot().settings.auto_update_on_startup);
+    assert!(recovered
+        .platform
+        .effects
+        .contains(&Effect::CheckForUpdates {
+            auto_install: false
+        }));
 }
 
 #[test]

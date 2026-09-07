@@ -56,6 +56,7 @@ fn live_hive_commit_is_atomic_and_survives_reload() {
             fps_limit: FpsLimit::Fps30,
             launch_at_startup: false,
             display_mode: run_dog::core::TrayDisplayMode::Dog,
+            auto_update_on_startup: true,
         },
         previous: AppSettings::default(),
         sync_run_entry: false,
@@ -79,6 +80,7 @@ fn live_hive_duplicate_operation_id_is_rejected_as_duplicate() {
         fps_limit: FpsLimit::Fps10,
         launch_at_startup: false,
         display_mode: run_dog::core::TrayDisplayMode::Dog,
+        auto_update_on_startup: true,
     };
     assert_eq!(
         guard
@@ -152,6 +154,7 @@ fn live_hive_crash_recovery_finishes_pending_run_sync() {
         fps_limit: FpsLimit::Fps20,
         launch_at_startup: true,
         display_mode: run_dog::core::TrayDisplayMode::Dog,
+        auto_update_on_startup: true,
     };
     let written = SettingsRecord::new(1, 8, desired);
     assert!(guard.store.write_record(written, 0));
@@ -210,6 +213,38 @@ fn live_hive_startup_run_entry_round_trips_on_and_off() {
     });
     assert_eq!(enabled_again.status, CommitStatus::Applied);
     assert!(guard.store.load_record().settings.launch_at_startup);
+}
+
+#[test]
+fn live_hive_auto_update_round_trips_on_and_off() {
+    let mut guard = HiveGuard::new("auto-update-roundtrip");
+    let on = AppSettings::default();
+    let off = AppSettings {
+        auto_update_on_startup: false,
+        ..on
+    };
+
+    let disabled = guard.store.execute_commit(CommitRequest {
+        operation_id: 1,
+        expected_generation: 0,
+        settings: off,
+        previous: on,
+        sync_run_entry: false,
+        deadline_millis: 5_000,
+    });
+    assert_eq!(disabled.status, CommitStatus::Applied);
+    assert!(!guard.store.load_record().settings.auto_update_on_startup);
+
+    let enabled = guard.store.execute_commit(CommitRequest {
+        operation_id: 2,
+        expected_generation: 1,
+        settings: on,
+        previous: off,
+        sync_run_entry: false,
+        deadline_millis: 5_000,
+    });
+    assert_eq!(enabled.status, CommitStatus::Applied);
+    assert!(guard.store.load_record().settings.auto_update_on_startup);
 }
 
 #[test]

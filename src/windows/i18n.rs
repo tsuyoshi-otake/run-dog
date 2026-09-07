@@ -152,6 +152,8 @@ pub struct MenuText {
     pub fps_40: &'static str,
     pub startup_on: &'static str,
     pub startup_off: &'static str,
+    pub auto_update_on: &'static str,
+    pub auto_update_off: &'static str,
     pub pin_on: &'static str,
     pub pin_off: &'static str,
     pub rescan_month: &'static str,
@@ -168,6 +170,8 @@ pub struct MenuText {
     pub exit: &'static str,
     pub balloon_startup_on: &'static str,
     pub balloon_startup_off: &'static str,
+    pub balloon_auto_update_on: &'static str,
+    pub balloon_auto_update_off: &'static str,
     pub balloon_rescan_started: &'static str,
     pub balloon_rescan_finished: &'static str,
     pub balloon_up_to_date: &'static str,
@@ -182,6 +186,15 @@ impl MenuText {
             self.startup_on
         } else {
             self.startup_off
+        }
+    }
+
+    #[must_use]
+    pub const fn auto_update(self, enabled: bool) -> &'static str {
+        if enabled {
+            self.auto_update_on
+        } else {
+            self.auto_update_off
         }
     }
 
@@ -222,6 +235,8 @@ const JA: MenuText = MenuText {
     fps_40: "40 FPS",
     startup_on: "スタートアップで起動: オン",
     startup_off: "スタートアップで起動: オフ",
+    auto_update_on: "起動時に自動更新: オン",
+    auto_update_off: "起動時に自動更新: オフ",
     pin_on: "モニターカードを固定: オン",
     pin_off: "モニターカードを固定: オフ",
     rescan_month: "今月の利用状況を再スキャン",
@@ -238,6 +253,8 @@ const JA: MenuText = MenuText {
     exit: "終了",
     balloon_startup_on: "スタートアップで起動はオンです。",
     balloon_startup_off: "スタートアップで起動はオフです。",
+    balloon_auto_update_on: "起動時の自動更新はオンです。",
+    balloon_auto_update_off: "起動時の自動更新はオフです。",
     balloon_rescan_started: "今月の利用状況の再スキャンを開始しました。",
     balloon_rescan_finished: "今月の利用状況のスキャンが完了しました。",
     balloon_up_to_date: "RunDog は最新版です。",
@@ -267,6 +284,8 @@ const EN: MenuText = MenuText {
     fps_40: "40 FPS",
     startup_on: "Launch at startup: On",
     startup_off: "Launch at startup: Off",
+    auto_update_on: "Auto-update on startup: On",
+    auto_update_off: "Auto-update on startup: Off",
     pin_on: "Pin monitor card: On",
     pin_off: "Pin monitor card: Off",
     rescan_month: "Full scan: current month usage",
@@ -283,6 +302,8 @@ const EN: MenuText = MenuText {
     exit: "Exit",
     balloon_startup_on: "Launch at startup is on.",
     balloon_startup_off: "Launch at startup is off.",
+    balloon_auto_update_on: "Auto-update on startup is on.",
+    balloon_auto_update_off: "Auto-update on startup is off.",
     balloon_rescan_started: "Full scan of current month usage started.",
     balloon_rescan_finished: "Current month usage scan complete.",
     balloon_up_to_date: "RunDog is up to date.",
@@ -312,6 +333,8 @@ const KO: MenuText = MenuText {
     fps_40: "40 FPS",
     startup_on: "시작 시 실행: 켜짐",
     startup_off: "시작 시 실행: 꺼짐",
+    auto_update_on: "시작 시 자동 업데이트: 켜짐",
+    auto_update_off: "시작 시 자동 업데이트: 꺼짐",
     pin_on: "모니터 카드 고정: 켜짐",
     pin_off: "모니터 카드 고정: 꺼짐",
     rescan_month: "이번 달 사용량 전체 스캔",
@@ -328,6 +351,8 @@ const KO: MenuText = MenuText {
     exit: "종료",
     balloon_startup_on: "시작 시 실행이 켜졌습니다.",
     balloon_startup_off: "시작 시 실행이 꺼졌습니다.",
+    balloon_auto_update_on: "시작 시 자동 업데이트가 켜졌습니다.",
+    balloon_auto_update_off: "시작 시 자동 업데이트가 꺼졌습니다.",
     balloon_rescan_started: "이번 달 사용량 전체 스캔을 시작했습니다.",
     balloon_rescan_finished: "이번 달 사용량 스캔이 완료되었습니다.",
     balloon_up_to_date: "RunDog는 최신 버전입니다.",
@@ -357,6 +382,8 @@ const ZH: MenuText = MenuText {
     fps_40: "40 FPS",
     startup_on: "开机启动: 开",
     startup_off: "开机启动: 关",
+    auto_update_on: "启动时自动更新: 开",
+    auto_update_off: "启动时自动更新: 关",
     pin_on: "固定监视卡片: 开",
     pin_off: "固定监视卡片: 关",
     rescan_month: "完整扫描本月用量",
@@ -373,6 +400,8 @@ const ZH: MenuText = MenuText {
     exit: "退出",
     balloon_startup_on: "开机启动已打开。",
     balloon_startup_off: "开机启动已关闭。",
+    balloon_auto_update_on: "启动时自动更新已打开。",
+    balloon_auto_update_off: "启动时自动更新已关闭。",
     balloon_rescan_started: "已开始完整扫描本月用量。",
     balloon_rescan_finished: "本月用量扫描已完成。",
     balloon_up_to_date: "RunDog 已是最新版本。",
@@ -402,6 +431,8 @@ const ZH_HANT: MenuText = MenuText {
     fps_40: "40 FPS",
     startup_on: "開機啟動: 開",
     startup_off: "開機啟動: 關",
+    auto_update_on: "啟動時自動更新: 開",
+    auto_update_off: "啟動時自動更新: 關",
     pin_on: "固定監視卡片: 開",
     pin_off: "固定監視卡片: 關",
     rescan_month: "完整掃描本月用量",
@@ -418,6 +449,8 @@ const ZH_HANT: MenuText = MenuText {
     exit: "結束",
     balloon_startup_on: "開機啟動已打開。",
     balloon_startup_off: "開機啟動已關閉。",
+    balloon_auto_update_on: "啟動時自動更新已打開。",
+    balloon_auto_update_off: "啟動時自動更新已關閉。",
     balloon_rescan_started: "已開始完整掃描本月用量。",
     balloon_rescan_finished: "本月用量掃描已完成。",
     balloon_up_to_date: "RunDog 已是最新版本。",
@@ -447,6 +480,8 @@ const VI: MenuText = MenuText {
     fps_40: "40 FPS",
     startup_on: "Khởi động cùng Windows: Bật",
     startup_off: "Khởi động cùng Windows: Tắt",
+    auto_update_on: "Tự cập nhật khi khởi động: Bật",
+    auto_update_off: "Tự cập nhật khi khởi động: Tắt",
     pin_on: "Ghim thẻ giám sát: Bật",
     pin_off: "Ghim thẻ giám sát: Tắt",
     rescan_month: "Quét toàn bộ mức dùng tháng này",
@@ -463,6 +498,8 @@ const VI: MenuText = MenuText {
     exit: "Thoát",
     balloon_startup_on: "Đã bật khởi động cùng Windows.",
     balloon_startup_off: "Đã tắt khởi động cùng Windows.",
+    balloon_auto_update_on: "Đã bật tự cập nhật khi khởi động.",
+    balloon_auto_update_off: "Đã tắt tự cập nhật khi khởi động.",
     balloon_rescan_started: "Đã bắt đầu quét toàn bộ mức dùng tháng này.",
     balloon_rescan_finished: "Đã quét xong mức dùng tháng này.",
     balloon_up_to_date: "RunDog đã là bản mới nhất.",
@@ -492,6 +529,8 @@ const FR: MenuText = MenuText {
     fps_40: "40 FPS",
     startup_on: "Lancer au démarrage : activé",
     startup_off: "Lancer au démarrage : désactivé",
+    auto_update_on: "Mise à jour auto au démarrage : activé",
+    auto_update_off: "Mise à jour auto au démarrage : désactivé",
     pin_on: "Épingler la carte : activé",
     pin_off: "Épingler la carte : désactivé",
     rescan_month: "Analyse complète de l'usage du mois",
@@ -508,6 +547,8 @@ const FR: MenuText = MenuText {
     exit: "Quitter",
     balloon_startup_on: "Le lancement au démarrage est activé.",
     balloon_startup_off: "Le lancement au démarrage est désactivé.",
+    balloon_auto_update_on: "La mise à jour automatique au démarrage est activée.",
+    balloon_auto_update_off: "La mise à jour automatique au démarrage est désactivée.",
     balloon_rescan_started: "Analyse complète de l'usage du mois démarrée.",
     balloon_rescan_finished: "Analyse de l'usage du mois terminée.",
     balloon_up_to_date: "RunDog est à jour.",
@@ -537,6 +578,8 @@ const DE: MenuText = MenuText {
     fps_40: "40 FPS",
     startup_on: "Beim Start ausführen: Ein",
     startup_off: "Beim Start ausführen: Aus",
+    auto_update_on: "Auto-Update beim Start: Ein",
+    auto_update_off: "Auto-Update beim Start: Aus",
     pin_on: "Monitorkarte anheften: Ein",
     pin_off: "Monitorkarte anheften: Aus",
     rescan_month: "Vollscan der Monatsnutzung",
@@ -553,6 +596,8 @@ const DE: MenuText = MenuText {
     exit: "Beenden",
     balloon_startup_on: "Starten mit Windows ist eingeschaltet.",
     balloon_startup_off: "Starten mit Windows ist ausgeschaltet.",
+    balloon_auto_update_on: "Auto-Update beim Start ist eingeschaltet.",
+    balloon_auto_update_off: "Auto-Update beim Start ist ausgeschaltet.",
     balloon_rescan_started: "Vollscan der Monatsnutzung gestartet.",
     balloon_rescan_finished: "Scan der Monatsnutzung abgeschlossen.",
     balloon_up_to_date: "RunDog ist aktuell.",
@@ -582,6 +627,8 @@ const ES: MenuText = MenuText {
     fps_40: "40 FPS",
     startup_on: "Iniciar con Windows: activado",
     startup_off: "Iniciar con Windows: desactivado",
+    auto_update_on: "Actualización automática al inicio: activado",
+    auto_update_off: "Actualización automática al inicio: desactivado",
     pin_on: "Fijar tarjeta del monitor: activado",
     pin_off: "Fijar tarjeta del monitor: desactivado",
     rescan_month: "Escaneo completo del uso de este mes",
@@ -598,6 +645,8 @@ const ES: MenuText = MenuText {
     exit: "Salir",
     balloon_startup_on: "El inicio con Windows está activado.",
     balloon_startup_off: "El inicio con Windows está desactivado.",
+    balloon_auto_update_on: "La actualización automática al inicio está activada.",
+    balloon_auto_update_off: "La actualización automática al inicio está desactivada.",
     balloon_rescan_started: "Se inició el escaneo completo del uso de este mes.",
     balloon_rescan_finished: "El escaneo del uso de este mes ha terminado.",
     balloon_up_to_date: "RunDog está actualizado.",
@@ -627,6 +676,8 @@ const RU: MenuText = MenuText {
     fps_40: "40 FPS",
     startup_on: "Запуск при старте: вкл.",
     startup_off: "Запуск при старте: выкл.",
+    auto_update_on: "Автообновление при запуске: вкл.",
+    auto_update_off: "Автообновление при запуске: выкл.",
     pin_on: "Закрепить карточку: вкл.",
     pin_off: "Закрепить карточку: выкл.",
     rescan_month: "Полное сканирование за месяц",
@@ -643,6 +694,8 @@ const RU: MenuText = MenuText {
     exit: "Выход",
     balloon_startup_on: "Запуск при старте включён.",
     balloon_startup_off: "Запуск при старте выключен.",
+    balloon_auto_update_on: "Автообновление при запуске включено.",
+    balloon_auto_update_off: "Автообновление при запуске выключено.",
     balloon_rescan_started: "Начато полное сканирование за месяц.",
     balloon_rescan_finished: "Сканирование за месяц завершено.",
     balloon_up_to_date: "Установлена последняя версия RunDog.",
@@ -672,6 +725,8 @@ const IT: MenuText = MenuText {
     fps_40: "40 FPS",
     startup_on: "Avvio automatico: sì",
     startup_off: "Avvio automatico: no",
+    auto_update_on: "Aggiornamento automatico all'avvio: sì",
+    auto_update_off: "Aggiornamento automatico all'avvio: no",
     pin_on: "Fissa scheda monitor: sì",
     pin_off: "Fissa scheda monitor: no",
     rescan_month: "Scansione completa uso del mese",
@@ -688,6 +743,8 @@ const IT: MenuText = MenuText {
     exit: "Esci",
     balloon_startup_on: "Avvio automatico attivato.",
     balloon_startup_off: "Avvio automatico disattivato.",
+    balloon_auto_update_on: "Aggiornamento automatico all'avvio attivato.",
+    balloon_auto_update_off: "Aggiornamento automatico all'avvio disattivato.",
     balloon_rescan_started: "Scansione completa dell'uso del mese avviata.",
     balloon_rescan_finished: "Scansione dell'uso del mese completata.",
     balloon_up_to_date: "RunDog è aggiornato.",
@@ -717,6 +774,8 @@ const TH: MenuText = MenuText {
     fps_40: "40 FPS",
     startup_on: "เริ่มเมื่อเปิดเครื่อง: เปิด",
     startup_off: "เริ่มเมื่อเปิดเครื่อง: ปิด",
+    auto_update_on: "อัปเดตอัตโนมัติเมื่อเปิดเครื่อง: เปิด",
+    auto_update_off: "อัปเดตอัตโนมัติเมื่อเปิดเครื่อง: ปิด",
     pin_on: "ปักหมุดการ์ดมอนิเตอร์: เปิด",
     pin_off: "ปักหมุดการ์ดมอนิเตอร์: ปิด",
     rescan_month: "สแกนการใช้งานเดือนนี้ทั้งหมด",
@@ -733,6 +792,8 @@ const TH: MenuText = MenuText {
     exit: "ออก",
     balloon_startup_on: "เปิดการเริ่มเมื่อเปิดเครื่องแล้ว",
     balloon_startup_off: "ปิดการเริ่มเมื่อเปิดเครื่องแล้ว",
+    balloon_auto_update_on: "เปิดการอัปเดตอัตโนมัติเมื่อเปิดเครื่องแล้ว",
+    balloon_auto_update_off: "ปิดการอัปเดตอัตโนมัติเมื่อเปิดเครื่องแล้ว",
     balloon_rescan_started: "เริ่มสแกนการใช้งานเดือนนี้ทั้งหมดแล้ว",
     balloon_rescan_finished: "สแกนการใช้งานเดือนนี้เสร็จแล้ว",
     balloon_up_to_date: "RunDog เป็นเวอร์ชันล่าสุดแล้ว",
@@ -780,6 +841,16 @@ mod tests {
         let en = UiLanguage::English.menu();
         assert_eq!(en.startup(true), "Launch at startup: On");
         assert_eq!(en.startup(false), "Launch at startup: Off");
+        assert_eq!(en.auto_update(true), "Auto-update on startup: On");
+        assert_eq!(en.auto_update(false), "Auto-update on startup: Off");
+        assert_eq!(
+            UiLanguage::Japanese.menu().auto_update(true),
+            "起動時に自動更新: オン"
+        );
+        assert_eq!(
+            UiLanguage::Japanese.menu().auto_update(false),
+            "起動時に自動更新: オフ"
+        );
         assert_eq!(en.pinned_flyout(true), "Pin monitor card: On");
         assert_eq!(en.pinned_flyout(false), "Pin monitor card: Off");
         assert_eq!(
@@ -852,6 +923,8 @@ mod tests {
             assert!(!text.display_codex_5h.is_empty());
             assert!(!text.display_codex_week.is_empty());
             assert!(!text.theme.is_empty());
+            assert!(!text.auto_update_on.is_empty());
+            assert!(!text.auto_update_off.is_empty());
             assert!(!text.about.is_empty());
             assert!(!text.exit.is_empty());
             assert!(text.install_update.contains("{version}"));

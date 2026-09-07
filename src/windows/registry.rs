@@ -215,6 +215,7 @@ fn load_settings_record_at(settings_key: &str) -> SettingsRecord {
                 fps_limit.as_deref(),
                 launch_at_startup,
                 None,
+                None,
             ),
         )
     };
