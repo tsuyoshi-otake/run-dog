@@ -185,6 +185,7 @@ struct WindowContext {
     updater: UpdateController,
     usage: UsageCollector,
     taskbar_recreated_message: u32,
+    startup_auto_install: bool,
 }
 
 impl WindowContext {
@@ -210,15 +211,18 @@ impl WindowContext {
             updater: UpdateController::new(),
             usage: UsageCollector::new(),
             taskbar_recreated_message: 0,
+            startup_auto_install: false,
         }
     }
 
     fn start(&mut self) {
         for effect in self.app.start() {
+            if let Effect::CheckForUpdates { auto_install } = effect {
+                self.startup_auto_install = auto_install;
+                self.updater.check_for_updates(self.platform.hwnd, false);
+            }
             self.platform.apply(&effect);
         }
-        // A newer stable release posts a balloon. Download still requires Install.
-        self.updater.check_for_updates(self.platform.hwnd, false);
         self.arm_usage_timer(USAGE_FIRST_INTERVAL_MS);
     }
 
@@ -272,6 +276,7 @@ impl WindowsPlatform {
                 settings.theme,
                 settings.fps_limit,
                 settings.launch_at_startup,
+                settings.auto_update_on_startup,
                 settings.display_mode,
             ),
             store,
@@ -305,6 +310,9 @@ impl EffectPort for WindowsPlatform {
             | Effect::SetDisplayMenu(_)
             | Effect::SetStartupMenu(_)
             | Effect::NotifyStartupChanged(_)
+            | Effect::SetAutoUpdateMenu(_)
+            | Effect::NotifyAutoUpdateChanged(_)
+            | Effect::CheckForUpdates { .. }
             | Effect::CommitSettings { .. }
             | Effect::CancelCommit { .. } => {}
         }
@@ -502,6 +510,12 @@ unsafe extern "system" fn window_proc(
             .platform
             .tray
             .notify_update_result(&context.updater.menu_state(), wparam != 0);
+        if context.startup_auto_install {
+            context.startup_auto_install = false;
+            if context.app.snapshot().settings.auto_update_on_startup {
+                context.updater.install_available(hwnd);
+            }
+        }
         return 0;
     }
 

@@ -174,8 +174,9 @@ impl UpdateController {
     }
 
     /// Streams, verifies, and starts the available installer without blocking
-    /// the message-loop thread. Called only after the user selects Install in
-    /// the tray menu. A successful launch requests orderly shutdown.
+    /// the message-loop thread. Used by the tray Install action and by startup
+    /// auto-update after a newer release is selected. A successful launch
+    /// requests orderly shutdown.
     pub fn install_available(&self, hwnd: HWND) {
         let candidate = {
             let mut state = lock_state(&self.state);

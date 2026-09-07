@@ -176,6 +176,7 @@ fn settings(theme: ThemePreference, fps: FpsLimit, startup: bool) -> AppSettings
         fps_limit: fps,
         launch_at_startup: startup,
         display_mode: run_dog::core::TrayDisplayMode::Dog,
+        auto_update_on_startup: true,
     }
 }
 
@@ -392,7 +393,7 @@ proptest! {
 
     #[test]
     fn pbt_successful_user_intents_converge_to_the_independent_settings_model(
-        intent_codes in prop::collection::vec(0_u8..8, 0..32),
+        intent_codes in prop::collection::vec(0_u8..9, 0..32),
     ) {
         let mut expected = SettingsRecord::new(0, 0, AppSettings::default());
         let mut applied_ids = BTreeSet::new();
@@ -427,6 +428,14 @@ proptest! {
                     expected.last_operation_id += 1;
                     applied_ids.insert(expected.last_operation_id);
                     dispatch_and_execute(&mut app, &mut store, Event::ToggleStartup);
+                }
+                8 => {
+                    expected.settings.auto_update_on_startup =
+                        !expected.settings.auto_update_on_startup;
+                    expected.generation += 1;
+                    expected.last_operation_id += 1;
+                    applied_ids.insert(expected.last_operation_id);
+                    dispatch_and_execute(&mut app, &mut store, Event::ToggleAutoUpdate);
                 }
                 _ => unreachable!(),
             }
