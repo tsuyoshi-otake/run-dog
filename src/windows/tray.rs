@@ -52,6 +52,7 @@ pub const COMMAND_DISPLAY_CODEX_5H: u32 = 1_057;
 pub const COMMAND_DISPLAY_CODEX_WEEK: u32 = 1_058;
 pub const COMMAND_TOGGLE_STARTUP: u32 = 1_020;
 pub const COMMAND_TOGGLE_PINNED_FLYOUT: u32 = 1_021;
+pub const COMMAND_TOGGLE_AUTO_UPDATE: u32 = 1_022;
 pub const COMMAND_CHECK_FOR_UPDATES: u32 = 1_030;
 pub const COMMAND_INSTALL_UPDATE: u32 = 1_031;
 pub const COMMAND_RESCAN_MONTH_USAGE: u32 = 1_032;
@@ -79,6 +80,7 @@ pub const fn event_for_command(command: u32) -> Option<Event> {
         COMMAND_DISPLAY_CODEX_5H => Some(Event::SelectDisplayMode(TrayDisplayMode::Codex5h)),
         COMMAND_DISPLAY_CODEX_WEEK => Some(Event::SelectDisplayMode(TrayDisplayMode::CodexWeek)),
         COMMAND_TOGGLE_STARTUP => Some(Event::ToggleStartup),
+        COMMAND_TOGGLE_AUTO_UPDATE => Some(Event::ToggleAutoUpdate),
         COMMAND_EXIT => Some(Event::ExitRequested),
         _ => None,
     }
@@ -93,6 +95,7 @@ pub struct TrayAdapter {
     fps_limit: FpsLimit,
     display_mode: TrayDisplayMode,
     startup_enabled: bool,
+    auto_update_enabled: bool,
     flyout_pinned: bool,
     added: bool,
     promote_attempts: u8,
@@ -109,6 +112,7 @@ impl TrayAdapter {
         theme: ThemePreference,
         fps_limit: FpsLimit,
         startup: bool,
+        auto_update: bool,
         display_mode: TrayDisplayMode,
     ) -> Self {
         Self {
@@ -118,6 +122,7 @@ impl TrayAdapter {
             fps_limit,
             display_mode,
             startup_enabled: startup,
+            auto_update_enabled: auto_update,
             flyout_pinned: super::registry::load_pinned_flyout(),
             added: false,
             promote_attempts: 0,
@@ -165,11 +170,24 @@ impl TrayAdapter {
                     },
                 );
             }
+            Effect::SetAutoUpdateMenu(enabled) => self.auto_update_enabled = *enabled,
+            Effect::NotifyAutoUpdateChanged(enabled) => {
+                let text = super::i18n::current().menu();
+                self.show_balloon(
+                    "RunDog",
+                    if *enabled {
+                        text.balloon_auto_update_on
+                    } else {
+                        text.balloon_auto_update_off
+                    },
+                );
+            }
             Effect::SetTimer { .. }
             | Effect::KillTimer(TimerKind::CpuSampling | TimerKind::Animation)
             | Effect::SaveSettings(_)
             | Effect::CommitSettings { .. }
             | Effect::CancelCommit { .. }
+            | Effect::CheckForUpdates { .. }
             | Effect::LaunchTaskManager
             | Effect::Quit => {}
         }
@@ -308,6 +326,12 @@ impl TrayAdapter {
             COMMAND_TOGGLE_STARTUP,
             text.startup(self.startup_enabled),
             self.startup_enabled,
+        );
+        append_checked(
+            root,
+            COMMAND_TOGGLE_AUTO_UPDATE,
+            text.auto_update(self.auto_update_enabled),
+            self.auto_update_enabled,
         );
         append_checked(
             root,
@@ -710,7 +734,7 @@ mod tests {
         event_for_command, update_balloon_text, TrayAdapter, UpdateMenuState, COMMAND_ABOUT,
         COMMAND_CHECK_FOR_UPDATES, COMMAND_DISPLAY_CLAUDE_5H, COMMAND_DISPLAY_CODEX_WEEK,
         COMMAND_DISPLAY_CPU, COMMAND_DISPLAY_FABLE_WEEK, COMMAND_EXIT, COMMAND_FPS_40,
-        COMMAND_THEME_DARK, COMMAND_TOGGLE_STARTUP,
+        COMMAND_THEME_DARK, COMMAND_TOGGLE_AUTO_UPDATE, COMMAND_TOGGLE_STARTUP,
     };
     use crate::{
         application::Event,
@@ -750,6 +774,10 @@ mod tests {
             event_for_command(COMMAND_TOGGLE_STARTUP),
             Some(Event::ToggleStartup)
         );
+        assert_eq!(
+            event_for_command(COMMAND_TOGGLE_AUTO_UPDATE),
+            Some(Event::ToggleAutoUpdate)
+        );
         assert_eq!(event_for_command(COMMAND_EXIT), Some(Event::ExitRequested));
         assert_eq!(event_for_command(COMMAND_CHECK_FOR_UPDATES), None);
         assert_eq!(event_for_command(COMMAND_ABOUT), None);
@@ -779,6 +807,8 @@ mod tests {
         assert_eq!(en.display_codex_week, "Codex week");
         assert_eq!(en.startup(true), "Launch at startup: On");
         assert_eq!(en.startup(false), "Launch at startup: Off");
+        assert_eq!(en.auto_update(true), "Auto-update on startup: On");
+        assert_eq!(en.auto_update(false), "Auto-update on startup: Off");
         assert_eq!(en.pinned_flyout(true), "Pin monitor card: On");
         assert_eq!(en.pinned_flyout(false), "Pin monitor card: Off");
         assert_eq!(en.about, "About");
