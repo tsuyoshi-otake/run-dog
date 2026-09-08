@@ -8,7 +8,7 @@ use std::{
 
 use crate::core::{
     load_usage_state, persist_usage_state, usage_store_root_is_forbidden, GenerationBlobs,
-    LoadStatus, PersistStatus, UsageState,
+    LoadStatus, PersistStatus, UsageState, MAX_PRIOR_GENERATIONS,
 };
 
 const CURRENT_HEADER: &str = "rundog-usage-current-1";
@@ -50,7 +50,11 @@ impl FileUsageStore {
 
     #[must_use]
     pub fn persist(&mut self, state: &UsageState) -> PersistStatus {
-        persist_usage_state(self, state)
+        let status = persist_usage_state(self, state);
+        if let PersistStatus::Applied { generation } = status {
+            self.cleanup_after_publish(generation);
+        }
+        status
     }
 
     #[must_use]
@@ -61,6 +65,24 @@ impl FileUsageStore {
     #[must_use]
     pub fn refuses_provider_roots(&self, claude_dir: &Path, codex_home: &Path) -> bool {
         usage_store_root_is_forbidden(&self.root, &[claude_dir, codex_home])
+    }
+
+    fn cleanup_after_publish(&self, generation: u64) {
+        let oldest_retained = generation.saturating_sub(MAX_PRIOR_GENERATIONS);
+        let Ok(entries) = fs::read_dir(&self.root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let old_generation =
+                parse_blob_generation(&name).is_some_and(|candidate| candidate < oldest_retained);
+            if old_generation || name.ends_with(".tmp") {
+                let _ = fs::remove_file(path);
+            }
+        }
     }
 }
 
@@ -112,6 +134,13 @@ fn ensure_root(root: &Path) -> bool {
 
 fn blob_path(root: &Path, generation: u64) -> PathBuf {
     root.join(format!("{BLOB_PREFIX}{generation:016}{BLOB_SUFFIX}"))
+}
+
+fn parse_blob_generation(name: &str) -> Option<u64> {
+    name.strip_prefix(BLOB_PREFIX)?
+        .strip_suffix(BLOB_SUFFIX)?
+        .parse()
+        .ok()
 }
 
 fn write_atomically(tmp: &Path, final_path: &Path, bytes: &[u8]) -> bool {
@@ -260,6 +289,36 @@ mod tests {
             other => panic!("expected recovered prior, got {other:?}"),
         }
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn component_file_store_bounds_generations_and_keeps_recovery_window() {
+        let root = temp_root("retention");
+        let mut store = FileUsageStore::at(root.clone());
+        let state = sample();
+        for generation in 1..=100 {
+            assert_eq!(store.persist(&state), PersistStatus::Applied { generation });
+            if generation == 1 {
+                fs::write(root.join("abandoned.tmp"), b"partial").unwrap();
+            }
+        }
+
+        let mut generations = fs::read_dir(&root)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter_map(|entry| super::parse_blob_generation(entry.file_name().to_str()?))
+            .collect::<Vec<_>>();
+        generations.sort_unstable();
+        assert_eq!(generations, (92..=100).collect::<Vec<_>>());
+        assert!(!root.join("abandoned.tmp").exists());
+
+        fs::write(root.join("g0000000000000100.state"), b"truncated").unwrap();
+        let crate::core::LoadStatus::RecoveredPrior { state, requested } = store.load() else {
+            panic!("expected prior generation recovery");
+        };
+        assert_eq!(requested, Some(100));
+        assert_eq!(state.generation, 99);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
