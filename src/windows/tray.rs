@@ -29,6 +29,9 @@ use super::{
 };
 
 pub use super::messages::TRAY_CALLBACK_MESSAGE;
+
+// windows-sys 0.61 does not expose this Shell notification constant.
+const NIN_KEYSELECT: u32 = NIN_SELECT | 1;
 /// One-shot retries while Explorer populates `NotifyIconSettings`.
 pub const PROMOTE_TIMER_ID: usize = 3;
 const PROMOTE_RETRY_MS: u32 = 500;
@@ -392,7 +395,7 @@ impl TrayAdapter {
 
     #[must_use]
     pub const fn is_pin_toggle_notification(notification: u32) -> bool {
-        notification == NIN_SELECT
+        notification == NIN_SELECT || notification == NIN_KEYSELECT
     }
 
     #[must_use]
@@ -793,6 +796,8 @@ mod tests {
         assert!(!TrayAdapter::is_context_menu_notification(v4_right_click));
         assert!(!TrayAdapter::is_context_menu_notification(515));
         assert!(TrayAdapter::is_pin_toggle_notification(NIN_SELECT));
+        let v4_keyboard_select = TrayAdapter::notification_code((37 << 16) | (NIN_SELECT | 1));
+        assert!(TrayAdapter::is_pin_toggle_notification(v4_keyboard_select));
         assert!(!TrayAdapter::is_pin_toggle_notification(515));
         assert!(!TrayAdapter::is_pin_toggle_notification(0));
         assert!(TrayAdapter::is_popup_open_notification(0x0406));

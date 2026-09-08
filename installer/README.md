@@ -33,8 +33,13 @@ Downloaded installers live in `%LOCALAPPDATA%\SystemExe\RunDog\updates` as
 installers and deletes leftover `.part` / `.failed` files. It never deletes
 the installer it is about to launch.
 
+Usage state lives in `%LOCALAPPDATA%\RunDog\usage`. On the first startup after
+upgrading, RunDog moves the legacy `%LOCALAPPDATA%\SystemExe\RunDog\usage`
+directory there without copying its contents.
+
 Uninstall (Windows Settings → Apps → RunDog) removes `{app}`, shortcuts, the
-HKCU Run value `RunDog`, `HKCU\Software\SystemExe\RunDog`, and
-`%LOCALAPPDATA%\SystemExe\RunDog`. It must not name or touch Claude or Codex
-homes. The table is [docs/UNINSTALL.md](../docs/UNINSTALL.md). Live uninstall
-was not run for this contract revision.
+HKCU Run value `RunDog`, `HKCU\Software\SystemExe\RunDog`,
+`%LOCALAPPDATA%\RunDog`, and `%LOCALAPPDATA%\SystemExe\RunDog`. It must not name
+or touch Claude or Codex homes. The table is
+[docs/UNINSTALL.md](../docs/UNINSTALL.md). Live uninstall was not run for this
+contract revision.

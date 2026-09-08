@@ -10,6 +10,39 @@ pub const DEFAULT_REPOSITORY: &str = "tsuyoshi-otake/run-dog";
 pub const INSTALLER_ASSET_NAME: &str = "RunDog-Setup-x64.exe";
 pub const CHECKSUM_ASSET_NAME: &str = "RunDog-Setup-x64.exe.sha256";
 
+/// One-shot policy for the update check started during application startup.
+///
+/// The adapter arms this from the persisted setting, then consumes the decision
+/// when that specific check completes. Rechecking the setting at completion
+/// prevents an install after the user turns the option off while the request is
+/// in flight.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct StartupUpdateGate {
+    install_pending: bool,
+    cancelled: bool,
+}
+
+impl StartupUpdateGate {
+    pub fn arm(&mut self, auto_install: bool) {
+        self.install_pending = auto_install;
+        self.cancelled = false;
+    }
+
+    pub fn cancel(&mut self) {
+        self.install_pending = false;
+        self.cancelled = true;
+    }
+
+    /// Consumes the startup request and returns whether the verified install
+    /// path should run. Every completion, including Current and Failed,
+    /// consumes the request so a later manual check cannot inherit it.
+    #[must_use]
+    pub fn complete_check(&mut self, setting_enabled: bool, update_available: bool) -> bool {
+        let pending = std::mem::take(&mut self.install_pending);
+        pending && !self.cancelled && setting_enabled && update_available
+    }
+}
+
 /// A GitHub owner/repository slug accepted by the update protocol.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UpdateRepository(String);

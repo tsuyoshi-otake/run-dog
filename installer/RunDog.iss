@@ -2,7 +2,7 @@
 ; The release workflow invokes ISCC with /DAppVersion=X.Y.Z.
 
 #ifndef AppVersion
-  #define AppVersion "1.1.26"
+  #define AppVersion "1.1.27"
 #endif
 
 #ifndef UpdateRepository
@@ -52,6 +52,7 @@ Filename: "{app}\{#AppExeName}"; Flags: nowait
 
 ; RunDog-owned cache only. Do not name Claude or Codex homes here.
 [UninstallDelete]
+Type: filesandordirs; Name: "{localappdata}\RunDog"
 Type: filesandordirs; Name: "{localappdata}\SystemExe\RunDog"
 
 [Code]
