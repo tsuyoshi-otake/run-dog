@@ -26,6 +26,9 @@ pub struct UsageCursor {
     pub logical_id: String,
     pub offset: u64,
     pub size: u64,
+    /// Windows volume serial and file index (high, low). Missing legacy IDs
+    /// require a fresh aggregate scan rather than trusting an old offset.
+    pub file_id: Option<[u32; 3]>,
     /// First-64-byte fingerprint. A hint, not a complete in-place rewrite detector.
     pub prefix: Option<u64>,
     /// Last Codex `turn_context` model. Named line, not a `file=` column.
@@ -41,6 +44,7 @@ pub enum CursorRebuildReason {
     PrefixChanged,
     FileIdAndPrefixChanged,
     SameSizeRewriteHint,
+    FileIdChanged,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -77,6 +81,7 @@ impl UsageState {
                     logical_id,
                     offset: cursor.offset,
                     size: cursor.size,
+                    file_id: None,
                     prefix: None,
                     last_model: None,
                     last_codex_total: None,
@@ -173,6 +178,12 @@ impl UsageState {
             if let Some(prefix) = cursor.prefix {
                 out.push_str(&format!("prefix={kind}\t{}\t{prefix}\n", cursor.logical_id));
             }
+            if let Some([volume, high, low]) = cursor.file_id {
+                out.push_str(&format!(
+                    "file_id={kind}\t{}\t{volume}\t{high}\t{low}\n",
+                    cursor.logical_id
+                ));
+            }
             if cursor.kind == CursorKind::Codex {
                 if let Some(model) = cursor.last_model.as_deref() {
                     if is_safe_codex_model(model) {
@@ -230,6 +241,7 @@ impl UsageState {
         let mut codex_out = 0_u64;
         let mut cursors = Vec::new();
         let mut prefixes: Vec<(CursorKind, String, u64)> = Vec::new();
+        let mut file_ids = Vec::new();
         let mut models: Vec<(CursorKind, String, String)> = Vec::new();
         let mut totals: Vec<(CursorKind, String, CodexTokenTotals)> = Vec::new();
         let mut claude_keys = HashSet::new();
@@ -277,6 +289,25 @@ impl UsageState {
                 cursors.push(parse_cursor_line(value)?);
             } else if let Some(value) = line.strip_prefix("prefix=") {
                 prefixes.push(parse_prefix_line(value)?);
+            } else if let Some(value) = line.strip_prefix("file_id=") {
+                let parts: Vec<_> = value.split('\t').collect();
+                if parts.len() != 5 {
+                    return None;
+                }
+                let kind = match parts[0] {
+                    "c" => CursorKind::Claude,
+                    "x" => CursorKind::Codex,
+                    _ => return None,
+                };
+                file_ids.push((
+                    kind,
+                    parts[1].to_owned(),
+                    [
+                        parts[2].parse().ok()?,
+                        parts[3].parse().ok()?,
+                        parts[4].parse().ok()?,
+                    ],
+                ));
             } else if let Some(value) = line.strip_prefix("codex_model=") {
                 models.push(parse_codex_model_line(value)?);
             } else if let Some(value) = line.strip_prefix("codex_total=") {
@@ -295,6 +326,14 @@ impl UsageState {
                 .find(|cursor| cursor.kind == kind && cursor.logical_id == logical_id)
             {
                 cursor.prefix = Some(prefix);
+            }
+        }
+        for (kind, logical_id, file_id) in file_ids {
+            let cursor = cursors
+                .iter_mut()
+                .find(|cursor| cursor.kind == kind && cursor.logical_id == logical_id)?;
+            if cursor.file_id.replace(file_id).is_some() {
+                return None;
             }
         }
         for (kind, logical_id, model) in models {
@@ -413,6 +452,7 @@ fn parse_cursor_line(value: &str) -> Option<UsageCursor> {
         logical_id: parts[1].to_owned(),
         offset: parts[2].parse().ok()?,
         size: parts[3].parse().ok()?,
+        file_id: None,
         prefix: None,
         last_model: None,
         last_codex_total: None,
@@ -545,6 +585,7 @@ mod tests {
                 logical_id: "projects/p/session.jsonl".to_owned(),
                 offset: 8,
                 size: 16,
+                file_id: None,
                 prefix: Some(9),
                 last_model: None,
                 last_codex_total: None,
@@ -562,6 +603,7 @@ mod tests {
             logical_id: "sessions/2026/09/a.jsonl".to_owned(),
             offset: 4,
             size: 8,
+            file_id: None,
             prefix: None,
             last_model: Some("gpt-5.4".to_owned()),
             last_codex_total: Some(CodexTokenTotals {
@@ -582,6 +624,7 @@ mod tests {
                 logical_id: "sessions/z.jsonl".to_owned(),
                 offset: 1,
                 size: 1,
+                file_id: None,
                 prefix: None,
                 last_model: None,
                 last_codex_total: None,
@@ -591,6 +634,7 @@ mod tests {
                 logical_id: "projects/z.jsonl".to_owned(),
                 offset: 2,
                 size: 2,
+                file_id: None,
                 prefix: None,
                 last_model: None,
                 last_codex_total: None,
@@ -600,6 +644,7 @@ mod tests {
                 logical_id: "projects/a.jsonl".to_owned(),
                 offset: 3,
                 size: 3,
+                file_id: None,
                 prefix: None,
                 last_model: None,
                 last_codex_total: None,

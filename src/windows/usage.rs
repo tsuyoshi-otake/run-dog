@@ -27,7 +27,10 @@ use std::{
 
 use serde::Deserialize;
 use windows_sys::Win32::{
-    Foundation::{CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, HWND, INVALID_HANDLE_VALUE},
+    Foundation::{
+        CloseHandle, FILETIME, GENERIC_READ, GENERIC_WRITE, HANDLE, HWND, INVALID_HANDLE_VALUE,
+        SYSTEMTIME,
+    },
     Storage::FileSystem::{
         CreateFileW, FlushFileBuffers, GetFileInformationByHandle, ReadFile, ReplaceFileW,
         WriteFile, BY_HANDLE_FILE_INFORMATION, CREATE_NEW, FILE_ATTRIBUTE_DIRECTORY,
@@ -35,7 +38,11 @@ use windows_sys::Win32::{
         FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
         REPLACEFILE_WRITE_THROUGH,
     },
-    System::Time::{GetTimeZoneInformation, TIME_ZONE_INFORMATION},
+    System::Time::{
+        FileTimeToSystemTime, GetDynamicTimeZoneInformation, GetTimeZoneInformation,
+        SystemTimeToTzSpecificLocalTime, SystemTimeToTzSpecificLocalTimeEx,
+        DYNAMIC_TIME_ZONE_INFORMATION, TIME_ZONE_INFORMATION,
+    },
     UI::WindowsAndMessaging::PostMessageW,
 };
 
@@ -104,6 +111,8 @@ struct FileCursor {
     size: u64,
     mtime_ms: u64,
     offset: u64,
+    /// Transient read head within an oversized record; never checkpointed.
+    discard_offset: Option<u64>,
     last_stat_ms: u64,
     last_model: Option<String>,
     last_codex_total: Option<CodexTokenTotals>,
@@ -126,9 +135,33 @@ struct DirListing {
 
 #[derive(Clone, Copy)]
 struct DayWindow {
+    time_zone: DYNAMIC_TIME_ZONE_INFORMATION,
+    #[cfg(test)]
     bias_minutes: i32,
     today: u32,
     month_start: u32,
+}
+
+impl DayWindow {
+    fn local_date(self, unix_ms: u64) -> (i32, u8, u8) {
+        local_date_in_zone(unix_ms, &self.time_zone).unwrap_or_else(|| local_ymd(unix_ms, 0))
+    }
+
+    fn day(self, unix_ms: u64) -> u32 {
+        let (year, month, day) = self.local_date(unix_ms);
+        ymd_key(year, month, day)
+    }
+
+    fn contains_month_day(self, day: u32) -> bool {
+        let year = (self.month_start / 10_000) as i32;
+        let month = ((self.month_start / 100) % 100) as u8;
+        let next = if month == 12 {
+            ymd_key(year + 1, 1, 1)
+        } else {
+            ymd_key(year, month + 1, 1)
+        };
+        (self.month_start..next).contains(&day)
+    }
 }
 
 pub struct UsageCollector {
@@ -227,7 +260,7 @@ impl UsageCollector {
     #[must_use]
     fn with_dirs(claude_dir: PathBuf, codex_home: PathBuf, persist_checkpoint: bool) -> Self {
         let store = persist_checkpoint
-            .then(FileUsageStore::production)
+            .then(|| FileUsageStore::production(&claude_dir, &codex_home))
             .flatten();
         Self::with_dirs_and_store(claude_dir, codex_home, store)
     }
@@ -238,6 +271,7 @@ impl UsageCollector {
         codex_home: PathBuf,
         store: Option<FileUsageStore>,
     ) -> Self {
+        let store = store.map(|store| store.with_provider_roots(&claude_dir, &codex_home));
         let persist_checkpoint = store.is_some();
         let mut collector = Self {
             claude_dir,
@@ -586,6 +620,16 @@ impl UsageCollector {
     }
 
     fn apply_state(&mut self, window: DayWindow, state: UsageState) {
+        if state
+            .cursors
+            .iter()
+            .any(|cursor| cursor.offset > 0 && cursor.file_id.is_none())
+        {
+            // Legacy checkpoints cannot distinguish replacement from append.
+            // Reset aggregate and cursors together to avoid double counting.
+            self.begin_month_rescan(window);
+            return;
+        }
         self.snapshot = state.aggregate.snapshot;
         self.snapshot.month_scan_in_progress = !state.aggregate.catch_up_done;
         if state.aggregate.month_start != window.month_start {
@@ -637,6 +681,7 @@ impl UsageCollector {
                 logical_id,
                 offset: cursor.offset,
                 size: cursor.size,
+                file_id: cursor.last_file_id.map(FileId::durable),
                 prefix: cursor.last_prefix,
                 last_model: cursor.last_model.clone(),
                 last_codex_total: cursor.last_codex_total,
@@ -792,7 +837,7 @@ impl UsageCollector {
         self.discover.push_back(self.claude_dir.join("projects"));
         let now_ms = unix_now_ms();
         let window = day_window(now_ms);
-        let (year, month, _) = local_ymd(now_ms, window.bias_minutes);
+        let (year, month, _) = window.local_date(now_ms);
         self.discover
             .push_back(codex_month_dir(&self.codex_home, year, month));
         let (prev_year, prev_month) = previous_month(year, month);
@@ -864,9 +909,7 @@ impl UsageCollector {
             return;
         };
         self.files_stated = self.files_stated.saturating_add(1);
-        if require_recent_mtime
-            && ymd_key_from_unix(mtime_ms, window.bias_minutes) < previous_month_start(window)
-        {
+        if require_recent_mtime && window.day(mtime_ms) < previous_month_start(window) {
             return;
         }
         let kind = if path_is_under(path, &self.codex_home) {
@@ -889,7 +932,7 @@ impl UsageCollector {
                 &self.codex_home,
                 kind,
                 size,
-                prefix,
+                (prefix, file_id),
             );
             if let Some(reason) = rebuild {
                 self.last_rebuild_reason = Some(reason);
@@ -911,6 +954,7 @@ impl UsageCollector {
                 size,
                 mtime_ms,
                 offset,
+                discard_offset: None,
                 last_stat_ms: 0,
                 last_model,
                 last_codex_total,
@@ -949,6 +993,7 @@ impl UsageCollector {
             let rebuild = cursor_rebuild_reason(cursor, size, mtime_ms, prefix, file_id);
             if rebuild.is_some() {
                 cursor.offset = 0;
+                cursor.discard_offset = None;
                 cursor.last_model = None;
                 cursor.last_codex_total = None;
                 cursor.waiting_incomplete = false;
@@ -983,7 +1028,12 @@ impl UsageCollector {
         self.files_opened = self.files_opened.saturating_add(1);
         let chunk = read_appended(
             path,
-            offset,
+            (
+                offset,
+                self.files
+                    .get(path)
+                    .and_then(|cursor| cursor.discard_offset),
+            ),
             size,
             kind,
             previous_model.as_deref(),
@@ -997,6 +1047,7 @@ impl UsageCollector {
         let previous_model = cursor.last_model.clone();
         let mut previous_codex_total = cursor.last_codex_total;
         cursor.offset = chunk.new_offset;
+        cursor.discard_offset = chunk.discard_offset;
         cursor.size = size;
         cursor.mtime_ms = mtime_ms;
         cursor.last_model = chunk.last_model;
@@ -1016,8 +1067,8 @@ impl UsageCollector {
         // Count every in-month event. A global timestamp watermark would drop
         // older JSONL after a newer file is scanned first (Codex catch-up).
         for (mut event, digest) in chunk.events.into_iter().zip(chunk.dedupe) {
-            let day = ymd_key_from_unix(event.timestamp_ms, window.bias_minutes);
-            let (year, month, day_of_month) = local_ymd(event.timestamp_ms, window.bias_minutes);
+            let (year, month, day_of_month) = window.local_date(event.timestamp_ms);
+            let day = ymd_key(year, month, day_of_month);
             if let Some(digest) = digest {
                 let key = ClaudeDedupeKey {
                     digest,
@@ -1060,7 +1111,7 @@ impl UsageCollector {
             if day == window.today {
                 target.add_today_nanos(nanos);
             }
-            if day >= window.month_start {
+            if window.contains_month_day(day) {
                 target.add_month_nanos(nanos);
                 target.month_input_tokens = target
                     .month_input_tokens
@@ -1518,6 +1569,10 @@ struct FileId {
 }
 
 impl FileId {
+    fn durable(self) -> [u32; 3] {
+        [self.volume, self.index_high, self.index_low]
+    }
+
     fn from_info(info: &BY_HANDLE_FILE_INFORMATION) -> Self {
         Self {
             volume: info.dwVolumeSerialNumber,
@@ -1755,11 +1810,12 @@ fn path_is_under(path: &Path, root: &Path) -> bool {
 }
 
 fn is_current_month(mtime_ms: u64, window: DayWindow) -> bool {
-    ymd_key_from_unix(mtime_ms, window.bias_minutes) >= window.month_start
+    window.contains_month_day(window.day(mtime_ms))
 }
 
 struct AppendedChunk {
     new_offset: u64,
+    discard_offset: Option<u64>,
     consumed: u64,
     events: Vec<ParsedEvent>,
     dedupe: Vec<Option<[u8; 16]>>,
@@ -1769,41 +1825,44 @@ struct AppendedChunk {
 
 fn read_appended(
     path: &Path,
-    offset: u64,
+    position: (u64, Option<u64>),
     size: u64,
     kind: SourceKind,
     last_model: Option<&str>,
     max_bytes: u64,
     buf: &mut Vec<u8>,
 ) -> AppendedChunk {
+    let (offset, discard_offset) = position;
+    let read_start = discard_offset.unwrap_or(offset);
     let mut events = Vec::new();
     let mut keys = Vec::new();
     let mut limits = None;
     let mut model = last_model.map(str::to_owned);
     let empty = || AppendedChunk {
         new_offset: offset,
+        discard_offset,
         consumed: 0,
         events: Vec::new(),
         dedupe: Vec::new(),
         limits: None,
         last_model: model.clone(),
     };
-    if size <= offset {
+    if size <= read_start {
         return empty();
     }
     let Ok(mut file) = File::open(path) else {
         return empty();
     };
-    if file.seek(SeekFrom::Start(offset)).is_err() {
+    if file.seek(SeekFrom::Start(read_start)).is_err() {
         return empty();
     }
     buf.clear();
     buf.resize(8_192, 0);
     let tick_limit = max_bytes.max(1);
     let mut line = Vec::new();
-    let mut pos = offset;
+    let mut pos = read_start;
     let mut committed = offset;
-    let mut oversize = false;
+    let mut oversize = discard_offset.is_some();
     while pos < size {
         let want = (size - pos) as usize;
         let cap = buf.len();
@@ -1824,13 +1883,12 @@ fn read_appended(
                 line.clear();
                 oversize = false;
                 committed = pos;
-                if committed.saturating_sub(offset) >= tick_limit {
+                if committed.saturating_sub(read_start) >= tick_limit {
                     stop = true;
                     break;
                 }
             } else if oversize {
-                committed = pos;
-                if committed.saturating_sub(offset) >= MAX_SKIP_PER_READ {
+                if pos.saturating_sub(read_start) >= MAX_SKIP_PER_READ {
                     stop = true;
                     break;
                 }
@@ -1839,7 +1897,6 @@ fn read_appended(
             } else {
                 line.clear();
                 oversize = true;
-                committed = pos;
             }
         }
         if stop {
@@ -1848,7 +1905,8 @@ fn read_appended(
     }
     AppendedChunk {
         new_offset: committed,
-        consumed: committed.saturating_sub(offset),
+        discard_offset: oversize.then_some(pos),
+        consumed: if oversize { pos } else { committed }.saturating_sub(read_start),
         events,
         dedupe: keys,
         limits,
@@ -2574,18 +2632,53 @@ pub(super) fn timezone_bias_minutes() -> i32 {
 }
 
 fn day_window(now_ms: u64) -> DayWindow {
-    let bias = timezone_bias_minutes();
-    let (year, month, day) = local_ymd(now_ms, bias);
+    let mut time_zone = DYNAMIC_TIME_ZONE_INFORMATION::default();
+    if unsafe { GetDynamicTimeZoneInformation(&mut time_zone) } == u32::MAX {
+        time_zone = DYNAMIC_TIME_ZONE_INFORMATION::default();
+    }
+    let (year, month, day) =
+        local_date_in_zone(now_ms, &time_zone).unwrap_or_else(|| local_ymd(now_ms, 0));
     DayWindow {
-        bias_minutes: bias,
+        time_zone,
+        #[cfg(test)]
+        bias_minutes: timezone_bias_minutes(),
         today: ymd_key(year, month, day),
         month_start: ymd_key(year, month, 1),
     }
 }
 
-fn ymd_key_from_unix(unix_ms: u64, bias_minutes: i32) -> u32 {
-    let (year, month, day) = local_ymd(unix_ms, bias_minutes);
-    ymd_key(year, month, day)
+fn local_date_in_zone(unix_ms: u64, zone: &DYNAMIC_TIME_ZONE_INFORMATION) -> Option<(i32, u8, u8)> {
+    let ticks = unix_ms
+        .checked_mul(10_000)?
+        .checked_add(116_444_736_000_000_000)?;
+    let file_time = FILETIME {
+        dwLowDateTime: ticks as u32,
+        dwHighDateTime: (ticks >> 32) as u32,
+    };
+    let mut utc = SYSTEMTIME::default();
+    let mut local = SYSTEMTIME::default();
+    // The Ex API uses the dynamic rules for the event's year, not today's bias.
+    // https://learn.microsoft.com/windows/win32/api/timezoneapi/nf-timezoneapi-systemtimetotzspecificlocaltimeex
+    if unsafe { FileTimeToSystemTime(&file_time, &mut utc) } == 0 {
+        return None;
+    }
+    let converted = if zone.TimeZoneKeyName[0] == 0 {
+        let fixed = TIME_ZONE_INFORMATION {
+            Bias: zone.Bias,
+            StandardBias: zone.StandardBias,
+            DaylightBias: zone.DaylightBias,
+            StandardDate: zone.StandardDate,
+            DaylightDate: zone.DaylightDate,
+            ..Default::default()
+        };
+        unsafe { SystemTimeToTzSpecificLocalTime(&fixed, &utc, &mut local) }
+    } else {
+        unsafe { SystemTimeToTzSpecificLocalTimeEx(zone, &utc, &mut local) }
+    };
+    if converted == 0 {
+        return None;
+    }
+    Some((i32::from(local.wYear), local.wMonth as u8, local.wDay as u8))
 }
 
 fn previous_month_start(window: DayWindow) -> u32 {
@@ -2695,8 +2788,9 @@ fn restored_cursor_offset(
     codex_home: &Path,
     kind: SourceKind,
     size: u64,
-    prefix: Option<u64>,
+    identity: (Option<u64>, Option<FileId>),
 ) -> (u64, Option<CursorRebuildReason>) {
+    let (prefix, file_id) = identity;
     let Some(key) = file_checkpoint_key(path, claude_dir, codex_home, kind) else {
         return (0, None);
     };
@@ -2705,6 +2799,9 @@ fn restored_cursor_offset(
     };
     if size < cursor.size || size < cursor.offset {
         return (0, Some(CursorRebuildReason::SizeShrunk));
+    }
+    if cursor.file_id != file_id.map(FileId::durable) {
+        return (0, Some(CursorRebuildReason::FileIdChanged));
     }
     if let (Some(stored), Some(current)) = (cursor.prefix, prefix) {
         if stored != current {
@@ -2728,6 +2825,9 @@ fn cursor_rebuild_reason(
     let file_id_changed = matches!((cursor.last_file_id, file_id), (Some(previous), Some(current)) if previous != current);
     if file_id_changed && prefix_changed {
         return Some(CursorRebuildReason::FileIdAndPrefixChanged);
+    }
+    if file_id_changed {
+        return Some(CursorRebuildReason::FileIdChanged);
     }
     if prefix_changed {
         return Some(CursorRebuildReason::PrefixChanged);
@@ -2875,6 +2975,7 @@ mod tests {
             self.file_checkpoint.insert(
                 crate::core::FileCheckpointKey::Codex(logical_id.to_owned()),
                 crate::core::UsageCursor {
+                    file_id: None,
                     kind: crate::core::CursorKind::Codex,
                     logical_id: logical_id.to_owned(),
                     offset: 0,
@@ -3073,7 +3174,7 @@ mod tests {
         let mut buf = Vec::new();
         super::read_appended(
             path,
-            offset,
+            (offset, None),
             size,
             super::SourceKind::Claude,
             None,
@@ -3092,6 +3193,143 @@ mod tests {
             assert!(super::CLAUDE_LIMITS_PERIOD_MS >= 60_000);
             assert!(super::CODEX_LIMITS_PERIOD_MS >= 60_000);
         }
+    }
+
+    #[test]
+    fn component_calendar_dynamic_zone_uses_historical_rule_changes() {
+        let mut zone = super::DYNAMIC_TIME_ZONE_INFORMATION::default();
+        for (dest, unit) in zone
+            .TimeZoneKeyName
+            .iter_mut()
+            .zip("Eastern Standard Time".encode_utf16())
+        {
+            *dest = unit;
+        }
+        // US DST began in April in 2006, but in March starting in 2007.
+        for (stamp, expected) in [
+            ("2006-03-20T04:30:00Z", (2006, 3, 19)),
+            ("2007-03-20T04:30:00Z", (2007, 3, 20)),
+        ] {
+            assert_eq!(
+                super::local_date_in_zone(parse_timestamp(stamp).unwrap(), &zone),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn component_calendar_uses_event_dst_rules_for_dates_and_month_totals() {
+        let zone = super::DYNAMIC_TIME_ZONE_INFORMATION {
+            Bias: 300,
+            DaylightBias: -60,
+            StandardDate: super::SYSTEMTIME {
+                wMonth: 11,
+                wDay: 1,
+                wHour: 2,
+                ..Default::default()
+            },
+            DaylightDate: super::SYSTEMTIME {
+                wMonth: 3,
+                wDay: 2,
+                wHour: 2,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        for (stamp, date) in [
+            ("2026-07-01T04:30:00Z", (2026, 7, 1)),
+            ("2026-01-01T04:30:00Z", (2025, 12, 31)),
+            ("2026-11-01T04:30:00Z", (2026, 11, 1)),
+            ("2025-07-01T04:30:00Z", (2025, 7, 1)),
+            ("2025-01-01T04:30:00Z", (2024, 12, 31)),
+        ] {
+            assert_eq!(
+                super::local_date_in_zone(parse_timestamp(stamp).unwrap(), &zone),
+                Some(date)
+            );
+        }
+        let root = std::env::temp_dir().join(format!(
+            "rundog-dst-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let session = claude_session(&root);
+        fs::write(
+            &session,
+            format!("{}\n", claude_usage_line("dst", "2026-11-01T04:30:00Z")),
+        )
+        .unwrap();
+        let mut collector = new_claude_collector(&root);
+        let window = super::DayWindow {
+            time_zone: zone,
+            bias_minutes: 300,
+            today: 20261101,
+            month_start: 20261101,
+        };
+        collector.register_jsonl_file(&session, window, false);
+        collector.scan_file(&session, window, unix_now_ms());
+        assert_eq!(collector.snapshot.claude.month_input_tokens, 1_000_000);
+        assert!(collector.snapshot.claude.today_cents > 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn component_month_window_excludes_future_events_and_handles_year_rollover() {
+        let root = std::env::temp_dir().join(format!(
+            "rundog-month-bounds-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let session = claude_session(&root);
+        for (month_start, today, stamps) in [
+            (
+                20260901,
+                20260930,
+                [
+                    "2026-08-31T23:59:59Z",
+                    "2026-09-01T00:00:00Z",
+                    "2026-09-30T23:59:59Z",
+                    "2026-10-01T00:00:00Z",
+                ],
+            ),
+            (
+                20261201,
+                20261231,
+                [
+                    "2026-11-30T23:59:59Z",
+                    "2026-12-01T00:00:00Z",
+                    "2026-12-31T23:59:59Z",
+                    "2027-01-01T00:00:00Z",
+                ],
+            ),
+        ] {
+            let window = super::DayWindow {
+                time_zone: super::DYNAMIC_TIME_ZONE_INFORMATION::default(),
+                bias_minutes: 0,
+                today,
+                month_start,
+            };
+            let mut payload = String::new();
+            for (i, stamp) in stamps.iter().enumerate() {
+                assert_eq!(
+                    is_current_month(parse_timestamp(stamp).unwrap(), window),
+                    i == 1 || i == 2
+                );
+                payload.push_str(&claude_usage_line(&format!("event-{i}"), stamp));
+                payload.push('\n');
+            }
+            fs::write(&session, payload).unwrap();
+            let mut collector = new_claude_collector(&root);
+            collector.register_jsonl_file(&session, window, false);
+            collector.scan_file(&session, window, unix_now_ms());
+            assert_eq!(collector.snapshot.claude.month_input_tokens, 2_000_000);
+            assert!(collector.snapshot.claude.today_cents > 0);
+            assert_eq!(
+                collector.snapshot.claude.month_cents,
+                collector.snapshot.claude.today_cents * 2
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -4572,6 +4810,150 @@ mod tests {
         let chunk = read_chunk(&session, 0, super::MAX_BYTES_PER_TICK);
         let _ = fs::remove_dir_all(&root);
         assert_eq!(chunk.events.len(), 1);
+    }
+
+    #[test]
+    fn component_store_legacy_identity_rebuilds_aggregate_and_cursors_together() {
+        let root = std::env::temp_dir().join(format!(
+            "rundog-legacy-fileid-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let session = claude_session(&root);
+        let store_root = root.join("store");
+        fs::write(
+            &session,
+            format!("{}\n", claude_usage_line("old", &current_stamp())),
+        )
+        .unwrap();
+        let mut first = new_persisted_collector(&root, store_root.clone());
+        tick_idle(&mut first);
+        let mut state = first.build_state(super::day_window(unix_now_ms()));
+        for cursor in &mut state.cursors {
+            cursor.file_id = None;
+        }
+        assert!(matches!(
+            super::FileUsageStore::at(store_root.clone()).persist(&state),
+            crate::core::PersistStatus::Applied { .. }
+        ));
+        let mut restored = new_persisted_collector(&root, store_root);
+        assert_eq!(tick_idle(&mut restored), UsageTick::Idle);
+        assert_eq!(restored.snapshot.claude.month_input_tokens, 1_000_000);
+        assert!(restored
+            .build_state(super::day_window(unix_now_ms()))
+            .cursors[0]
+            .file_id
+            .is_some());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn component_reader_restart_detects_same_prefix_larger_replacement() {
+        let root = std::env::temp_dir().join(format!(
+            "rundog-fileid-restart-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let session = claude_session(&root);
+        let store = root.join("store");
+        let prefix = format!("{}\n", " ".repeat(80));
+        let stamp = current_stamp();
+        fs::write(
+            &session,
+            format!("{prefix}{}\n", claude_usage_line("old", &stamp)),
+        )
+        .unwrap();
+        let mut first = new_persisted_collector(&root, store.clone());
+        assert_eq!(tick_idle(&mut first), UsageTick::Idle);
+        assert_eq!(first.snapshot.claude.month_input_tokens, 1_000_000);
+        let state = first.build_state(super::day_window(unix_now_ms()));
+        assert!(state.cursors[0].file_id.is_some());
+        assert_eq!(
+            crate::core::UsageState::decode(&state.encode())
+                .unwrap()
+                .cursors,
+            state.cursors
+        );
+        drop(first);
+        fs::rename(&session, root.join("old-session.saved")).unwrap();
+        fs::write(
+            &session,
+            format!(
+                "{prefix}{}\n{}\n",
+                claude_usage_line("new", &stamp),
+                claude_usage_line("newer", &stamp)
+            ),
+        )
+        .unwrap();
+        let mut restored = new_persisted_collector(&root, store);
+        assert_eq!(tick_idle(&mut restored), UsageTick::Idle);
+        assert_eq!(restored.snapshot.claude.month_input_tokens, 3_000_000);
+        assert_eq!(
+            restored.last_rebuild_reason,
+            Some(CursorRebuildReason::FileIdChanged)
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn component_reader_oversized_suffix_is_never_a_record_across_ticks_or_restart() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-jsonl-huge-suffix-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let session = claude_session(&root);
+        let stamp = current_stamp();
+        let suffix = claude_usage_line("must-skip", &stamp);
+        let good = claude_usage_line("must-count", &stamp);
+        let incomplete = format!("{}{suffix}", " ".repeat(1_100 * 1_024));
+        fs::write(&session, &incomplete).unwrap();
+        let mut position = (0, None);
+        let mut buf = Vec::new();
+        for _ in 0..4 {
+            let chunk = super::read_appended(
+                &session,
+                position,
+                incomplete.len() as u64,
+                super::SourceKind::Claude,
+                None,
+                super::MAX_BYTES_PER_TICK,
+                &mut buf,
+            );
+            assert_eq!(chunk.new_offset, 0);
+            assert!(chunk.events.is_empty());
+            assert!(chunk.consumed <= super::MAX_SKIP_PER_READ);
+            position = (chunk.new_offset, chunk.discard_offset);
+        }
+        // Restart restores only the committed boundary, not the transient head.
+        let restart = read_chunk(&session, position.0, super::MAX_BYTES_PER_TICK);
+        assert_eq!(restart.new_offset, 0);
+        assert!(restart.events.is_empty());
+        fs::write(&session, format!("{incomplete}\n{good}\n")).unwrap();
+        for start in [position, (restart.new_offset, restart.discard_offset)] {
+            let mut position = start;
+            let mut count = 0;
+            let size = fs::metadata(&session).unwrap().len();
+            for _ in 0..6 {
+                let chunk = super::read_appended(
+                    &session,
+                    position,
+                    size,
+                    super::SourceKind::Claude,
+                    None,
+                    super::MAX_BYTES_PER_TICK,
+                    &mut buf,
+                );
+                count += chunk.events.len();
+                if chunk.new_offset != 0 {
+                    assert!(chunk.new_offset > incomplete.len() as u64);
+                }
+                position = (chunk.new_offset, chunk.discard_offset);
+            }
+            assert_eq!(count, 1);
+            assert_eq!(position, (size, None));
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

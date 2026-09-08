@@ -1,18 +1,19 @@
-use std::{mem::size_of, ptr};
+use std::{mem::size_of, ptr, time::Instant};
 
 use windows_sys::Win32::{
-    Foundation::{HWND, POINT},
+    Foundation::{HWND, POINT, RECT},
     UI::{
         Shell::{
-            Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_INFO, NIIF_NOSOUND,
-            NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NIN_POPUPCLOSE, NIN_POPUPOPEN,
-            NIN_SELECT, NOTIFYICONDATAW, NOTIFYICON_VERSION_4,
+            Shell_NotifyIconGetRect, Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP,
+            NIIF_INFO, NIIF_NOSOUND, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION,
+            NIN_POPUPCLOSE, NIN_POPUPOPEN, NIN_SELECT, NOTIFYICONDATAW, NOTIFYICONIDENTIFIER,
+            NOTIFYICON_VERSION_4,
         },
         WindowsAndMessaging::{
             AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, KillTimer, PostMessageW,
             SetForegroundWindow, SetTimer, TrackPopupMenu, HICON, HMENU, MF_CHECKED, MF_GRAYED,
             MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, TPM_RIGHTBUTTON, WM_CONTEXTMENU,
-            WM_NULL,
+            WM_MOUSEMOVE, WM_NULL,
         },
     },
 };
@@ -36,6 +37,30 @@ const NIN_KEYSELECT: u32 = NIN_SELECT | 1;
 pub const PROMOTE_TIMER_ID: usize = 3;
 const PROMOTE_RETRY_MS: u32 = 500;
 const PROMOTE_MAX_ATTEMPTS: u8 = 10;
+pub const HOVER_TIMER_ID: usize = 5;
+const HOVER_POLL_MS: u32 = 100;
+const HOVER_DELAY_MS: u128 = 400;
+
+#[derive(Debug, PartialEq)]
+enum HoverAction {
+    Stop,
+    Wait,
+    Show,
+}
+
+fn hover_action(inside: bool, pinned: bool, visible: bool, elapsed_ms: u128) -> HoverAction {
+    if !inside || pinned {
+        HoverAction::Stop
+    } else if visible || elapsed_ms < HOVER_DELAY_MS {
+        HoverAction::Wait
+    } else {
+        HoverAction::Show
+    }
+}
+
+fn point_in_rect(point: POINT, rect: RECT) -> bool {
+    point.x >= rect.left && point.x < rect.right && point.y >= rect.top && point.y < rect.bottom
+}
 
 pub const COMMAND_THEME_SYSTEM: u32 = 1_001;
 pub const COMMAND_THEME_LIGHT: u32 = 1_002;
@@ -102,6 +127,7 @@ pub struct TrayAdapter {
     flyout_pinned: bool,
     added: bool,
     promote_attempts: u8,
+    hover_started: Option<Instant>,
     flyout: HoverFlyout,
     last_icon: Option<TrayIcon>,
     text_icon: Option<GeneratedIcon>,
@@ -128,6 +154,7 @@ impl TrayAdapter {
             auto_update_enabled: auto_update,
             flyout_pinned: super::registry::load_pinned_flyout(),
             added: false,
+            hover_started: None,
             promote_attempts: 0,
             flyout: HoverFlyout::new(),
             last_icon: None,
@@ -152,6 +179,7 @@ impl TrayAdapter {
             Effect::ModifyTray(icon) => self.modify(icon),
             Effect::RemoveTray => {
                 self.stop_promote();
+                self.stop_hover_timer();
                 self.flyout.destroy();
                 self.last_icon = None;
                 self.text_icon = None;
@@ -198,6 +226,7 @@ impl TrayAdapter {
 
     /// Opens the right-click menu. Menu handles exist only for this invocation.
     pub fn show_menu(&mut self, update_state: &UpdateMenuState) {
+        self.stop_hover_timer();
         let restore_pinned = self.flyout_pinned;
         self.flyout.hide();
         super::process::trim_working_set();
@@ -409,6 +438,7 @@ impl TrayAdapter {
     }
 
     pub fn toggle_pinned_flyout(&mut self) {
+        self.stop_hover_timer();
         self.flyout_pinned = !self.flyout_pinned;
         let _ = super::registry::save_pinned_flyout(self.flyout_pinned);
         self.flyout.set_pinned(self.flyout_pinned);
@@ -429,6 +459,7 @@ impl TrayAdapter {
 
     pub fn handle_hover(&mut self, notification: u32) {
         if Self::is_popup_close_notification(notification) {
+            self.stop_hover_timer();
             self.flyout.hide_unless_pinned();
             if !self.flyout.is_pinned() {
                 super::process::trim_working_set();
@@ -437,6 +468,56 @@ impl TrayAdapter {
         }
         if Self::is_popup_open_notification(notification) && self.last_icon.is_some() {
             self.flyout.show_near_icon(self.hwnd);
+        }
+        if (notification == WM_MOUSEMOVE || Self::is_popup_open_notification(notification))
+            && self.last_icon.is_some()
+            && !self.flyout.is_pinned()
+            && self.hover_started.is_none()
+            && unsafe { SetTimer(self.hwnd, HOVER_TIMER_ID, HOVER_POLL_MS, None) } != 0
+        {
+            self.hover_started = Some(Instant::now());
+        }
+    }
+
+    /// 22H2 can emit only WM_MOUSEMOVE. Poll only while hovering so a missing
+    /// NIN_POPUPCLOSE cannot leave the card visible or a timer running forever.
+    pub fn on_hover_timer(&mut self) {
+        let Some(started) = self.hover_started else {
+            return;
+        };
+        let ident = NOTIFYICONIDENTIFIER {
+            cbSize: size_of::<NOTIFYICONIDENTIFIER>() as u32,
+            hWnd: self.hwnd,
+            uID: 1,
+            ..Default::default()
+        };
+        let mut rect = RECT::default();
+        let mut point = POINT::default();
+        let inside = unsafe { Shell_NotifyIconGetRect(&ident, &mut rect) } >= 0
+            && unsafe { GetCursorPos(&mut point) } != 0
+            && point_in_rect(point, rect);
+        match hover_action(
+            inside,
+            self.flyout.is_pinned(),
+            self.flyout.is_visible(),
+            started.elapsed().as_millis(),
+        ) {
+            HoverAction::Stop => {
+                self.stop_hover_timer();
+                let was_visible = self.flyout.is_visible();
+                self.flyout.hide_unless_pinned();
+                if was_visible && !self.flyout.is_pinned() {
+                    super::process::trim_working_set();
+                }
+            }
+            HoverAction::Wait => {}
+            HoverAction::Show => self.flyout.show_near_icon(self.hwnd),
+        }
+    }
+
+    fn stop_hover_timer(&mut self) {
+        if self.hover_started.take().is_some() && !self.hwnd.is_null() {
+            let _ = unsafe { KillTimer(self.hwnd, HOVER_TIMER_ID) };
         }
     }
 
@@ -746,6 +827,40 @@ mod tests {
     };
     use windows_sys::Win32::UI::Shell::NIN_SELECT;
     use windows_sys::Win32::UI::WindowsAndMessaging::{WM_CONTEXTMENU, WM_RBUTTONUP};
+
+    #[test]
+    fn component_hover_fallback_delays_shows_and_stops_without_shell_popup_events() {
+        use super::{hover_action, HoverAction};
+        assert_eq!(hover_action(true, false, false, 0), HoverAction::Wait);
+        assert_eq!(hover_action(true, false, false, 399), HoverAction::Wait);
+        assert_eq!(hover_action(true, false, false, 400), HoverAction::Show);
+        assert_eq!(hover_action(true, false, true, 900), HoverAction::Wait);
+        assert_eq!(hover_action(false, false, true, 900), HoverAction::Stop);
+        assert_eq!(hover_action(false, false, false, 50), HoverAction::Stop);
+        assert_eq!(hover_action(true, true, true, 900), HoverAction::Stop);
+        let rect = super::RECT {
+            left: -100,
+            top: 10,
+            right: -80,
+            bottom: 30,
+        };
+        for (x, y, inside) in [
+            (-100, 10, true),
+            (-81, 29, true),
+            (-80, 10, false),
+            (-100, 30, false),
+            (-101, 20, false),
+        ] {
+            assert_eq!(super::point_in_rect(super::POINT { x, y }, rect), inside);
+        }
+        assert!(![
+            1,
+            2,
+            super::PROMOTE_TIMER_ID,
+            crate::windows::usage::USAGE_TIMER_ID
+        ]
+        .contains(&super::HOVER_TIMER_ID));
+    }
 
     #[test]
     fn component_command_mapping_covers_known_and_unknown_input_partitions() {
