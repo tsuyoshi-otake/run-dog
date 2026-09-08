@@ -52,6 +52,7 @@ Filename: "{app}\{#AppExeName}"; Flags: nowait
 
 ; RunDog-owned cache only. Do not name Claude or Codex homes here.
 [UninstallDelete]
+Type: filesandordirs; Name: "{localappdata}\RunDog"
 Type: filesandordirs; Name: "{localappdata}\SystemExe\RunDog"
 
 [Code]

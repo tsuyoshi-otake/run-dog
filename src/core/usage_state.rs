@@ -820,7 +820,7 @@ mod tests {
         ));
         assert!(usage_store_root_is_forbidden(codex, &[claude, codex]));
         assert!(!usage_store_root_is_forbidden(
-            Path::new(r"C:\Users\me\AppData\Local\SystemExe\RunDog\usage"),
+            Path::new(r"C:\Users\me\AppData\Local\RunDog\usage"),
             &[claude, codex]
         ));
     }

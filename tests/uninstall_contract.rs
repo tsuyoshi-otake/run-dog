@@ -34,8 +34,12 @@ fn inno_script_deletes_rundog_owned_paths_only() {
         "uninstall must declare RunDog cache deletion"
     );
     assert!(
+        ISS.contains("{localappdata}\\RunDog"),
+        "uninstall must delete the current RunDog usage subtree"
+    );
+    assert!(
         ISS.contains("{localappdata}\\SystemExe\\RunDog"),
-        "uninstall must delete the RunDog LOCALAPPDATA subtree"
+        "uninstall must delete the legacy usage and update subtree"
     );
     assert!(
         ISS.contains("Software\\Microsoft\\Windows\\CurrentVersion\\Run"),
@@ -66,6 +70,7 @@ fn contract_document_states_delete_preserve_and_not_run() {
     assert!(CONTRACT.contains("NOT RUN"));
     assert!(CONTRACT.contains(".claude"));
     assert!(CONTRACT.contains(".codex"));
+    assert!(CONTRACT.contains("%LOCALAPPDATA%\\RunDog\\usage"));
     assert!(CONTRACT.contains("%LOCALAPPDATA%\\SystemExe\\RunDog\\usage"));
     assert!(CONTRACT.contains("%LOCALAPPDATA%\\SystemExe\\RunDog\\updates"));
     assert!(CONTRACT.contains("Launch at startup"));
