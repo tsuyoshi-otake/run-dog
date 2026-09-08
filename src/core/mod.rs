@@ -43,11 +43,11 @@ pub use storage::StorageStatus;
 pub use theme::{ResolvedTheme, ThemePreference};
 pub use tray_raster::{rasterize_tray_glyph, TRAY_ICON_SIZE};
 pub use usage::{
-    cost_cents, days_to_ymd, format_banked_reset_label, format_chatgpt_plan_label,
-    format_compact_token_count, format_fable_limit_label, format_limit_label, format_plan_label,
-    format_usage_heading, is_long_context_request, local_hms, local_ymd, parse_rfc3339_ms,
-    resolve_codex_model, windows_tz_bias_minutes, ymd_iso, ymd_key, LimitWindow, ProviderUsage,
-    TokenUsage, UsageSnapshot,
+    cost_cents, cost_nanos, days_to_ymd, display_cents, format_banked_reset_label,
+    format_chatgpt_plan_label, format_compact_token_count, format_fable_limit_label,
+    format_limit_label, format_plan_label, format_usage_heading, is_long_context_request,
+    local_hms, local_ymd, parse_rfc3339_ms, resolve_codex_model, windows_tz_bias_minutes, ymd_iso,
+    ymd_key, LimitWindow, ProviderUsage, TokenUsage, UsageSnapshot, NANOS_PER_CENT,
 };
 pub use usage_checkpoint::{
     FileCheckpointCursor, FileCheckpointKey, UsageCheckpoint, USAGE_CHECKPOINT_MIGRATION_VERSION,

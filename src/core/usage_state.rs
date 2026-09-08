@@ -6,12 +6,13 @@
 use std::collections::HashSet;
 
 use super::{
-    hex_decode, retain_keys_for_month, ClaudeDedupeKey, CodexTokenTotals, FileCheckpointKey,
-    ProviderUsage, UsageCheckpoint, UsageSnapshot,
+    display_cents, hex_decode, retain_keys_for_month, ClaudeDedupeKey, CodexTokenTotals,
+    FileCheckpointKey, ProviderUsage, UsageCheckpoint, UsageSnapshot, NANOS_PER_CENT,
 };
 
-pub const USAGE_STATE_HEADER: &str = "rundog-usage-state-1";
-pub const USAGE_STATE_SCHEMA_VERSION: u32 = 1;
+const USAGE_STATE_HEADER_V1: &str = "rundog-usage-state-1";
+pub const USAGE_STATE_HEADER: &str = "rundog-usage-state-2";
+pub const USAGE_STATE_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CursorKind {
@@ -117,10 +118,14 @@ impl UsageState {
                 "catch_up_done={catch_up}\n",
                 "claude_today={claude_today}\n",
                 "claude_month={claude_month}\n",
+                "claude_today_nanos={claude_today_nanos}\n",
+                "claude_month_nanos={claude_month_nanos}\n",
                 "claude_in={claude_in}\n",
                 "claude_out={claude_out}\n",
                 "codex_today={codex_today}\n",
                 "codex_month={codex_month}\n",
+                "codex_today_nanos={codex_today_nanos}\n",
+                "codex_month_nanos={codex_month_nanos}\n",
                 "codex_in={codex_in}\n",
                 "codex_out={codex_out}\n",
             ),
@@ -133,10 +138,26 @@ impl UsageState {
             catch_up = u32::from(self.aggregate.catch_up_done),
             claude_today = self.aggregate.snapshot.claude.today_cents,
             claude_month = self.aggregate.snapshot.claude.month_cents,
+            claude_today_nanos = persisted_nanos(
+                self.aggregate.snapshot.claude.today_cents,
+                self.aggregate.snapshot.claude.today_cost_nanos,
+            ),
+            claude_month_nanos = persisted_nanos(
+                self.aggregate.snapshot.claude.month_cents,
+                self.aggregate.snapshot.claude.month_cost_nanos,
+            ),
             claude_in = self.aggregate.snapshot.claude.month_input_tokens,
             claude_out = self.aggregate.snapshot.claude.month_output_tokens,
             codex_today = self.aggregate.snapshot.codex.today_cents,
             codex_month = self.aggregate.snapshot.codex.month_cents,
+            codex_today_nanos = persisted_nanos(
+                self.aggregate.snapshot.codex.today_cents,
+                self.aggregate.snapshot.codex.today_cost_nanos,
+            ),
+            codex_month_nanos = persisted_nanos(
+                self.aggregate.snapshot.codex.month_cents,
+                self.aggregate.snapshot.codex.month_cost_nanos,
+            ),
             codex_in = self.aggregate.snapshot.codex.month_input_tokens,
             codex_out = self.aggregate.snapshot.codex.month_output_tokens,
         );
@@ -184,8 +205,10 @@ impl UsageState {
     #[must_use]
     pub fn decode(payload: &str) -> Option<Self> {
         let mut lines = payload.lines();
-        if lines.next()? != USAGE_STATE_HEADER {
-            return None;
+        match lines.next()? {
+            USAGE_STATE_HEADER => {}
+            USAGE_STATE_HEADER_V1 => return None,
+            _ => return None,
         }
         let mut schema_version = None;
         let mut generation = None;
@@ -195,10 +218,14 @@ impl UsageState {
         let mut catch_up_done = None;
         let mut claude_today = 0_u32;
         let mut claude_month = 0_u32;
+        let mut claude_today_nanos = None;
+        let mut claude_month_nanos = None;
         let mut claude_in = 0_u64;
         let mut claude_out = 0_u64;
         let mut codex_today = 0_u32;
         let mut codex_month = 0_u32;
+        let mut codex_today_nanos = None;
+        let mut codex_month_nanos = None;
         let mut codex_in = 0_u64;
         let mut codex_out = 0_u64;
         let mut cursors = Vec::new();
@@ -226,6 +253,10 @@ impl UsageState {
                 claude_today = value.parse().ok()?;
             } else if let Some(value) = line.strip_prefix("claude_month=") {
                 claude_month = value.parse().ok()?;
+            } else if let Some(value) = line.strip_prefix("claude_today_nanos=") {
+                claude_today_nanos = Some(value.parse().ok()?);
+            } else if let Some(value) = line.strip_prefix("claude_month_nanos=") {
+                claude_month_nanos = Some(value.parse().ok()?);
             } else if let Some(value) = line.strip_prefix("claude_in=") {
                 claude_in = value.parse().ok()?;
             } else if let Some(value) = line.strip_prefix("claude_out=") {
@@ -234,6 +265,10 @@ impl UsageState {
                 codex_today = value.parse().ok()?;
             } else if let Some(value) = line.strip_prefix("codex_month=") {
                 codex_month = value.parse().ok()?;
+            } else if let Some(value) = line.strip_prefix("codex_today_nanos=") {
+                codex_today_nanos = Some(value.parse().ok()?);
+            } else if let Some(value) = line.strip_prefix("codex_month_nanos=") {
+                codex_month_nanos = Some(value.parse().ok()?);
             } else if let Some(value) = line.strip_prefix("codex_in=") {
                 codex_in = value.parse().ok()?;
             } else if let Some(value) = line.strip_prefix("codex_out=") {
@@ -291,20 +326,22 @@ impl UsageState {
                 last_collected_ms: last_collected_ms?,
                 catch_up_done: catch_up_done?,
                 snapshot: UsageSnapshot {
-                    claude: ProviderUsage {
-                        today_cents: claude_today,
-                        month_cents: claude_month,
-                        month_input_tokens: claude_in,
-                        month_output_tokens: claude_out,
-                        ..ProviderUsage::default()
-                    },
-                    codex: ProviderUsage {
-                        today_cents: codex_today,
-                        month_cents: codex_month,
-                        month_input_tokens: codex_in,
-                        month_output_tokens: codex_out,
-                        ..ProviderUsage::default()
-                    },
+                    claude: restore_provider(
+                        claude_today,
+                        claude_month,
+                        claude_today_nanos?,
+                        claude_month_nanos?,
+                        claude_in,
+                        claude_out,
+                    )?,
+                    codex: restore_provider(
+                        codex_today,
+                        codex_month,
+                        codex_today_nanos?,
+                        codex_month_nanos?,
+                        codex_in,
+                        codex_out,
+                    )?,
                     month_scan_in_progress: false,
                 },
             },
@@ -316,6 +353,38 @@ impl UsageState {
     pub fn prune_claude_keys_before_month(&mut self, month_start: u32) {
         self.claude_keys = retain_keys_for_month(&self.claude_keys, month_start);
     }
+}
+
+fn persisted_nanos(cents: u32, nanos: u64) -> u64 {
+    if nanos == 0 && cents > 0 {
+        u64::from(cents).saturating_mul(NANOS_PER_CENT)
+    } else {
+        nanos
+    }
+}
+
+fn restore_provider(
+    today_cents: u32,
+    month_cents: u32,
+    today_cost_nanos: u64,
+    month_cost_nanos: u64,
+    month_input_tokens: u64,
+    month_output_tokens: u64,
+) -> Option<ProviderUsage> {
+    if display_cents(today_cost_nanos) != today_cents
+        || display_cents(month_cost_nanos) != month_cents
+    {
+        return None;
+    }
+    Some(ProviderUsage {
+        today_cents,
+        month_cents,
+        today_cost_nanos,
+        month_cost_nanos,
+        month_input_tokens,
+        month_output_tokens,
+        ..ProviderUsage::default()
+    })
 }
 
 fn cursor_sort_key(cursor: &UsageCursor) -> (u8, &str) {
@@ -432,6 +501,7 @@ pub fn usage_store_root_is_forbidden(
 mod tests {
     use super::{
         usage_store_root_is_forbidden, CursorKind, UsageCursor, UsageState, USAGE_STATE_HEADER,
+        USAGE_STATE_HEADER_V1,
     };
     use crate::core::{
         ClaudeDedupeKey, CodexTokenTotals, FileCheckpointCursor, FileCheckpointKey, ProviderUsage,
@@ -442,7 +512,7 @@ mod tests {
     fn sample_state(catch_up_done: bool) -> UsageState {
         UsageState {
             generation: 3,
-            schema_version: 1,
+            schema_version: crate::core::USAGE_STATE_SCHEMA_VERSION,
             aggregate: super::UsageAggregate {
                 month_start: 20_260_901,
                 today: 20_260_905,
@@ -452,6 +522,8 @@ mod tests {
                     claude: ProviderUsage {
                         today_cents: 3,
                         month_cents: 12,
+                        today_cost_nanos: 3 * crate::core::NANOS_PER_CENT,
+                        month_cost_nanos: 12 * crate::core::NANOS_PER_CENT,
                         month_input_tokens: 100,
                         month_output_tokens: 40,
                         ..ProviderUsage::default()
@@ -459,6 +531,8 @@ mod tests {
                     codex: ProviderUsage {
                         today_cents: 5,
                         month_cents: 9,
+                        today_cost_nanos: 5 * crate::core::NANOS_PER_CENT,
+                        month_cost_nanos: 9 * crate::core::NANOS_PER_CENT,
                         month_input_tokens: 80,
                         month_output_tokens: 20,
                         ..ProviderUsage::default()
@@ -645,6 +719,28 @@ mod tests {
     }
 
     #[test]
+    fn component_usage_state_preserves_subcent_cost_and_rejects_cent_only_schema() {
+        let mut state = sample_state(true);
+        state.aggregate.snapshot.codex.clear_today_cost();
+        state.aggregate.snapshot.codex.clear_month_cost();
+        state.aggregate.snapshot.codex.add_today_nanos(25_000_000);
+        state.aggregate.snapshot.codex.add_month_nanos(25_000_000);
+        let encoded = state.encode();
+        let decoded = UsageState::decode(&encoded).expect("precise state");
+        assert_eq!(decoded.aggregate.snapshot.codex.today_cents, 3);
+        assert_eq!(
+            decoded.aggregate.snapshot.codex.today_cost_nanos,
+            25_000_000
+        );
+        assert_eq!(decoded, state);
+
+        let legacy = encoded
+            .replacen(USAGE_STATE_HEADER, USAGE_STATE_HEADER_V1, 1)
+            .replacen("schema=2", "schema=1", 1);
+        assert!(UsageState::decode(&legacy).is_none());
+    }
+
+    #[test]
     fn component_usage_state_rejects_positional_extra_cursor_columns() {
         let mut payload = sample_state(true).encode();
         payload = payload.replace(
@@ -675,7 +771,7 @@ mod tests {
     fn component_month_rollover_keeps_cursors_in_schema() {
         let mut state = sample_state(true);
         state.aggregate.month_start = 20_261_001;
-        state.aggregate.snapshot.claude.month_cents = 0;
+        state.aggregate.snapshot.claude.clear_month_cost();
         state.aggregate.snapshot.claude.month_input_tokens = 0;
         let decoded = UsageState::decode(&state.encode()).expect("state");
         assert_eq!(decoded.aggregate.month_start, 20_261_001);
@@ -693,6 +789,7 @@ mod tests {
             snapshot: UsageSnapshot {
                 claude: ProviderUsage {
                     month_cents: 9,
+                    month_cost_nanos: 9 * crate::core::NANOS_PER_CENT,
                     ..ProviderUsage::default()
                 },
                 ..UsageSnapshot::default()
@@ -723,7 +820,7 @@ mod tests {
         ));
         assert!(usage_store_root_is_forbidden(codex, &[claude, codex]));
         assert!(!usage_store_root_is_forbidden(
-            Path::new(r"C:\Users\me\AppData\Local\SystemExe\RunDog\usage"),
+            Path::new(r"C:\Users\me\AppData\Local\RunDog\usage"),
             &[claude, codex]
         ));
     }

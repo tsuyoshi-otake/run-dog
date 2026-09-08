@@ -102,7 +102,7 @@ export const I18N = {
     back: "RunDog に戻る",
     privacyBody: [
       "RunDog はアカウントを作りません。CPU・メモリ・GPU・ストレージは Windows の API で端末内だけ読みます。設定は HKCU\\Software\\SystemExe\\RunDog に保存します。",
-      "読むファイルは Claude の projects JSONL と .credentials.json、Codex の sessions JSONL と auth.json、および RunDog 自身の %LOCALAPPDATA%\\SystemExe\\RunDog です。JSONL の生プロンプトや応答を上限取得で送りません。",
+      "読むファイルは Claude の projects JSONL と .credentials.json、Codex の sessions JSONL と auth.json、および RunDog 自身の %LOCALAPPDATA%\\RunDog\\usage です。JSONL の生プロンプトや応答を上限取得で送りません。",
       "送信先は GitHub（api.github.com / github.com、起動時の更新確認と明示した導入）、Anthropic（api.anthropic.com の usage、必要時のみ platform.claude.com または console.anthropic.com の token refresh）、OpenAI（chatgpt.com の wham/usage）です。RunDog 自身のサーバーへは送りません。",
       "Claude の上限問い合わせは約 5 分ごと、Codex は約 60 秒ごとです。期限切れや認証失敗のとき Claude の refresh が走り、.credentials.json を ReplaceFileW で更新することがあります。Codex の auth.json は読み取りのみです。",
       "ベンダー上限の自動問い合わせは、Claude / Codex が端末にあるとき従来どおり On です。新しい「Automatic vendor usage-limit queries」設定はメニューと UX を壊すので見送りました。止めたい場合は認証情報か CLI を外してください。",
@@ -198,7 +198,7 @@ export const I18N = {
     back: "Back to RunDog",
     privacyBody: [
       "RunDog does not create an account. CPU, memory, GPU, and storage are read locally through Windows APIs. Settings live in HKCU\\Software\\SystemExe\\RunDog.",
-      "It may read Claude projects JSONL and .credentials.json, Codex sessions JSONL and auth.json, plus RunDog's own %LOCALAPPDATA%\\SystemExe\\RunDog store. Limit fetch does not send raw prompts or responses.",
+      "It may read Claude projects JSONL and .credentials.json, Codex sessions JSONL and auth.json, plus RunDog's own %LOCALAPPDATA%\\RunDog\\usage store. Limit fetch does not send raw prompts or responses.",
       "Destinations are GitHub (api.github.com / github.com — startup update check and explicit Install), Anthropic (api.anthropic.com usage; token refresh on platform.claude.com or console.anthropic.com when needed), and OpenAI (chatgpt.com wham/usage). There is no RunDog-owned server.",
       "Claude limit queries run about every 5 minutes; Codex about every 60 seconds. An expired or unauthorized Claude token may refresh and rewrite .credentials.json via ReplaceFileW. Codex auth.json is read-only.",
       "Automatic vendor limit queries stay On when those CLIs are present. A new Automatic vendor usage-limit queries setting is deferred so the tray UX is not broken. Remove credentials or the CLI to stop queries.",

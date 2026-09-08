@@ -11,7 +11,7 @@ The GitHub Pages copy lives in [`docs/i18n.js`](i18n.js) `privacyBody`.
 - Claude credentials at `%USERPROFILE%\.claude\.credentials.json` (or the config-dir equivalent).
 - Codex CLI JSONL under `%USERPROFILE%\.codex\sessions\{year}\` (or `%CODEX_HOME%`).
 - Codex credentials at `%USERPROFILE%\.codex\auth.json`.
-- RunDog usage state under `%LOCALAPPDATA%\SystemExe\RunDog\usage` (written by RunDog, not a vendor home).
+- RunDog usage state under `%LOCALAPPDATA%\RunDog\usage` (written by RunDog, not a vendor home).
 
 RunDog does not spawn `claude`, `codex`, or Node. Oversized JSONL lines are skipped
 so a large user blob cannot stall the reader. Limit fetch does not upload JSONL.

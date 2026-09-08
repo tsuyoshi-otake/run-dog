@@ -17,12 +17,17 @@ workers. There is no GUI framework and no resident poller thread.
 | Program | `%LOCALAPPDATA%\Programs\RunDog` |
 | Settings | `HKCU\Software\SystemExe\RunDog` |
 | Startup | `HKCU\...\Run` value `RunDog` |
-| Usage state | `%LOCALAPPDATA%\SystemExe\RunDog\usage` (`rundog-usage-state-1`) |
+| Usage state | `%LOCALAPPDATA%\RunDog\usage` (`rundog-usage-state-2`) |
 | Update cache | `%LOCALAPPDATA%\SystemExe\RunDog\updates` |
 
 Claude and Codex homes are read-only inputs except Claude
 `.credentials.json`, which OAuth refresh may rewrite. They are never the
 usage store and must survive uninstall.
+
+On first startup after upgrading, RunDog moves the legacy
+`%LOCALAPPDATA%\SystemExe\RunDog\usage` directory to the current usage-state
+location before loading it. The move stays on the same volume and does not copy
+the state payloads.
 
 ## Usage ingest
 
