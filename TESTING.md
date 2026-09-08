@@ -50,8 +50,10 @@ ISTQB のコンポーネントテストとして、各コンポーネントを�
 
 更新判定は `src/update.rs` の独立 oracle で検証する。`tests/update_protocol_integration.rs`
 は GitHub latest API、release asset、checksum、installer launcher をプロトコル互換の
-in-memory fake で接続し、**起動時チェックは通知のみ**、Install 許可後の verified launch、
-破損/stale artifact の launch 抑止を結合レベルで検証する。GitHub JSON decoder、WinHTTP、
+in-memory fake で接続し、本番と共有する一度限りの起動時自動導入 gate を通して、既定オン時の
+verified launch、設定オフ・確認中の設定変更・終了キャンセル時の導入抑止、現在版・確認失敗・
+破損/stale artifact の launch 抑止を結合レベルで検証する。Win32 adapter が gate の成功判定を
+`install_available` へ接続することも source contract で固定する。GitHub JSON decoder、WinHTTP、
 download、SHA-256、ShellExecute、Inno Setup は実呼出ししない。release descriptor、
 version、asset URL、checksum manifest の境界は component test と 2,048 ケースの PBT で
 固定するため、test 実行がネットワークや installer を起動することはない。`windows::update`

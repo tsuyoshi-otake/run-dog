@@ -53,6 +53,7 @@ use crate::{
         Event, TimerKind,
     },
     core::{AppSettings, ResolvedTheme},
+    update::StartupUpdateGate,
 };
 
 use self::{
@@ -67,7 +68,7 @@ use self::{
         COMMAND_INSTALL_UPDATE, COMMAND_RESCAN_MONTH_USAGE, COMMAND_TOGGLE_PINNED_FLYOUT,
         PROMOTE_TIMER_ID, TRAY_CALLBACK_MESSAGE,
     },
-    update::UpdateController,
+    update::{UpdateController, UpdateMenuState},
     usage::{
         UsageCollector, UsageTick, USAGE_CONTINUE_INTERVAL_MS, USAGE_FIRST_INTERVAL_MS,
         USAGE_IDLE_INTERVAL_MS, USAGE_TIMER_ID,
@@ -185,7 +186,7 @@ struct WindowContext {
     updater: UpdateController,
     usage: UsageCollector,
     taskbar_recreated_message: u32,
-    startup_auto_install: bool,
+    startup_update: StartupUpdateGate,
 }
 
 impl WindowContext {
@@ -211,14 +212,14 @@ impl WindowContext {
             updater: UpdateController::new(),
             usage: UsageCollector::new(),
             taskbar_recreated_message: 0,
-            startup_auto_install: false,
+            startup_update: StartupUpdateGate::default(),
         }
     }
 
     fn start(&mut self) {
         for effect in self.app.start() {
             if let Effect::CheckForUpdates { auto_install } = effect {
-                self.startup_auto_install = auto_install;
+                self.startup_update.arm(auto_install);
                 self.updater.check_for_updates(self.platform.hwnd, false);
             }
             self.platform.apply(&effect);
@@ -250,6 +251,7 @@ impl WindowContext {
 
     fn dispatch(&mut self, event: Event) {
         if matches!(&event, Event::ExitRequested) {
+            self.startup_update.cancel();
             self.updater.cancel();
             self.usage.cancel_remote_fetches();
             if !self.platform.hwnd.is_null() {
@@ -510,11 +512,15 @@ unsafe extern "system" fn window_proc(
             .platform
             .tray
             .notify_update_result(&context.updater.menu_state(), wparam != 0);
-        if context.startup_auto_install {
-            context.startup_auto_install = false;
-            if context.app.snapshot().settings.auto_update_on_startup {
-                context.updater.install_available(hwnd);
-            }
+        let update_available = matches!(
+            context.updater.menu_state(),
+            UpdateMenuState::Available { .. }
+        );
+        if context.startup_update.complete_check(
+            context.app.snapshot().settings.auto_update_on_startup,
+            update_available,
+        ) {
+            context.updater.install_available(hwnd);
         }
         return 0;
     }
