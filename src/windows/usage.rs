@@ -260,7 +260,7 @@ impl UsageCollector {
     #[must_use]
     fn with_dirs(claude_dir: PathBuf, codex_home: PathBuf, persist_checkpoint: bool) -> Self {
         let store = persist_checkpoint
-            .then(FileUsageStore::production)
+            .then(|| FileUsageStore::production(&claude_dir, &codex_home))
             .flatten();
         Self::with_dirs_and_store(claude_dir, codex_home, store)
     }
@@ -271,6 +271,7 @@ impl UsageCollector {
         codex_home: PathBuf,
         store: Option<FileUsageStore>,
     ) -> Self {
+        let store = store.map(|store| store.with_provider_roots(&claude_dir, &codex_home));
         let persist_checkpoint = store.is_some();
         let mut collector = Self {
             claude_dir,

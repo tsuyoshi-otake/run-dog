@@ -17,6 +17,7 @@ mod tray;
 mod update;
 mod usage;
 pub mod usage_store;
+mod usage_store_path;
 
 use std::{
     ffi::OsString,
