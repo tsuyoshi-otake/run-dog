@@ -94,7 +94,7 @@ fn arb_state() -> impl Strategy<Value = UsageState> {
         .prop_map(
             |(generation, month_start, today, cursors, keys, catch_up_done)| UsageState {
                 generation,
-                schema_version: 1,
+                schema_version: crate::core::USAGE_STATE_SCHEMA_VERSION,
                 aggregate: UsageAggregate {
                     month_start,
                     today,
@@ -104,6 +104,8 @@ fn arb_state() -> impl Strategy<Value = UsageState> {
                         claude: ProviderUsage {
                             today_cents: generation as u32 + 1,
                             month_cents: generation as u32,
+                            today_cost_nanos: (generation + 1) * crate::core::NANOS_PER_CENT,
+                            month_cost_nanos: generation * crate::core::NANOS_PER_CENT,
                             month_input_tokens: generation * 3,
                             month_output_tokens: generation * 5,
                             ..ProviderUsage::default()
@@ -111,6 +113,8 @@ fn arb_state() -> impl Strategy<Value = UsageState> {
                         codex: ProviderUsage {
                             today_cents: generation as u32 + 2,
                             month_cents: generation as u32 + 3,
+                            today_cost_nanos: (generation + 2) * crate::core::NANOS_PER_CENT,
+                            month_cost_nanos: (generation + 3) * crate::core::NANOS_PER_CENT,
                             month_input_tokens: generation * 7,
                             month_output_tokens: generation * 11,
                             ..ProviderUsage::default()
@@ -313,7 +317,7 @@ proptest! {
 fn state_at(offset: u64) -> UsageState {
     UsageState {
         generation: 0,
-        schema_version: 1,
+        schema_version: crate::core::USAGE_STATE_SCHEMA_VERSION,
         aggregate: UsageAggregate {
             month_start: 20_260_901,
             today: 20_260_905,

@@ -108,10 +108,16 @@ pub fn format_banked_reset_label(available: Option<u16>) -> Option<String> {
     }
 }
 
+/// Nanodollars in one display cent. Accumulators stay in nanos; UI rounds once.
+pub const NANOS_PER_CENT: u64 = 10_000_000;
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ProviderUsage {
     pub today_cents: u32,
     pub month_cents: u32,
+    /// Unrounded API-equivalent cost. `today_cents` is display-rounded from this.
+    pub today_cost_nanos: u64,
+    pub month_cost_nanos: u64,
     pub month_input_tokens: u64,
     pub month_output_tokens: u64,
     pub plan: [u8; 24],
@@ -198,6 +204,26 @@ impl ProviderUsage {
     #[must_use]
     pub const fn shows_banked_reset(self) -> bool {
         matches!(self.banked_reset_available, Some(count) if count > 0)
+    }
+
+    pub fn add_today_nanos(&mut self, nanos: u64) {
+        self.today_cost_nanos = self.today_cost_nanos.saturating_add(nanos);
+        self.today_cents = display_cents(self.today_cost_nanos);
+    }
+
+    pub fn add_month_nanos(&mut self, nanos: u64) {
+        self.month_cost_nanos = self.month_cost_nanos.saturating_add(nanos);
+        self.month_cents = display_cents(self.month_cost_nanos);
+    }
+
+    pub fn clear_today_cost(&mut self) {
+        self.today_cost_nanos = 0;
+        self.today_cents = 0;
+    }
+
+    pub fn clear_month_cost(&mut self) {
+        self.month_cost_nanos = 0;
+        self.month_cents = 0;
     }
 }
 
@@ -320,47 +346,66 @@ pub fn format_compact_token_count(tokens: u64) -> String {
     }
 }
 
-/// USD cents from a per-million-token price table.
+/// Half-up display cents from an unrounded nanodollar total.
+#[must_use]
+pub fn display_cents(nanos: u64) -> u32 {
+    let rounded = (u128::from(nanos) + u128::from(NANOS_PER_CENT) / 2) / u128::from(NANOS_PER_CENT);
+    u32::try_from(rounded).unwrap_or(u32::MAX)
+}
+
+/// Unrounded nanodollars from a per-million-token price table.
 ///
 /// `effective_day` is a `YYYY-MM-DD` local day used for scheduled price
 /// revisions, matching otak-usage `calcCost`.
 #[must_use]
-pub fn cost_cents(model: &str, usage: TokenUsage, effective_day: Option<&str>) -> Option<u32> {
+pub fn cost_nanos(model: &str, usage: TokenUsage, effective_day: Option<&str>) -> Option<u64> {
     let pricing = resolve_pricing(model, effective_day)?;
     let long_input_premium = pricing.long_context_input_multiplier.unwrap_or(1.0) - 1.0;
     let long_output_premium = pricing.long_context_output_multiplier.unwrap_or(1.0) - 1.0;
-    let usd = (usage.input as f64).mul_add(
-        pricing.input,
-        (usage.cached_input as f64).mul_add(
-            pricing.cached_input,
-            (usage.cache_read as f64).mul_add(
-                pricing.cache_read,
-                (usage.cache_write_5m as f64).mul_add(
-                    pricing.cache_write_5m,
-                    (usage.cache_write_1h as f64).mul_add(
-                        pricing.cache_write_1h,
-                        (usage.output as f64).mul_add(
-                            pricing.output,
-                            (usage.long_context_input as f64).mul_add(
-                                pricing.input * long_input_premium,
-                                (usage.long_context_cached_input as f64).mul_add(
-                                    pricing.cached_input * long_input_premium,
-                                    usage.long_context_output as f64
-                                        * pricing.output
-                                        * long_output_premium,
-                                ),
-                            ),
-                        ),
-                    ),
-                ),
-            ),
+    let mut total = 0_u128;
+    for (tokens, usd_per_mtok) in [
+        (usage.input, pricing.input),
+        (usage.cached_input, pricing.cached_input),
+        (usage.cache_read, pricing.cache_read),
+        (usage.cache_write_5m, pricing.cache_write_5m),
+        (usage.cache_write_1h, pricing.cache_write_1h),
+        (usage.output, pricing.output),
+        (usage.long_context_input, pricing.input * long_input_premium),
+        (
+            usage.long_context_cached_input,
+            pricing.cached_input * long_input_premium,
         ),
-    ) / 1_000_000.0;
-    if usd.is_finite() && usd >= 0.0 {
-        Some((usd * 100.0).round() as u32)
-    } else {
-        None
+        (
+            usage.long_context_output,
+            pricing.output * long_output_premium,
+        ),
+    ] {
+        let nanos_per_token = usd_per_mtok_to_nanos_per_token(usd_per_mtok)?;
+        total =
+            total.saturating_add(u128::from(tokens).saturating_mul(u128::from(nanos_per_token)));
     }
+    u64::try_from(total).ok()
+}
+
+/// USD cents from a per-million-token price table. Display-round of one event.
+///
+/// Do not sum this across events; accumulate [`cost_nanos`] and call
+/// [`display_cents`] once.
+#[must_use]
+pub fn cost_cents(model: &str, usage: TokenUsage, effective_day: Option<&str>) -> Option<u32> {
+    Some(display_cents(cost_nanos(model, usage, effective_day)?))
+}
+
+/// $1 / 1MTok = 1000 nanodollars per token.
+fn usd_per_mtok_to_nanos_per_token(usd_per_mtok: f64) -> Option<u64> {
+    if !usd_per_mtok.is_finite() || usd_per_mtok < 0.0 {
+        return None;
+    }
+    let nanos = (usd_per_mtok * 1_000.0).round();
+    if !nanos.is_finite() || nanos < 0.0 || nanos > u64::MAX as f64 {
+        return None;
+    }
+    Some(nanos as u64)
 }
 
 struct ModelPricing {
@@ -724,12 +769,66 @@ pub fn days_to_ymd(days: i64) -> (i32, u8, u8) {
 #[cfg(test)]
 mod tests {
     use super::{
-        cost_cents, days_to_ymd, format_banked_reset_label, format_chatgpt_plan_label,
-        format_compact_token_count, format_fable_limit_label, format_limit_label,
-        format_plan_label, format_usage_heading, is_long_context_request, local_ymd,
-        parse_rfc3339_ms, resolve_codex_model, windows_tz_bias_minutes, ymd_iso, ymd_key,
-        LimitWindow, ProviderUsage, TokenUsage,
+        cost_cents, cost_nanos, days_to_ymd, display_cents, format_banked_reset_label,
+        format_chatgpt_plan_label, format_compact_token_count, format_fable_limit_label,
+        format_limit_label, format_plan_label, format_usage_heading, is_long_context_request,
+        local_ymd, parse_rfc3339_ms, resolve_codex_model, windows_tz_bias_minutes, ymd_iso,
+        ymd_key, LimitWindow, ProviderUsage, TokenUsage,
     };
+
+    #[test]
+    fn component_split_event_cost_matches_one_batch_after_display_rounding() {
+        let one = TokenUsage {
+            input: 1,
+            ..TokenUsage::default()
+        };
+        let batch = TokenUsage {
+            input: 10_000,
+            ..TokenUsage::default()
+        };
+        let nanos_sum: u64 = (0..10_000)
+            .map(|_| cost_nanos("claude-opus-5", one, None).expect("priced"))
+            .sum();
+        let batch_nanos = cost_nanos("claude-opus-5", batch, None).expect("priced");
+
+        assert_eq!(cost_cents("claude-opus-5", one, None), Some(0));
+        assert_eq!(nanos_sum, batch_nanos);
+        assert_eq!(display_cents(nanos_sum), 5);
+        assert_eq!(cost_cents("claude-opus-5", batch, None), Some(5));
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn pbt_split_event_cost_matches_one_batch(
+            tokens in 1u64..8_000u64,
+            parts in 1u64..64u64,
+        ) {
+            let batch = TokenUsage {
+                input: tokens,
+                ..TokenUsage::default()
+            };
+            let batch_nanos = cost_nanos("claude-opus-5", batch, None).expect("priced");
+            let base = tokens / parts;
+            let remainder = tokens % parts;
+            let mut split_nanos = 0_u64;
+            for index in 0..parts {
+                let input = base + u64::from(index < remainder);
+                split_nanos = split_nanos.saturating_add(
+                    cost_nanos(
+                        "claude-opus-5",
+                        TokenUsage {
+                            input,
+                            ..TokenUsage::default()
+                        },
+                        None,
+                    )
+                    .expect("priced"),
+                );
+            }
+            proptest::prop_assert_eq!(split_nanos, batch_nanos);
+            proptest::prop_assert_eq!(display_cents(split_nanos), display_cents(batch_nanos));
+        }
+    }
 
     #[test]
     fn component_compact_token_counts_use_decimal_si_suffixes() {

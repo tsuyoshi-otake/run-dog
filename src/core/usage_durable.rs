@@ -153,7 +153,7 @@ mod tests {
     fn state_with_offset(offset: u64) -> UsageState {
         UsageState {
             generation: 0,
-            schema_version: 1,
+            schema_version: crate::core::USAGE_STATE_SCHEMA_VERSION,
             aggregate: UsageAggregate {
                 month_start: 20_260_901,
                 today: 20_260_905,
