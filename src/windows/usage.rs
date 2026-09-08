@@ -133,6 +133,19 @@ struct DayWindow {
     month_start: u32,
 }
 
+impl DayWindow {
+    fn contains_month_day(self, day: u32) -> bool {
+        let year = (self.month_start / 10_000) as i32;
+        let month = ((self.month_start / 100) % 100) as u8;
+        let next = if month == 12 {
+            ymd_key(year + 1, 1, 1)
+        } else {
+            ymd_key(year, month + 1, 1)
+        };
+        (self.month_start..next).contains(&day)
+    }
+}
+
 pub struct UsageCollector {
     claude_dir: PathBuf,
     codex_home: PathBuf,
@@ -1070,7 +1083,7 @@ impl UsageCollector {
             if day == window.today {
                 target.add_today_nanos(nanos);
             }
-            if day >= window.month_start {
+            if window.contains_month_day(day) {
                 target.add_month_nanos(nanos);
                 target.month_input_tokens = target
                     .month_input_tokens
@@ -1765,7 +1778,7 @@ fn path_is_under(path: &Path, root: &Path) -> bool {
 }
 
 fn is_current_month(mtime_ms: u64, window: DayWindow) -> bool {
-    ymd_key_from_unix(mtime_ms, window.bias_minutes) >= window.month_start
+    window.contains_month_day(ymd_key_from_unix(mtime_ms, window.bias_minutes))
 }
 
 struct AppendedChunk {
@@ -3105,6 +3118,64 @@ mod tests {
             assert!(super::CLAUDE_LIMITS_PERIOD_MS >= 60_000);
             assert!(super::CODEX_LIMITS_PERIOD_MS >= 60_000);
         }
+    }
+
+    #[test]
+    fn component_month_window_excludes_future_events_and_handles_year_rollover() {
+        let root = std::env::temp_dir().join(format!(
+            "rundog-month-bounds-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let session = claude_session(&root);
+        for (month_start, today, stamps) in [
+            (
+                20260901,
+                20260930,
+                [
+                    "2026-08-31T23:59:59Z",
+                    "2026-09-01T00:00:00Z",
+                    "2026-09-30T23:59:59Z",
+                    "2026-10-01T00:00:00Z",
+                ],
+            ),
+            (
+                20261201,
+                20261231,
+                [
+                    "2026-11-30T23:59:59Z",
+                    "2026-12-01T00:00:00Z",
+                    "2026-12-31T23:59:59Z",
+                    "2027-01-01T00:00:00Z",
+                ],
+            ),
+        ] {
+            let window = super::DayWindow {
+                bias_minutes: 0,
+                today,
+                month_start,
+            };
+            let mut payload = String::new();
+            for (i, stamp) in stamps.iter().enumerate() {
+                assert_eq!(
+                    is_current_month(parse_timestamp(stamp).unwrap(), window),
+                    i == 1 || i == 2
+                );
+                payload.push_str(&claude_usage_line(&format!("event-{i}"), stamp));
+                payload.push('\n');
+            }
+            fs::write(&session, payload).unwrap();
+            let mut collector = new_claude_collector(&root);
+            collector.register_jsonl_file(&session, window, false);
+            collector.scan_file(&session, window, unix_now_ms());
+            assert_eq!(collector.snapshot.claude.month_input_tokens, 2_000_000);
+            assert!(collector.snapshot.claude.today_cents > 0);
+            assert_eq!(
+                collector.snapshot.claude.month_cents,
+                collector.snapshot.claude.today_cents * 2
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
