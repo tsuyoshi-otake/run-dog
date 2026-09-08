@@ -59,7 +59,14 @@ impl FileUsageStore {
 
     #[must_use]
     pub fn load(&self) -> LoadStatus {
-        load_usage_state(self)
+        let status = load_usage_state(self);
+        match &status {
+            LoadStatus::Loaded(state) | LoadStatus::RecoveredPrior { state, .. } => {
+                self.cleanup_after_publish(state.generation);
+            }
+            LoadStatus::Missing => {}
+        }
+        status
     }
 
     #[must_use]
@@ -318,6 +325,43 @@ mod tests {
         };
         assert_eq!(requested, Some(100));
         assert_eq!(state.generation, 99);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn component_file_store_prunes_stale_generations_on_load() {
+        let root = temp_root("startup-retention");
+        fs::create_dir_all(&root).unwrap();
+        for generation in 1..=100 {
+            let mut state = sample();
+            state.generation = generation;
+            fs::write(
+                root.join(format!("g{generation:016}.state")),
+                state.encode(),
+            )
+            .unwrap();
+        }
+        fs::write(
+            root.join("current"),
+            b"rundog-usage-current-1\ngeneration=100\n",
+        )
+        .unwrap();
+        fs::write(root.join("abandoned.state.tmp"), b"partial").unwrap();
+
+        let store = FileUsageStore::at(root.clone());
+        let crate::core::LoadStatus::Loaded(state) = store.load() else {
+            panic!("expected current generation");
+        };
+        assert_eq!(state.generation, 100);
+
+        let mut generations = fs::read_dir(&root)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter_map(|entry| super::parse_blob_generation(entry.file_name().to_str()?))
+            .collect::<Vec<_>>();
+        generations.sort_unstable();
+        assert_eq!(generations, (92..=100).collect::<Vec<_>>());
+        assert!(!root.join("abandoned.state.tmp").exists());
         fs::remove_dir_all(root).unwrap();
     }
 
