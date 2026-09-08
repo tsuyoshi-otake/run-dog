@@ -1094,10 +1094,10 @@ impl UsageCollector {
                 opens += 1;
                 bytes += consumed;
             }
-            if self
-                .files
-                .get(&path)
-                .is_some_and(|cursor| cursor.size != cursor.offset && !cursor.waiting_incomplete)
+            if path_size_mtime(&path).is_some()
+                && self.files.get(&path).is_some_and(|cursor| {
+                    cursor.size != cursor.offset && !cursor.waiting_incomplete
+                })
             {
                 self.pending.push_back(path);
             }
@@ -4071,6 +4071,48 @@ mod tests {
         let window = super::day_window(unix_now_ms());
         assert!(is_current_month(unix_now_ms(), window));
         assert!(!is_current_month(0, window));
+    }
+
+    #[test]
+    fn component_deleted_pending_log_releases_catch_up_and_can_resume() {
+        let root = std::env::temp_dir().join(format!(
+            "rundog-deleted-pending-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let session = claude_session(&root);
+        let stamp = current_stamp();
+        let body: String = (0..8)
+            .map(|n| {
+                format!(
+                    "{}\n",
+                    claude_usage_line_with_len(&format!("event-{n}"), &stamp, 200_000)
+                )
+            })
+            .collect();
+        fs::write(&session, &body).unwrap();
+        let mut collector = new_claude_collector(&root);
+        assert_eq!(collector.tick(ptr::null_mut()), UsageTick::MoreWork);
+        let collected = collector.snapshot().claude.month_input_tokens;
+        let offset = collector.test_file_offset(&session).unwrap();
+        assert!(offset > 0 && offset < body.len() as u64);
+        fs::remove_file(&session).unwrap();
+        let _ = collector.tick(ptr::null_mut());
+        assert!(!collector.snapshot().month_scan_in_progress);
+        assert!(collector.pending.is_empty());
+        assert_eq!(collector.test_file_offset(&session), Some(offset));
+        assert_eq!(collector.snapshot().claude.month_input_tokens, collected);
+        // Reappearance must resume without counting the already collected IDs.
+        fs::write(&session, body).unwrap();
+        for _ in 0..32 {
+            collector.scan_file(
+                &session,
+                super::day_window(unix_now_ms()),
+                unix_now_ms() + super::COLD_RESTAT_MS,
+            );
+        }
+        assert_eq!(collector.snapshot().claude.month_input_tokens, 8_000_000);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
