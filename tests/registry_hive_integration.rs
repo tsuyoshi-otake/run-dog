@@ -319,6 +319,7 @@ fn live_hive_usage_checkpoint_migration_invalidates_stale_versions() {
         snapshot: UsageSnapshot {
             claude: ProviderUsage {
                 month_cents: 12_345,
+                month_cost_nanos: 12_345 * run_dog::core::NANOS_PER_CENT,
                 ..ProviderUsage::default()
             },
             ..UsageSnapshot::default()

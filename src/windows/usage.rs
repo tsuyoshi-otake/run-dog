@@ -40,7 +40,7 @@ use windows_sys::Win32::{
 };
 
 use crate::core::{
-    cancel_fetch, claude_dedupe_digest, cost_cents, decide_codex_event, fetch_result_code,
+    cancel_fetch, claude_dedupe_digest, cost_nanos, decide_codex_event, fetch_result_code,
     finish_fetch, is_long_context_request, local_ymd, parse_rfc3339_ms, persist_result_code,
     persist_result_detail, rebuild_reason_code, record_spawn_failure, reject_late_result,
     retain_keys_for_month, should_start_fetch, start_fetch, windows_tz_bias_minutes, ymd_iso,
@@ -589,16 +589,16 @@ impl UsageCollector {
         self.snapshot = state.aggregate.snapshot;
         self.snapshot.month_scan_in_progress = !state.aggregate.catch_up_done;
         if state.aggregate.month_start != window.month_start {
-            self.snapshot.claude.month_cents = 0;
+            self.snapshot.claude.clear_month_cost();
             self.snapshot.claude.month_input_tokens = 0;
             self.snapshot.claude.month_output_tokens = 0;
-            self.snapshot.codex.month_cents = 0;
+            self.snapshot.codex.clear_month_cost();
             self.snapshot.codex.month_input_tokens = 0;
             self.snapshot.codex.month_output_tokens = 0;
         }
         if state.aggregate.today != window.today {
-            self.snapshot.claude.today_cents = 0;
-            self.snapshot.codex.today_cents = 0;
+            self.snapshot.claude.clear_today_cost();
+            self.snapshot.codex.clear_today_cost();
         }
         self.last_collected_ms = state.aggregate.last_collected_ms;
         self.month_key = window.month_start;
@@ -726,8 +726,8 @@ impl UsageCollector {
             return;
         }
         self.day_key = window.today;
-        self.snapshot.claude.today_cents = 0;
-        self.snapshot.codex.today_cents = 0;
+        self.snapshot.claude.clear_today_cost();
+        self.snapshot.codex.clear_today_cost();
         self.checkpoint_dirty = true;
     }
 
@@ -740,12 +740,12 @@ impl UsageCollector {
             return;
         }
         self.month_key = window.month_start;
-        self.snapshot.claude.today_cents = 0;
-        self.snapshot.claude.month_cents = 0;
+        self.snapshot.claude.clear_today_cost();
+        self.snapshot.claude.clear_month_cost();
         self.snapshot.claude.month_input_tokens = 0;
         self.snapshot.claude.month_output_tokens = 0;
-        self.snapshot.codex.today_cents = 0;
-        self.snapshot.codex.month_cents = 0;
+        self.snapshot.codex.clear_today_cost();
+        self.snapshot.codex.clear_month_cost();
         self.snapshot.codex.month_input_tokens = 0;
         self.snapshot.codex.month_output_tokens = 0;
         self.claude_keys = retain_keys_for_month(&self.claude_keys, window.month_start);
@@ -774,12 +774,12 @@ impl UsageCollector {
         self.pending.clear();
         self.deferred.clear();
         self.catch_up = true;
-        self.snapshot.claude.today_cents = 0;
-        self.snapshot.claude.month_cents = 0;
+        self.snapshot.claude.clear_today_cost();
+        self.snapshot.claude.clear_month_cost();
         self.snapshot.claude.month_input_tokens = 0;
         self.snapshot.claude.month_output_tokens = 0;
-        self.snapshot.codex.today_cents = 0;
-        self.snapshot.codex.month_cents = 0;
+        self.snapshot.codex.clear_today_cost();
+        self.snapshot.codex.clear_month_cost();
         self.snapshot.codex.month_input_tokens = 0;
         self.snapshot.codex.month_output_tokens = 0;
         self.checkpoint_dirty = true;
@@ -1052,16 +1052,16 @@ impl UsageCollector {
             let day_iso = ymd_iso(year, month, day_of_month);
             // Unknown models have no API-equivalent dollars. Still count tokens
             // so month activity is visible even when Today cannot be priced.
-            let cents = cost_cents(&event.model, event.usage, Some(&day_iso)).unwrap_or(0);
+            let nanos = cost_nanos(&event.model, event.usage, Some(&day_iso)).unwrap_or(0);
             let target = match kind {
                 SourceKind::Claude => &mut self.snapshot.claude,
                 SourceKind::Codex => &mut self.snapshot.codex,
             };
             if day == window.today {
-                target.today_cents = target.today_cents.saturating_add(cents);
+                target.add_today_nanos(nanos);
             }
             if day >= window.month_start {
-                target.month_cents = target.month_cents.saturating_add(cents);
+                target.add_month_nanos(nanos);
                 target.month_input_tokens = target
                     .month_input_tokens
                     .saturating_add(event.usage.processed_input_tokens());
@@ -3304,6 +3304,41 @@ mod tests {
         assert_eq!(usage.month_cents, 600);
         assert_eq!(usage.month_output_tokens, 100_000);
         assert_eq!(usage.month_input_tokens, 100_000);
+    }
+
+    #[test]
+    fn component_codex_split_cost_rounds_once_across_restart() {
+        let root = std::env::temp_dir().join(format!(
+            "rundog-codex-precise-cost-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let store_root = root.join("store");
+        let stamp = current_stamp();
+        let first_lines = (1..=10_000)
+            .map(|total| token_count_line(&stamp, 1, 0, 0, total, 0, 0))
+            .collect::<Vec<_>>();
+        let session = write_codex_session(&root, "split-cost.jsonl", &first_lines);
+
+        let mut first = new_persisted_collector(&root, store_root.clone());
+        assert_eq!(tick_idle(&mut first), UsageTick::Idle);
+        assert_eq!(first.snapshot().codex.today_cost_nanos, 25_000_000);
+        assert_eq!(first.snapshot().codex.today_cents, 3);
+
+        let second_lines = (10_001..=20_000)
+            .map(|total| token_count_line(&stamp, 1, 0, 0, total, 0, 0))
+            .collect::<Vec<_>>();
+        append_codex_lines(&session, &second_lines);
+        let mut restored = new_persisted_collector(&root, store_root);
+        assert_eq!(restored.snapshot().codex.today_cost_nanos, 25_000_000);
+        assert_eq!(tick_idle(&mut restored), UsageTick::Idle);
+
+        let usage = restored.snapshot().codex;
+        fs::remove_dir_all(root).unwrap();
+        assert_eq!(usage.today_cost_nanos, 50_000_000);
+        assert_eq!(usage.month_cost_nanos, 50_000_000);
+        assert_eq!(usage.today_cents, 5);
+        assert_eq!(usage.month_cents, 5);
     }
 
     #[test]
