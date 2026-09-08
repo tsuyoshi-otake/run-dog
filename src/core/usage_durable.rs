@@ -72,7 +72,16 @@ impl GenerationBlobs for MemoryBlobs {
 
 #[must_use]
 pub fn persist_usage_state(store: &mut impl GenerationBlobs, state: &UsageState) -> PersistStatus {
-    let generation = store.read_current().unwrap_or(0).saturating_add(1);
+    // Recovery can succeed without a current pointer. Never reuse an existing
+    // generation (including an unpublished blob left by an interrupted save).
+    let highest = store
+        .read_current()
+        .unwrap_or(0)
+        .max(store.highest_blob_generation().unwrap_or(0))
+        .max(state.generation);
+    let Some(generation) = highest.checked_add(1) else {
+        return PersistStatus::Failed;
+    };
     let mut next = state.clone();
     next.generation = generation;
     next.schema_version = super::usage_state::USAGE_STATE_SCHEMA_VERSION;
@@ -163,6 +172,21 @@ mod tests {
             }],
             claude_keys: std::collections::HashSet::new(),
         }
+    }
+
+    #[test]
+    fn component_exhausted_generation_does_not_overwrite_the_last_blob() {
+        let mut store = MemoryBlobs {
+            current: Some(u64::MAX),
+            ..MemoryBlobs::default()
+        };
+        store.blobs.insert(u64::MAX, b"prior".to_vec());
+        assert_eq!(
+            persist_usage_state(&mut store, &state_with_offset(16)),
+            PersistStatus::Failed
+        );
+        assert_eq!(store.blobs[&u64::MAX], b"prior");
+        assert_eq!(store.current, Some(u64::MAX));
     }
 
     #[test]

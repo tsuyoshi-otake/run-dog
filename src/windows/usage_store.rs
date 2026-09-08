@@ -124,10 +124,8 @@ fn write_atomically(tmp: &Path, final_path: &Path, bytes: &[u8]) -> bool {
         return false;
     }
     drop(file);
-    if final_path.exists() && fs::remove_file(final_path).is_err() {
-        let _ = fs::remove_file(tmp);
-        return false;
-    }
+    // On Windows rename replaces an existing file without a delete/publication
+    // gap. A failed replacement leaves the previous current pointer intact.
     if fs::rename(tmp, final_path).is_ok() {
         return true;
     }
@@ -179,6 +177,43 @@ mod tests {
             },
             cursors: Vec::new(),
             claude_keys: std::collections::HashSet::new(),
+        }
+    }
+
+    #[test]
+    fn component_recovery_then_save_preserves_generation_and_latest_state() {
+        for corrupt in [false, true] {
+            let root = temp_root("recovery-save");
+            let mut store = FileUsageStore::at(root.clone());
+            let mut state = sample();
+            for tokens in [100, 200] {
+                state.aggregate.snapshot.claude.month_input_tokens = tokens;
+                assert!(matches!(
+                    store.persist(&state),
+                    PersistStatus::Applied { .. }
+                ));
+            }
+            if corrupt {
+                fs::write(root.join("current"), b"broken").unwrap();
+            } else {
+                fs::remove_file(root.join("current")).unwrap();
+            }
+            let crate::core::LoadStatus::RecoveredPrior { mut state, .. } = store.load() else {
+                panic!("expected recovery");
+            };
+            assert_eq!(state.generation, 2);
+            state.aggregate.snapshot.claude.month_input_tokens = 300;
+            assert_eq!(
+                store.persist(&state),
+                PersistStatus::Applied { generation: 3 }
+            );
+            fs::remove_file(root.join("current")).unwrap();
+            let crate::core::LoadStatus::RecoveredPrior { state, .. } = store.load() else {
+                panic!("expected second recovery");
+            };
+            assert_eq!(state.generation, 3);
+            assert_eq!(state.aggregate.snapshot.claude.month_input_tokens, 300);
+            fs::remove_dir_all(root).unwrap();
         }
     }
 
