@@ -12,7 +12,9 @@ use super::{
 
 const USAGE_STATE_HEADER_V1: &str = "rundog-usage-state-1";
 pub const USAGE_STATE_HEADER: &str = "rundog-usage-state-2";
-pub const USAGE_STATE_SCHEMA_VERSION: u32 = 2;
+// Version 3 distinguishes transient missing identities from the version 2
+// migration that rebuilt aggregates. The serialized field layout is unchanged.
+pub const USAGE_STATE_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CursorKind {
@@ -91,7 +93,9 @@ impl UsageState {
         cursors.sort_by(|left, right| cursor_sort_key(left).cmp(&cursor_sort_key(right)));
         Self {
             generation,
-            schema_version: USAGE_STATE_SCHEMA_VERSION,
+            // Registry checkpoints predate durable identities and still need
+            // the legacy aggregate/cursor migration before the next save.
+            schema_version: 2,
             aggregate: UsageAggregate {
                 month_start: checkpoint.month_start,
                 today: checkpoint.today,
@@ -353,7 +357,7 @@ impl UsageState {
             }
         }
         let schema_version = schema_version?;
-        if schema_version != USAGE_STATE_SCHEMA_VERSION {
+        if !(2..=USAGE_STATE_SCHEMA_VERSION).contains(&schema_version) {
             return None;
         }
         Some(Self {
@@ -781,7 +785,7 @@ mod tests {
 
         let legacy = encoded
             .replacen(USAGE_STATE_HEADER, USAGE_STATE_HEADER_V1, 1)
-            .replacen("schema=2", "schema=1", 1);
+            .replacen("schema=3", "schema=1", 1);
         assert!(UsageState::decode(&legacy).is_none());
     }
 
