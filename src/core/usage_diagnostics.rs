@@ -91,6 +91,7 @@ pub enum RestoreResult {
     Loaded = 1,
     Recovered = 2,
     Refused = 3,
+    Rebuilding = 4,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -98,6 +99,7 @@ pub enum RestoreResult {
 pub enum RescanReason {
     None = 0,
     User = 1,
+    LegacyIdentity = 2,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

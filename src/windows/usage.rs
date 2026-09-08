@@ -5,7 +5,7 @@
 //! - never spawns `claude` / `codex` / Node
 //! - OAuth refresh rewrites `.credentials.json` only via `ReplaceFileW` after a
 //!   reparse-point-safe open; it never follows credential symlinks
-//! - `GetFileAttributesEx`-style metadata first; open a file only when size grew
+//! - metadata and bounded identity probes precede incremental reads
 //! - read only newly appended JSONL bytes, incomplete trailing lines left unread
 //! - directory listings cached until the directory mtime moves
 //! - work is budgeted per timer tick so the tray message loop stays idle
@@ -170,6 +170,11 @@ pub struct UsageCollector {
     files: HashMap<PathBuf, FileCursor>,
     dirs: HashMap<PathBuf, DirListing>,
     discover: VecDeque<PathBuf>,
+    registrations: VecDeque<(PathBuf, bool)>,
+    registration_paths: HashSet<PathBuf>,
+    file_work_remaining: usize,
+    #[cfg(test)]
+    fail_file_id: bool,
     claude_keys: HashSet<ClaudeDedupeKey>,
     pending: VecDeque<PathBuf>,
     snapshot: UsageSnapshot,
@@ -279,6 +284,11 @@ impl UsageCollector {
             files: HashMap::new(),
             dirs: HashMap::new(),
             discover: VecDeque::new(),
+            registrations: VecDeque::new(),
+            registration_paths: HashSet::new(),
+            file_work_remaining: CATCH_UP_FILES_PER_TICK,
+            #[cfg(test)]
+            fail_file_id: false,
             claude_keys: HashSet::new(),
             pending: VecDeque::new(),
             snapshot: UsageSnapshot::default(),
@@ -426,7 +436,7 @@ impl UsageCollector {
         } else {
             RebuildState::Idle as u64
         };
-        snapshot.pending_files = self.pending.len() as u64;
+        snapshot.pending_files = (self.pending.len() + self.registrations.len()) as u64;
         snapshot.oldest_pending_age_ms = oldest_pending_age_ms(&self.pending, &self.files);
         snapshot.claude_fetch = fetch_result_code(
             self.claude_fetch.state.last_error,
@@ -441,14 +451,20 @@ impl UsageCollector {
 
     #[must_use]
     pub fn tick(&mut self, hwnd: HWND) -> UsageTick {
-        let now_ms = unix_now_ms();
+        self.tick_at(hwnd, unix_now_ms())
+    }
+
+    fn tick_at(&mut self, hwnd: HWND, now_ms: u64) -> UsageTick {
         let window = day_window(now_ms);
+        self.file_work_remaining = self.file_budget();
         self.reset_if_month_changed(window);
         self.reset_if_day_changed(window);
         let _ = self.take_claude_limits();
 
-        if self.last_discover_ms == 0
-            || (!self.catch_up && now_ms.saturating_sub(self.last_discover_ms) >= REDISCOVER_MS)
+        if self.discover.is_empty()
+            && (self.last_discover_ms == 0
+                || (!self.catch_up
+                    && now_ms.saturating_sub(self.last_discover_ms) >= REDISCOVER_MS))
         {
             self.queue_roots();
             self.last_discover_ms = now_ms;
@@ -463,6 +479,7 @@ impl UsageCollector {
             self.discover_dir(&dir, window, now_ms);
             dirs += 1;
         }
+        self.process_registrations(window);
         if self.catch_up {
             self.prioritize_newest_pending();
         }
@@ -484,11 +501,19 @@ impl UsageCollector {
         self.maybe_fetch_remote_limits(hwnd, now_ms);
         self.record_tick_gauges();
 
-        if self.catch_up && self.discover.is_empty() && !unread_remaining {
+        if self.catch_up
+            && self.discover.is_empty()
+            && self.registrations.is_empty()
+            && !unread_remaining
+        {
             self.finish_catch_up(window);
         }
 
-        let tick = if self.discover.is_empty() && !unread_remaining && opens < self.file_budget() {
+        let tick = if self.discover.is_empty()
+            && self.registrations.is_empty()
+            && !unread_remaining
+            && opens < self.file_budget()
+        {
             self.release_scratch();
             UsageTick::Idle
         } else {
@@ -620,13 +645,24 @@ impl UsageCollector {
     }
 
     fn apply_state(&mut self, window: DayWindow, state: UsageState) {
-        if state
-            .cursors
-            .iter()
-            .any(|cursor| cursor.offset > 0 && cursor.file_id.is_none())
+        if state.schema_version < 3
+            && state
+                .cursors
+                .iter()
+                .any(|cursor| cursor.offset > 0 && cursor.file_id.is_none())
         {
             // Legacy checkpoints cannot distinguish replacement from append.
             // Reset aggregate and cursors together to avoid double counting.
+            self.record_diag(
+                DiagnosticKind::RestoreResult,
+                RestoreResult::Rebuilding as u64,
+                0,
+            );
+            self.record_diag(
+                DiagnosticKind::RescanReason,
+                RescanReason::LegacyIdentity as u64,
+                0,
+            );
             self.begin_month_rescan(window);
             return;
         }
@@ -817,6 +853,8 @@ impl UsageCollector {
         self.dirs.clear();
         self.claude_keys.clear();
         self.pending.clear();
+        self.registrations.clear();
+        self.registration_paths.clear();
         self.deferred.clear();
         self.catch_up = true;
         self.snapshot.claude.clear_today_cost();
@@ -853,7 +891,7 @@ impl UsageCollector {
         self.reconcile_known_paths(window);
     }
 
-    fn discover_dir(&mut self, dir: &Path, window: DayWindow, _now_ms: u64) {
+    fn discover_dir(&mut self, dir: &Path, _window: DayWindow, _now_ms: u64) {
         let mtime_ms = path_mtime_ms(dir).unwrap_or(0);
         if let Some(cached) = self.dirs.get(dir) {
             if cached.mtime_ms == mtime_ms {
@@ -887,21 +925,66 @@ impl UsageCollector {
             self.discover.push_back(child.clone());
         }
         for path in &files {
-            self.register_jsonl_file(path, window, true);
+            self.queue_registration(path.clone(), true);
         }
         self.dirs
             .insert(dir.to_path_buf(), DirListing { mtime_ms, dirs });
     }
 
-    fn reconcile_known_paths(&mut self, window: DayWindow) {
+    fn reconcile_known_paths(&mut self, _window: DayWindow) {
         let keys: Vec<FileCheckpointKey> = self.file_checkpoint.keys().cloned().collect();
         for key in keys {
             let path = checkpoint_disk_path(&self.claude_dir, &self.codex_home, &key);
             if self.files.contains_key(&path) {
                 continue;
             }
-            self.register_jsonl_file(&path, window, false);
+            self.queue_registration(path, false);
         }
+    }
+
+    fn queue_registration(&mut self, path: PathBuf, recent: bool) {
+        if !self.files.contains_key(&path) && self.registration_paths.insert(path.clone()) {
+            self.registrations.push_back((path, recent));
+        }
+    }
+
+    fn process_registrations(&mut self, window: DayWindow) {
+        // Leave room for reads even while a large registration backlog drains.
+        let budget = if self.pending.is_empty() {
+            self.file_work_remaining
+        } else {
+            self.file_work_remaining.div_ceil(2)
+        };
+        let count = self.registrations.len().min(budget);
+        for _ in 0..count {
+            let (path, recent) = self.registrations.pop_front().unwrap();
+            self.registration_paths.remove(&path);
+            self.file_work_remaining -= 1;
+            self.register_jsonl_file(&path, window, recent);
+        }
+    }
+
+    fn probe_identity(&mut self, path: &Path) -> (Option<u64>, Option<FileId>) {
+        let mut prefix = None;
+        if let Ok(mut file) = File::open(path) {
+            self.files_opened += 1;
+            let mut buf = [0_u8; 64];
+            if let Ok(n) = file.read(&mut buf) {
+                self.integrity_probe_bytes += n as u64;
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                n.hash(&mut hasher);
+                buf[..n].hash(&mut hasher);
+                prefix = Some(hasher.finish());
+            }
+        }
+        let file_id = open_existing_without_following_reparse(path).and_then(|handle| {
+            let owned = OwnedHandle(handle);
+            self.files_opened += 1;
+            regular_file_id(owned.0)
+        });
+        #[cfg(test)]
+        let file_id = if self.fail_file_id { None } else { file_id };
+        (prefix, file_id)
     }
 
     fn register_jsonl_file(&mut self, path: &Path, window: DayWindow, require_recent_mtime: bool) {
@@ -919,12 +1002,18 @@ impl UsageCollector {
         } else {
             return;
         };
+        if self.files.contains_key(path) {
+            return;
+        }
+        let (prefix, file_id) = self.probe_identity(path);
+        if file_id.is_none() || prefix.is_none() {
+            self.queue_registration(path.to_path_buf(), require_recent_mtime);
+            return;
+        }
         let mut registered_rebuild = None;
         if let std::collections::hash_map::Entry::Vacant(entry) =
             self.files.entry(path.to_path_buf())
         {
-            let prefix = file_prefix_fingerprint(path);
-            let file_id = jsonl_file_id(path);
             let (offset, rebuild) = restored_cursor_offset(
                 &self.file_checkpoint,
                 path,
@@ -942,6 +1031,11 @@ impl UsageCollector {
             }
             let stored = file_checkpoint_key(path, &self.claude_dir, &self.codex_home, kind)
                 .and_then(|key| self.file_checkpoint.get(&key));
+            self.checkpoint_dirty |= stored.is_none_or(|cursor| {
+                cursor.file_id != file_id.map(FileId::durable)
+                    || cursor.prefix != prefix
+                    || cursor.size != size
+            });
             let (last_model, last_codex_total) = if rebuild.is_some() {
                 (None, None)
             } else {
@@ -983,8 +1077,17 @@ impl UsageCollector {
         };
         self.files_stated = self.files_stated.saturating_add(1);
         let max_bytes = self.byte_budget();
-        let prefix = file_prefix_fingerprint(path);
-        let file_id = jsonl_file_id(path);
+        if let Some(cursor) = self.files.get_mut(path) {
+            // A failed probe also observes the hot-file cooldown so other
+            // files get their turn under the shared budget.
+            cursor.last_stat_ms = now_ms;
+        }
+        let (prefix, file_id) = self.probe_identity(path);
+        // Missing identity is not evidence of replacement. Retry without
+        // advancing the cursor or erasing the previous durable identity.
+        if file_id.is_none() || prefix.is_none() {
+            return 0;
+        }
         let (kind, offset, previous_model, rebuild, size_matches_offset) = {
             let Some(cursor) = self.files.get_mut(path) else {
                 return 0;
@@ -998,6 +1101,9 @@ impl UsageCollector {
                 cursor.last_codex_total = None;
                 cursor.waiting_incomplete = false;
             }
+            self.checkpoint_dirty |= cursor.last_prefix != prefix
+                || cursor.last_file_id != file_id
+                || cursor.size != size;
             cursor.last_prefix = prefix;
             cursor.last_file_id = file_id;
             let kind = cursor.kind;
@@ -1024,8 +1130,6 @@ impl UsageCollector {
         if size_matches_offset {
             return 0;
         }
-        self.integrity_probe_bytes = self.integrity_probe_bytes.saturating_add(64);
-        self.files_opened = self.files_opened.saturating_add(1);
         let chunk = read_appended(
             path,
             (
@@ -1040,12 +1144,14 @@ impl UsageCollector {
             max_bytes,
             &mut self.read_buf,
         );
-        self.usage_parse_bytes = self.usage_parse_bytes.saturating_add(chunk.consumed);
+        self.files_opened += u64::from(chunk.opened);
+        self.usage_parse_bytes = self.usage_parse_bytes.saturating_add(chunk.read_bytes);
         let Some(cursor) = self.files.get_mut(path) else {
             return chunk.consumed;
         };
         let previous_model = cursor.last_model.clone();
         let mut previous_codex_total = cursor.last_codex_total;
+        self.checkpoint_dirty |= cursor.offset != chunk.new_offset || cursor.size != size;
         cursor.offset = chunk.new_offset;
         cursor.discard_offset = chunk.discard_offset;
         cursor.size = size;
@@ -1135,11 +1241,16 @@ impl UsageCollector {
         let file_budget = self.file_budget();
         let byte_budget = self.byte_budget();
         let mut queued = self.pending.len();
-        while queued > 0 && opens < file_budget && bytes < byte_budget {
+        while queued > 0
+            && opens < file_budget
+            && bytes < byte_budget
+            && self.file_work_remaining > 0
+        {
             queued -= 1;
             let Some(path) = self.pending.pop_front() else {
                 break;
             };
+            self.file_work_remaining -= 1;
             let consumed = self.scan_file(&path, window, now_ms);
             if consumed > 0 {
                 opens += 1;
@@ -1187,9 +1298,10 @@ impl UsageCollector {
             };
 
             for path in restat {
-                if opens >= file_budget || bytes >= byte_budget {
+                if opens >= file_budget || bytes >= byte_budget || self.file_work_remaining == 0 {
                     break;
                 }
+                self.file_work_remaining -= 1;
                 let consumed = self.scan_file(&path, window, now_ms);
                 if consumed > 0 {
                     opens += 1;
@@ -1280,11 +1392,12 @@ impl UsageCollector {
             if now_ms.saturating_sub(mtime_ms) > 7 * 86_400_000 {
                 continue;
             }
-            self.limits_tail_bytes = self
-                .limits_tail_bytes
-                .saturating_add(size.min(CODEX_LIMITS_TAIL));
-            self.files_opened = self.files_opened.saturating_add(1);
-            if let Some(limits) = read_codex_limits_tail(path, size) {
+            if let Some(limits) = read_codex_limits_tail(
+                path,
+                size,
+                &mut self.files_opened,
+                &mut self.limits_tail_bytes,
+            ) {
                 if is_subscription_limits(&limits) {
                     self.snapshot.codex.primary = limits.primary;
                     self.snapshot.codex.secondary = limits.secondary;
@@ -1814,6 +1927,8 @@ fn is_current_month(mtime_ms: u64, window: DayWindow) -> bool {
 }
 
 struct AppendedChunk {
+    opened: bool,
+    read_bytes: u64,
     new_offset: u64,
     discard_offset: Option<u64>,
     consumed: u64,
@@ -1839,6 +1954,8 @@ fn read_appended(
     let mut limits = None;
     let mut model = last_model.map(str::to_owned);
     let empty = || AppendedChunk {
+        opened: false,
+        read_bytes: 0,
         new_offset: offset,
         discard_offset,
         consumed: 0,
@@ -1854,13 +1971,17 @@ fn read_appended(
         return empty();
     };
     if file.seek(SeekFrom::Start(read_start)).is_err() {
-        return empty();
+        return AppendedChunk {
+            opened: true,
+            ..empty()
+        };
     }
     buf.clear();
     buf.resize(8_192, 0);
     let tick_limit = max_bytes.max(1);
     let mut line = Vec::new();
     let mut pos = read_start;
+    let mut read_bytes = 0;
     let mut committed = offset;
     let mut oversize = discard_offset.is_some();
     while pos < size {
@@ -1870,6 +1991,7 @@ fn read_appended(
             Ok(0) | Err(_) => break,
             Ok(n) => n,
         };
+        read_bytes += n as u64;
         let mut stop = false;
         for &byte in &buf[..n] {
             pos += 1;
@@ -1904,6 +2026,8 @@ fn read_appended(
         }
     }
     AppendedChunk {
+        opened: true,
+        read_bytes,
         new_offset: committed,
         discard_offset: oversize.then_some(pos),
         consumed: if oversize { pos } else { committed }.saturating_sub(read_start),
@@ -1946,12 +2070,20 @@ fn take_jsonl_line(
     }
 }
 
-fn read_codex_limits_tail(path: &Path, size: u64) -> Option<ProviderUsage> {
+fn read_codex_limits_tail(
+    path: &Path,
+    size: u64,
+    opened: &mut u64,
+    read_bytes: &mut u64,
+) -> Option<ProviderUsage> {
     let start = size.saturating_sub(CODEX_LIMITS_TAIL);
     let mut file = File::open(path).ok()?;
+    *opened += 1;
     file.seek(SeekFrom::Start(start)).ok()?;
     let mut buf = Vec::new();
-    file.take(CODEX_LIMITS_TAIL).read_to_end(&mut buf).ok()?;
+    let result = file.take(CODEX_LIMITS_TAIL).read_to_end(&mut buf);
+    *read_bytes += buf.len() as u64;
+    result.ok()?;
     let text = String::from_utf8_lossy(&buf);
     let lines: Vec<&str> = text.lines().collect();
     let first = usize::from(start > 0);
@@ -2800,7 +2932,8 @@ fn restored_cursor_offset(
     if size < cursor.size || size < cursor.offset {
         return (0, Some(CursorRebuildReason::SizeShrunk));
     }
-    if cursor.file_id != file_id.map(FileId::durable) {
+    if matches!((cursor.file_id, file_id.map(FileId::durable)), (Some(stored), Some(current)) if stored != current)
+    {
         return (0, Some(CursorRebuildReason::FileIdChanged));
     }
     if let (Some(stored), Some(current)) = (cursor.prefix, prefix) {
@@ -2838,21 +2971,6 @@ fn cursor_rebuild_reason(
         return Some(CursorRebuildReason::SameSizeRewriteHint);
     }
     None
-}
-
-fn file_prefix_fingerprint(path: &Path) -> Option<u64> {
-    let mut file = File::open(path).ok()?;
-    let mut buf = [0_u8; 64];
-    let n = file.read(&mut buf).ok()?;
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    n.hash(&mut hasher);
-    buf[..n].hash(&mut hasher);
-    Some(hasher.finish())
-}
-
-fn jsonl_file_id(path: &Path) -> Option<FileId> {
-    let owned = OwnedHandle(open_existing_without_following_reparse(path)?);
-    regular_file_id(owned.0)
 }
 
 fn path_mtime_ms(path: &Path) -> Option<u64> {
@@ -4813,6 +4931,205 @@ mod tests {
     }
 
     #[test]
+    fn component_restart_persists_non_usage_and_incomplete_boundaries() {
+        use std::io::Write;
+        let root = std::env::temp_dir().join(format!(
+            "rundog-position-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let session = claude_session(&root);
+        fs::write(
+            &session,
+            format!("{}\n", claude_usage_line("baseline", &current_stamp())),
+        )
+        .unwrap();
+        let store = root.join("store");
+        let mut collector = new_persisted_collector(&root, store.clone());
+        tick_idle(&mut collector);
+        let initial = fs::metadata(&session).unwrap().len();
+        let suffix = format!(
+            "{}{}",
+            "{\"type\":\"user\",\"text\":\"no usage\"}\n".repeat(1000),
+            "{\"partial\":"
+        );
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&session)
+            .unwrap()
+            .write_all(suffix.as_bytes())
+            .unwrap();
+        let boundary = initial + suffix.len() as u64 - "{\"partial\":".len() as u64;
+        collector.test_force_restat();
+        tick_idle(&mut collector);
+        collector.flush_checkpoint();
+        assert_eq!(collector.test_file_offset(&session), Some(boundary));
+        drop(collector);
+        for _ in 0..3 {
+            let mut restored = new_persisted_collector(&root, store.clone());
+            assert_eq!(
+                restored.file_checkpoint.values().next().unwrap().offset,
+                boundary
+            );
+            tick_idle(&mut restored);
+            assert_eq!(restored.snapshot.claude.month_input_tokens, 1_000_000);
+            assert_eq!(restored.test_file_offset(&session), Some(boundary));
+            assert!(
+                restored.usage_parse_bytes < 100,
+                "only the incomplete suffix may be reread"
+            );
+            restored.flush_checkpoint();
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn component_discovery_progresses_at_real_timer_intervals() {
+        let root = std::env::temp_dir().join(format!(
+            "rundog-discover-budget-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let mut collector = new_claude_collector(&root);
+        tick_idle(&mut collector);
+        for i in 0..30 {
+            let dir = root.join("claude/projects").join(format!("p{i}"));
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(
+                dir.join("session.jsonl"),
+                format!(
+                    "{}\n",
+                    claude_usage_line(&format!("event{i}"), &current_stamp())
+                ),
+            )
+            .unwrap();
+        }
+        // Force cache invalidation without relying on filesystem clock resolution.
+        collector.dirs.clear();
+        let start = unix_now_ms();
+        for i in 1..=50 {
+            let before = collector.files_opened;
+            collector.tick_at(ptr::null_mut(), start + i * super::REDISCOVER_MS);
+            assert!(collector.files_opened - before <= (super::MAX_FILES_PER_TICK * 3) as u64);
+        }
+        assert_eq!(collector.files.len(), 30);
+        assert_eq!(collector.snapshot.claude.month_input_tokens, 30_000_000);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn component_restored_identity_probes_share_tick_budget() {
+        let root = std::env::temp_dir().join(format!(
+            "rundog-probe-budget-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let session = claude_session(&root);
+        let dir = session.parent().unwrap();
+        for i in 0..40 {
+            fs::write(dir.join(format!("{i}.jsonl")), b"{}\n").unwrap();
+        }
+        let store = root.join("store");
+        let mut first = new_persisted_collector(&root, store.clone());
+        tick_idle(&mut first);
+        drop(first);
+        let mut restored = new_persisted_collector(&root, store);
+        assert_eq!(restored.files_opened, 0);
+        let _ = restored.tick(ptr::null_mut());
+        assert_eq!(restored.files.len(), super::MAX_FILES_PER_TICK);
+        assert_eq!(
+            restored.files_opened,
+            (super::MAX_FILES_PER_TICK * 2) as u64
+        );
+        assert_eq!(
+            restored.integrity_probe_bytes,
+            (super::MAX_FILES_PER_TICK * 3) as u64
+        );
+        assert_eq!(restored.usage_parse_bytes, 0);
+        tick_idle(&mut restored);
+        assert_eq!(restored.files.len(), 40);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn component_identity_failure_preserves_state_and_retries() {
+        use std::io::Write;
+        let root = std::env::temp_dir().join(format!(
+            "rundog-identity-failure-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let session = claude_session(&root);
+        fs::write(
+            &session,
+            format!("{}\n", claude_usage_line("first", &current_stamp())),
+        )
+        .unwrap();
+        let store = root.join("store");
+        let mut first = new_persisted_collector(&root, store.clone());
+        tick_idle(&mut first);
+        let window = super::day_window(unix_now_ms());
+        let original = first.build_state(window).cursors[0].clone();
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&session)
+            .unwrap()
+            .write_all(format!("{}\n", claude_usage_line("second", &current_stamp())).as_bytes())
+            .unwrap();
+        first.fail_file_id = true;
+        first.test_force_restat();
+        tick_idle(&mut first);
+        assert_eq!(first.build_state(window).cursors[0], original);
+        first.flush_checkpoint();
+        drop(first);
+        let mut restored = new_persisted_collector(&root, store.clone());
+        restored.fail_file_id = true;
+        let _ = restored.tick(ptr::null_mut());
+        assert_eq!(restored.snapshot.claude.month_input_tokens, 1_000_000);
+        assert_eq!(restored.cursor_reset_count, 0);
+        assert_eq!(restored.build_state(window).cursors[0], original);
+        restored.fail_file_id = false;
+        tick_idle(&mut restored);
+        assert_eq!(restored.snapshot.claude.month_input_tokens, 2_000_000);
+        assert_eq!(restored.cursor_reset_count, 0);
+        restored.flush_checkpoint();
+        drop(restored);
+        let mut again = new_persisted_collector(&root, store);
+        tick_idle(&mut again);
+        assert_eq!(again.usage_parse_bytes, 0);
+        assert_eq!(again.snapshot.claude.month_input_tokens, 2_000_000);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn component_current_schema_missing_identity_preserves_aggregate() {
+        let root = std::env::temp_dir().join(format!(
+            "rundog-current-identity-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let session = claude_session(&root);
+        fs::write(
+            &session,
+            format!("{}\n", claude_usage_line("first", &current_stamp())),
+        )
+        .unwrap();
+        let mut first = new_claude_collector(&root);
+        tick_idle(&mut first);
+        let window = super::day_window(unix_now_ms());
+        let mut state = first.build_state(window);
+        state.cursors[0].file_id = None;
+        let mut restored = new_claude_collector(&root);
+        restored.apply_state(window, state);
+        assert_eq!(restored.snapshot.claude.month_input_tokens, 1_000_000);
+        assert!(!restored.catch_up);
+        tick_idle(&mut restored);
+        assert_eq!(restored.usage_parse_bytes, 0);
+        assert_eq!(restored.cursor_reset_count, 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn component_store_legacy_identity_rebuilds_aggregate_and_cursors_together() {
         let root = std::env::temp_dir().join(format!(
             "rundog-legacy-fileid-{}-{}",
@@ -4829,14 +5146,26 @@ mod tests {
         let mut first = new_persisted_collector(&root, store_root.clone());
         tick_idle(&mut first);
         let mut state = first.build_state(super::day_window(unix_now_ms()));
+        state.schema_version = 2;
         for cursor in &mut state.cursors {
             cursor.file_id = None;
         }
-        assert!(matches!(
-            super::FileUsageStore::at(store_root.clone()).persist(&state),
-            crate::core::PersistStatus::Applied { .. }
-        ));
+        // Bypass the current writer's schema upgrade to construct an actual
+        // on-disk version 2 fixture.
+        use crate::core::GenerationBlobs;
+        let mut legacy_store = super::FileUsageStore::at(store_root.clone());
+        state.generation = legacy_store.read_current().unwrap() + 1;
+        assert!(legacy_store.write_blob(state.generation, state.encode().as_bytes()));
+        assert!(legacy_store.write_current(state.generation));
         let mut restored = new_persisted_collector(&root, store_root);
+        assert_eq!(
+            restored.diagnostics().restore_result,
+            super::RestoreResult::Rebuilding as u64
+        );
+        assert_eq!(
+            restored.diagnostics().rescan_reason,
+            super::RescanReason::LegacyIdentity as u64
+        );
         assert_eq!(tick_idle(&mut restored), UsageTick::Idle);
         assert_eq!(restored.snapshot.claude.month_input_tokens, 1_000_000);
         assert!(restored
