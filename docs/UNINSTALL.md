@@ -19,7 +19,8 @@ download an update cache installer → exit → uninstall from Windows Apps.
 | Uninstaller / Apps entry | Windows Settings → Apps | **DELETE** |
 | Launch at startup | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` value `RunDog` | **DELETE** |
 | Settings | `HKCU\Software\SystemExe\RunDog` (including subkeys) | **DELETE** |
-| Usage state | `%LOCALAPPDATA%\SystemExe\RunDog\usage` | **DELETE** |
+| Usage state | `%LOCALAPPDATA%\RunDog\usage` | **DELETE** |
+| Legacy usage state | `%LOCALAPPDATA%\SystemExe\RunDog\usage` | **DELETE** (migrated on startup) |
 | Update cache | `%LOCALAPPDATA%\SystemExe\RunDog\updates` | **DELETE** |
 | Claude logs | `%USERPROFILE%\.claude\projects\*.jsonl` (or `%CLAUDE_CONFIG_DIR%`) | **PRESERVE** |
 | Claude credentials | `%USERPROFILE%\.claude\.credentials.json` | **PRESERVE** |
@@ -36,7 +37,8 @@ removed. Other products under `SystemExe` are not this contract.
 
 [`installer/RunDog.iss`](../installer/RunDog.iss):
 
-- `[UninstallDelete]` removes `{localappdata}\SystemExe\RunDog` (usage + updates).
+- `[UninstallDelete]` removes `{localappdata}\RunDog` (usage) and
+  `{localappdata}\SystemExe\RunDog` (legacy usage + updates).
 - `[Code]` `CurUninstallStepChanged` deletes the `Run` value `RunDog` and
   `HKCU\Software\SystemExe\RunDog`.
 - The script must not name Claude or Codex homes, logs, or credential files.

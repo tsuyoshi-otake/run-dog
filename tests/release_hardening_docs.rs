@@ -10,6 +10,7 @@ const RELEASE: &str = include_str!("../.github/workflows/release.yml");
 fn architecture_is_current_and_not_plan() {
     assert!(ARCH.contains("PLAN.md"));
     assert!(ARCH.contains("not the spec"));
+    assert!(ARCH.contains("%LOCALAPPDATA%\\RunDog\\usage"));
     assert!(ARCH.contains("%LOCALAPPDATA%\\SystemExe\\RunDog\\usage"));
     assert!(ARCH.contains("HKCU\\Software\\SystemExe\\RunDog"));
     assert!(!ARCH.contains("sk-"));

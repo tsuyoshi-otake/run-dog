@@ -30,17 +30,18 @@ impl FileUsageStore {
     #[must_use]
     pub fn production_root() -> Option<PathBuf> {
         let local = std::env::var_os("LOCALAPPDATA")?;
-        Some(
-            PathBuf::from(local)
-                .join("SystemExe")
-                .join("RunDog")
-                .join("usage"),
-        )
+        Some(PathBuf::from(local).join("RunDog").join("usage"))
     }
 
     #[must_use]
     pub fn production() -> Option<Self> {
-        Some(Self::at(Self::production_root()?))
+        let current = Self::production_root()?;
+        let local = std::env::var_os("LOCALAPPDATA")?;
+        let legacy = PathBuf::from(local)
+            .join("SystemExe")
+            .join("RunDog")
+            .join("usage");
+        Some(Self::at(select_production_root(&legacy, &current)))
     }
 
     #[must_use]
@@ -137,6 +138,60 @@ impl GenerationBlobs for FileUsageStore {
 
 fn ensure_root(root: &Path) -> bool {
     fs::create_dir_all(root).is_ok() && root.is_dir()
+}
+
+fn select_production_root(legacy: &Path, current: &Path) -> PathBuf {
+    if real_directory(current) {
+        if root_has_valid_state(current) {
+            remove_real_directory(legacy);
+            return current.to_path_buf();
+        }
+        if directory_is_empty(current) && real_directory(legacy) {
+            let _ = fs::remove_dir(current);
+            if move_directory(legacy, current) {
+                return current.to_path_buf();
+            }
+        }
+        if root_has_valid_state(legacy) {
+            return legacy.to_path_buf();
+        }
+        return current.to_path_buf();
+    }
+    if real_directory(legacy) {
+        if move_directory(legacy, current) {
+            return current.to_path_buf();
+        }
+        return legacy.to_path_buf();
+    }
+    current.to_path_buf()
+}
+
+fn root_has_valid_state(root: &Path) -> bool {
+    matches!(
+        load_usage_state(&FileUsageStore::at(root.to_path_buf())),
+        LoadStatus::Loaded(_) | LoadStatus::RecoveredPrior { .. }
+    )
+}
+
+fn real_directory(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_dir())
+}
+
+fn directory_is_empty(path: &Path) -> bool {
+    fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_none())
+}
+
+fn move_directory(from: &Path, to: &Path) -> bool {
+    let Some(parent) = to.parent() else {
+        return false;
+    };
+    fs::create_dir_all(parent).is_ok() && fs::rename(from, to).is_ok()
+}
+
+fn remove_real_directory(path: &Path) {
+    if real_directory(path) {
+        let _ = fs::remove_dir_all(path);
+    }
 }
 
 fn blob_path(root: &Path, generation: u64) -> PathBuf {
@@ -366,6 +421,77 @@ mod tests {
     }
 
     #[test]
+    fn component_legacy_usage_directory_moves_to_product_root() {
+        let base = temp_root("legacy-migration");
+        let legacy = base.join("SystemExe").join("RunDog").join("usage");
+        let current = base.join("RunDog").join("usage");
+        fs::create_dir_all(&legacy).unwrap();
+        for generation in 1..=100 {
+            let mut state = sample();
+            state.generation = generation;
+            state.aggregate.snapshot.codex.month_input_tokens = 42;
+            fs::write(
+                legacy.join(format!("g{generation:016}.state")),
+                state.encode(),
+            )
+            .unwrap();
+        }
+        fs::write(
+            legacy.join("current"),
+            b"rundog-usage-current-1\ngeneration=100\n",
+        )
+        .unwrap();
+
+        assert_eq!(super::select_production_root(&legacy, &current), current);
+        assert!(!legacy.exists());
+        let crate::core::LoadStatus::Loaded(state) = FileUsageStore::at(current.clone()).load()
+        else {
+            panic!("expected migrated state");
+        };
+        assert_eq!(state.generation, 100);
+        assert_eq!(state.aggregate.snapshot.codex.month_input_tokens, 42);
+        let state_file_count = fs::read_dir(&current)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                super::parse_blob_generation(&entry.file_name().to_string_lossy()).is_some()
+            })
+            .count();
+        assert_eq!(state_file_count, 9);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn component_valid_product_root_removes_stale_legacy_root() {
+        let base = temp_root("legacy-conflict");
+        let legacy = base.join("SystemExe").join("RunDog").join("usage");
+        let current = base.join("RunDog").join("usage");
+        let mut legacy_store = FileUsageStore::at(legacy.clone());
+        let mut legacy_state = sample();
+        legacy_state.aggregate.snapshot.codex.month_input_tokens = 11;
+        assert!(matches!(
+            legacy_store.persist(&legacy_state),
+            PersistStatus::Applied { .. }
+        ));
+        let mut current_store = FileUsageStore::at(current.clone());
+        let mut current_state = sample();
+        current_state.aggregate.snapshot.codex.month_input_tokens = 99;
+        assert!(matches!(
+            current_store.persist(&current_state),
+            PersistStatus::Applied { .. }
+        ));
+
+        assert_eq!(super::select_production_root(&legacy, &current), current);
+        assert!(!legacy.exists());
+        let crate::core::LoadStatus::Loaded(state) = FileUsageStore::at(current.clone()).load()
+        else {
+            panic!("expected product state");
+        };
+        assert_eq!(state.aggregate.snapshot.codex.month_input_tokens, 99);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
     fn component_file_store_failed_root_is_not_reported_durable() {
         let root = temp_root("not-dir");
         fs::write(&root, b"not-a-directory").expect("file");
@@ -377,12 +503,12 @@ mod tests {
 
     #[test]
     fn component_production_root_is_under_localappdata_not_provider_home() {
-        let Some(store) = FileUsageStore::production() else {
+        let Some(root) = FileUsageStore::production_root() else {
             return;
         };
-        assert!(store
-            .root()
-            .ends_with(std::path::Path::new("SystemExe\\RunDog\\usage")));
+        assert!(root.ends_with(std::path::Path::new("RunDog\\usage")));
+        assert!(!root.ends_with(std::path::Path::new("SystemExe\\RunDog\\usage")));
+        let store = FileUsageStore::at(root);
         assert!(!store.refuses_provider_roots(
             std::path::Path::new(r"C:\Users\me\.claude"),
             std::path::Path::new(r"C:\Users\me\.codex")
