@@ -166,6 +166,7 @@ mod tests {
                 logical_id: "p/a.jsonl".to_owned(),
                 offset,
                 size: offset,
+                file_id: None,
                 prefix: None,
                 last_model: None,
                 last_codex_total: None,

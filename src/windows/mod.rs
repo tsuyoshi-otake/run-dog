@@ -17,6 +17,7 @@ mod tray;
 mod update;
 mod usage;
 pub mod usage_store;
+mod usage_store_path;
 
 use std::{
     ffi::OsString,
@@ -66,7 +67,7 @@ use self::{
     tray::{
         event_for_command, TrayAdapter, COMMAND_ABOUT, COMMAND_CHECK_FOR_UPDATES,
         COMMAND_INSTALL_UPDATE, COMMAND_RESCAN_MONTH_USAGE, COMMAND_TOGGLE_PINNED_FLYOUT,
-        PROMOTE_TIMER_ID, TRAY_CALLBACK_MESSAGE,
+        HOVER_TIMER_ID, PROMOTE_TIMER_ID, TRAY_CALLBACK_MESSAGE,
     },
     update::{UpdateController, UpdateMenuState},
     usage::{
@@ -471,6 +472,7 @@ unsafe extern "system" fn window_proc(
             }
             TIMER_ANIMATION => context.dispatch(Event::AnimationTimerElapsed),
             PROMOTE_TIMER_ID => context.platform.tray.on_promote_timer(),
+            HOVER_TIMER_ID => context.platform.tray.on_hover_timer(),
             USAGE_TIMER_ID => context.tick_usage(),
             _ => {}
         }

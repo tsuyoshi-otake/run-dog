@@ -292,9 +292,9 @@ fn load_usage_checkpoint_at(settings_key: &str) -> Option<UsageCheckpoint> {
         return None;
     }
     let key = open_key(settings_key, KEY_READ)?;
-    let payload = read_string(key, USAGE_CHECKPOINT_VALUE)?;
+    let payload = read_string(key, USAGE_CHECKPOINT_VALUE);
     close_key(key);
-    if let Some(checkpoint) = UsageCheckpoint::decode(&payload) {
+    if let Some(checkpoint) = UsageCheckpoint::decode(&payload?) {
         return Some(checkpoint);
     }
     let _ = clear_usage_checkpoint_payload_at(settings_key);

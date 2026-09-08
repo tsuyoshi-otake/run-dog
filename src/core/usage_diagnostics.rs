@@ -273,6 +273,7 @@ pub fn rebuild_reason_code(reason: CursorRebuildReason) -> u64 {
         CursorRebuildReason::SizeShrunk => 1,
         CursorRebuildReason::PrefixChanged => 2,
         CursorRebuildReason::FileIdAndPrefixChanged => 3,
+        CursorRebuildReason::FileIdChanged => 5,
         CursorRebuildReason::SameSizeRewriteHint => 4,
     }
 }
