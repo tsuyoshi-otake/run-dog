@@ -89,7 +89,7 @@ const STAT_COOLDOWN_MS: u64 = USAGE_IDLE_INTERVAL_MS as u64;
 /// mtime/size must not freeze a cursor forever.
 const COLD_RESTAT_MS: u64 = 10 * 60 * 1_000;
 const HOT_AGE_MS: u64 = 48 * 60 * 60 * 1_000;
-const REDISCOVER_MS: u64 = 30 * 60 * 1_000;
+const REDISCOVER_MS: u64 = USAGE_IDLE_INTERVAL_MS as u64;
 const MAX_HEADER_VALUE_BYTES: usize = 8 * 1_024;
 const MAX_CREDENTIAL_FILE_BYTES: usize = 256 * 1_024;
 const CLAUDE_OAUTH_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
@@ -3087,10 +3087,31 @@ mod tests {
         const {
             assert!(super::USAGE_IDLE_INTERVAL_MS >= 60_000);
             assert!(super::USAGE_CONTINUE_INTERVAL_MS >= 60_000);
+            assert!(super::REDISCOVER_MS == super::USAGE_IDLE_INTERVAL_MS as u64);
             assert!(super::STAT_COOLDOWN_MS >= 60_000);
             assert!(super::CLAUDE_LIMITS_PERIOD_MS >= 60_000);
             assert!(super::CODEX_LIMITS_PERIOD_MS >= 60_000);
         }
+    }
+
+    #[test]
+    fn component_idle_collector_rediscovers_a_new_session_next_interval() {
+        let root = std::env::temp_dir().join(format!(
+            "rundog-rediscover-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let mut collector = new_claude_collector(&root);
+        assert_eq!(tick_idle(&mut collector), UsageTick::Idle);
+
+        let session = claude_session(&root);
+        let line = claude_usage_line("new-session", &current_stamp());
+        fs::write(session, format!("{line}\n")).unwrap();
+        collector.last_discover_ms = unix_now_ms().saturating_sub(super::REDISCOVER_MS + 1);
+
+        assert_eq!(tick_idle(&mut collector), UsageTick::Idle);
+        assert_eq!(collector.snapshot().claude.month_input_tokens, 1_000_000);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
