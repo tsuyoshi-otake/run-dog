@@ -27,7 +27,10 @@ use std::{
 
 use serde::Deserialize;
 use windows_sys::Win32::{
-    Foundation::{CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, HWND, INVALID_HANDLE_VALUE},
+    Foundation::{
+        CloseHandle, FILETIME, GENERIC_READ, GENERIC_WRITE, HANDLE, HWND, INVALID_HANDLE_VALUE,
+        SYSTEMTIME,
+    },
     Storage::FileSystem::{
         CreateFileW, FlushFileBuffers, GetFileInformationByHandle, ReadFile, ReplaceFileW,
         WriteFile, BY_HANDLE_FILE_INFORMATION, CREATE_NEW, FILE_ATTRIBUTE_DIRECTORY,
@@ -35,7 +38,11 @@ use windows_sys::Win32::{
         FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
         REPLACEFILE_WRITE_THROUGH,
     },
-    System::Time::{GetTimeZoneInformation, TIME_ZONE_INFORMATION},
+    System::Time::{
+        FileTimeToSystemTime, GetDynamicTimeZoneInformation, GetTimeZoneInformation,
+        SystemTimeToTzSpecificLocalTime, SystemTimeToTzSpecificLocalTimeEx,
+        DYNAMIC_TIME_ZONE_INFORMATION, TIME_ZONE_INFORMATION,
+    },
     UI::WindowsAndMessaging::PostMessageW,
 };
 
@@ -128,12 +135,23 @@ struct DirListing {
 
 #[derive(Clone, Copy)]
 struct DayWindow {
+    time_zone: DYNAMIC_TIME_ZONE_INFORMATION,
+    #[cfg(test)]
     bias_minutes: i32,
     today: u32,
     month_start: u32,
 }
 
 impl DayWindow {
+    fn local_date(self, unix_ms: u64) -> (i32, u8, u8) {
+        local_date_in_zone(unix_ms, &self.time_zone).unwrap_or_else(|| local_ymd(unix_ms, 0))
+    }
+
+    fn day(self, unix_ms: u64) -> u32 {
+        let (year, month, day) = self.local_date(unix_ms);
+        ymd_key(year, month, day)
+    }
+
     fn contains_month_day(self, day: u32) -> bool {
         let year = (self.month_start / 10_000) as i32;
         let month = ((self.month_start / 100) % 100) as u8;
@@ -807,7 +825,7 @@ impl UsageCollector {
         self.discover.push_back(self.claude_dir.join("projects"));
         let now_ms = unix_now_ms();
         let window = day_window(now_ms);
-        let (year, month, _) = local_ymd(now_ms, window.bias_minutes);
+        let (year, month, _) = window.local_date(now_ms);
         self.discover
             .push_back(codex_month_dir(&self.codex_home, year, month));
         let (prev_year, prev_month) = previous_month(year, month);
@@ -879,9 +897,7 @@ impl UsageCollector {
             return;
         };
         self.files_stated = self.files_stated.saturating_add(1);
-        if require_recent_mtime
-            && ymd_key_from_unix(mtime_ms, window.bias_minutes) < previous_month_start(window)
-        {
+        if require_recent_mtime && window.day(mtime_ms) < previous_month_start(window) {
             return;
         }
         let kind = if path_is_under(path, &self.codex_home) {
@@ -1039,8 +1055,8 @@ impl UsageCollector {
         // Count every in-month event. A global timestamp watermark would drop
         // older JSONL after a newer file is scanned first (Codex catch-up).
         for (mut event, digest) in chunk.events.into_iter().zip(chunk.dedupe) {
-            let day = ymd_key_from_unix(event.timestamp_ms, window.bias_minutes);
-            let (year, month, day_of_month) = local_ymd(event.timestamp_ms, window.bias_minutes);
+            let (year, month, day_of_month) = window.local_date(event.timestamp_ms);
+            let day = ymd_key(year, month, day_of_month);
             if let Some(digest) = digest {
                 let key = ClaudeDedupeKey {
                     digest,
@@ -1778,7 +1794,7 @@ fn path_is_under(path: &Path, root: &Path) -> bool {
 }
 
 fn is_current_month(mtime_ms: u64, window: DayWindow) -> bool {
-    window.contains_month_day(ymd_key_from_unix(mtime_ms, window.bias_minutes))
+    window.contains_month_day(window.day(mtime_ms))
 }
 
 struct AppendedChunk {
@@ -2600,18 +2616,53 @@ pub(super) fn timezone_bias_minutes() -> i32 {
 }
 
 fn day_window(now_ms: u64) -> DayWindow {
-    let bias = timezone_bias_minutes();
-    let (year, month, day) = local_ymd(now_ms, bias);
+    let mut time_zone = DYNAMIC_TIME_ZONE_INFORMATION::default();
+    if unsafe { GetDynamicTimeZoneInformation(&mut time_zone) } == u32::MAX {
+        time_zone = DYNAMIC_TIME_ZONE_INFORMATION::default();
+    }
+    let (year, month, day) =
+        local_date_in_zone(now_ms, &time_zone).unwrap_or_else(|| local_ymd(now_ms, 0));
     DayWindow {
-        bias_minutes: bias,
+        time_zone,
+        #[cfg(test)]
+        bias_minutes: timezone_bias_minutes(),
         today: ymd_key(year, month, day),
         month_start: ymd_key(year, month, 1),
     }
 }
 
-fn ymd_key_from_unix(unix_ms: u64, bias_minutes: i32) -> u32 {
-    let (year, month, day) = local_ymd(unix_ms, bias_minutes);
-    ymd_key(year, month, day)
+fn local_date_in_zone(unix_ms: u64, zone: &DYNAMIC_TIME_ZONE_INFORMATION) -> Option<(i32, u8, u8)> {
+    let ticks = unix_ms
+        .checked_mul(10_000)?
+        .checked_add(116_444_736_000_000_000)?;
+    let file_time = FILETIME {
+        dwLowDateTime: ticks as u32,
+        dwHighDateTime: (ticks >> 32) as u32,
+    };
+    let mut utc = SYSTEMTIME::default();
+    let mut local = SYSTEMTIME::default();
+    // The Ex API uses the dynamic rules for the event's year, not today's bias.
+    // https://learn.microsoft.com/windows/win32/api/timezoneapi/nf-timezoneapi-systemtimetotzspecificlocaltimeex
+    if unsafe { FileTimeToSystemTime(&file_time, &mut utc) } == 0 {
+        return None;
+    }
+    let converted = if zone.TimeZoneKeyName[0] == 0 {
+        let fixed = TIME_ZONE_INFORMATION {
+            Bias: zone.Bias,
+            StandardBias: zone.StandardBias,
+            DaylightBias: zone.DaylightBias,
+            StandardDate: zone.StandardDate,
+            DaylightDate: zone.DaylightDate,
+            ..Default::default()
+        };
+        unsafe { SystemTimeToTzSpecificLocalTime(&fixed, &utc, &mut local) }
+    } else {
+        unsafe { SystemTimeToTzSpecificLocalTimeEx(zone, &utc, &mut local) }
+    };
+    if converted == 0 {
+        return None;
+    }
+    Some((i32::from(local.wYear), local.wMonth as u8, local.wDay as u8))
 }
 
 fn previous_month_start(window: DayWindow) -> u32 {
@@ -3121,6 +3172,84 @@ mod tests {
     }
 
     #[test]
+    fn component_calendar_dynamic_zone_uses_historical_rule_changes() {
+        let mut zone = super::DYNAMIC_TIME_ZONE_INFORMATION::default();
+        for (dest, unit) in zone
+            .TimeZoneKeyName
+            .iter_mut()
+            .zip("Eastern Standard Time".encode_utf16())
+        {
+            *dest = unit;
+        }
+        // US DST began in April in 2006, but in March starting in 2007.
+        for (stamp, expected) in [
+            ("2006-03-20T04:30:00Z", (2006, 3, 19)),
+            ("2007-03-20T04:30:00Z", (2007, 3, 20)),
+        ] {
+            assert_eq!(
+                super::local_date_in_zone(parse_timestamp(stamp).unwrap(), &zone),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn component_calendar_uses_event_dst_rules_for_dates_and_month_totals() {
+        let zone = super::DYNAMIC_TIME_ZONE_INFORMATION {
+            Bias: 300,
+            DaylightBias: -60,
+            StandardDate: super::SYSTEMTIME {
+                wMonth: 11,
+                wDay: 1,
+                wHour: 2,
+                ..Default::default()
+            },
+            DaylightDate: super::SYSTEMTIME {
+                wMonth: 3,
+                wDay: 2,
+                wHour: 2,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        for (stamp, date) in [
+            ("2026-07-01T04:30:00Z", (2026, 7, 1)),
+            ("2026-01-01T04:30:00Z", (2025, 12, 31)),
+            ("2026-11-01T04:30:00Z", (2026, 11, 1)),
+            ("2025-07-01T04:30:00Z", (2025, 7, 1)),
+            ("2025-01-01T04:30:00Z", (2024, 12, 31)),
+        ] {
+            assert_eq!(
+                super::local_date_in_zone(parse_timestamp(stamp).unwrap(), &zone),
+                Some(date)
+            );
+        }
+        let root = std::env::temp_dir().join(format!(
+            "rundog-dst-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let session = claude_session(&root);
+        fs::write(
+            &session,
+            format!("{}\n", claude_usage_line("dst", "2026-11-01T04:30:00Z")),
+        )
+        .unwrap();
+        let mut collector = new_claude_collector(&root);
+        let window = super::DayWindow {
+            time_zone: zone,
+            bias_minutes: 300,
+            today: 20261101,
+            month_start: 20261101,
+        };
+        collector.register_jsonl_file(&session, window, false);
+        collector.scan_file(&session, window, unix_now_ms());
+        assert_eq!(collector.snapshot.claude.month_input_tokens, 1_000_000);
+        assert!(collector.snapshot.claude.today_cents > 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn component_month_window_excludes_future_events_and_handles_year_rollover() {
         let root = std::env::temp_dir().join(format!(
             "rundog-month-bounds-{}-{}",
@@ -3151,6 +3280,7 @@ mod tests {
             ),
         ] {
             let window = super::DayWindow {
+                time_zone: super::DYNAMIC_TIME_ZONE_INFORMATION::default(),
                 bias_minutes: 0,
                 today,
                 month_start,
