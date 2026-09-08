@@ -53,6 +53,7 @@ fn arb_cursor() -> impl Strategy<Value = UsageCursor> {
                 offset,
                 size,
                 prefix,
+                file_id: Some([size as u32, offset as u32, 42]),
                 last_model: if codex {
                     Some("gpt-5.4".to_owned())
                 } else {
@@ -330,6 +331,7 @@ fn state_at(offset: u64) -> UsageState {
             logical_id: "p/a.jsonl".to_owned(),
             offset,
             size: offset,
+            file_id: None,
             prefix: None,
             last_model: None,
             last_codex_total: None,

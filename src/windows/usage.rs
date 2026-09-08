@@ -619,6 +619,16 @@ impl UsageCollector {
     }
 
     fn apply_state(&mut self, window: DayWindow, state: UsageState) {
+        if state
+            .cursors
+            .iter()
+            .any(|cursor| cursor.offset > 0 && cursor.file_id.is_none())
+        {
+            // Legacy checkpoints cannot distinguish replacement from append.
+            // Reset aggregate and cursors together to avoid double counting.
+            self.begin_month_rescan(window);
+            return;
+        }
         self.snapshot = state.aggregate.snapshot;
         self.snapshot.month_scan_in_progress = !state.aggregate.catch_up_done;
         if state.aggregate.month_start != window.month_start {
@@ -670,6 +680,7 @@ impl UsageCollector {
                 logical_id,
                 offset: cursor.offset,
                 size: cursor.size,
+                file_id: cursor.last_file_id.map(FileId::durable),
                 prefix: cursor.last_prefix,
                 last_model: cursor.last_model.clone(),
                 last_codex_total: cursor.last_codex_total,
@@ -920,7 +931,7 @@ impl UsageCollector {
                 &self.codex_home,
                 kind,
                 size,
-                prefix,
+                (prefix, file_id),
             );
             if let Some(reason) = rebuild {
                 self.last_rebuild_reason = Some(reason);
@@ -1557,6 +1568,10 @@ struct FileId {
 }
 
 impl FileId {
+    fn durable(self) -> [u32; 3] {
+        [self.volume, self.index_high, self.index_low]
+    }
+
     fn from_info(info: &BY_HANDLE_FILE_INFORMATION) -> Self {
         Self {
             volume: info.dwVolumeSerialNumber,
@@ -2772,8 +2787,9 @@ fn restored_cursor_offset(
     codex_home: &Path,
     kind: SourceKind,
     size: u64,
-    prefix: Option<u64>,
+    identity: (Option<u64>, Option<FileId>),
 ) -> (u64, Option<CursorRebuildReason>) {
+    let (prefix, file_id) = identity;
     let Some(key) = file_checkpoint_key(path, claude_dir, codex_home, kind) else {
         return (0, None);
     };
@@ -2782,6 +2798,9 @@ fn restored_cursor_offset(
     };
     if size < cursor.size || size < cursor.offset {
         return (0, Some(CursorRebuildReason::SizeShrunk));
+    }
+    if cursor.file_id != file_id.map(FileId::durable) {
+        return (0, Some(CursorRebuildReason::FileIdChanged));
     }
     if let (Some(stored), Some(current)) = (cursor.prefix, prefix) {
         if stored != current {
@@ -2805,6 +2824,9 @@ fn cursor_rebuild_reason(
     let file_id_changed = matches!((cursor.last_file_id, file_id), (Some(previous), Some(current)) if previous != current);
     if file_id_changed && prefix_changed {
         return Some(CursorRebuildReason::FileIdAndPrefixChanged);
+    }
+    if file_id_changed {
+        return Some(CursorRebuildReason::FileIdChanged);
     }
     if prefix_changed {
         return Some(CursorRebuildReason::PrefixChanged);
@@ -2952,6 +2974,7 @@ mod tests {
             self.file_checkpoint.insert(
                 crate::core::FileCheckpointKey::Codex(logical_id.to_owned()),
                 crate::core::UsageCursor {
+                    file_id: None,
                     kind: crate::core::CursorKind::Codex,
                     logical_id: logical_id.to_owned(),
                     offset: 0,
@@ -4786,6 +4809,89 @@ mod tests {
         let chunk = read_chunk(&session, 0, super::MAX_BYTES_PER_TICK);
         let _ = fs::remove_dir_all(&root);
         assert_eq!(chunk.events.len(), 1);
+    }
+
+    #[test]
+    fn component_store_legacy_identity_rebuilds_aggregate_and_cursors_together() {
+        let root = std::env::temp_dir().join(format!(
+            "rundog-legacy-fileid-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let session = claude_session(&root);
+        let store_root = root.join("store");
+        fs::write(
+            &session,
+            format!("{}\n", claude_usage_line("old", &current_stamp())),
+        )
+        .unwrap();
+        let mut first = new_persisted_collector(&root, store_root.clone());
+        tick_idle(&mut first);
+        let mut state = first.build_state(super::day_window(unix_now_ms()));
+        for cursor in &mut state.cursors {
+            cursor.file_id = None;
+        }
+        assert!(matches!(
+            super::FileUsageStore::at(store_root.clone()).persist(&state),
+            crate::core::PersistStatus::Applied { .. }
+        ));
+        let mut restored = new_persisted_collector(&root, store_root);
+        assert_eq!(tick_idle(&mut restored), UsageTick::Idle);
+        assert_eq!(restored.snapshot.claude.month_input_tokens, 1_000_000);
+        assert!(restored
+            .build_state(super::day_window(unix_now_ms()))
+            .cursors[0]
+            .file_id
+            .is_some());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn component_reader_restart_detects_same_prefix_larger_replacement() {
+        let root = std::env::temp_dir().join(format!(
+            "rundog-fileid-restart-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let session = claude_session(&root);
+        let store = root.join("store");
+        let prefix = format!("{}\n", " ".repeat(80));
+        let stamp = current_stamp();
+        fs::write(
+            &session,
+            format!("{prefix}{}\n", claude_usage_line("old", &stamp)),
+        )
+        .unwrap();
+        let mut first = new_persisted_collector(&root, store.clone());
+        assert_eq!(tick_idle(&mut first), UsageTick::Idle);
+        assert_eq!(first.snapshot.claude.month_input_tokens, 1_000_000);
+        let state = first.build_state(super::day_window(unix_now_ms()));
+        assert!(state.cursors[0].file_id.is_some());
+        assert_eq!(
+            crate::core::UsageState::decode(&state.encode())
+                .unwrap()
+                .cursors,
+            state.cursors
+        );
+        drop(first);
+        fs::rename(&session, root.join("old-session.saved")).unwrap();
+        fs::write(
+            &session,
+            format!(
+                "{prefix}{}\n{}\n",
+                claude_usage_line("new", &stamp),
+                claude_usage_line("newer", &stamp)
+            ),
+        )
+        .unwrap();
+        let mut restored = new_persisted_collector(&root, store);
+        assert_eq!(tick_idle(&mut restored), UsageTick::Idle);
+        assert_eq!(restored.snapshot.claude.month_input_tokens, 3_000_000);
+        assert_eq!(
+            restored.last_rebuild_reason,
+            Some(CursorRebuildReason::FileIdChanged)
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
