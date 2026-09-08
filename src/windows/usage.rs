@@ -104,6 +104,8 @@ struct FileCursor {
     size: u64,
     mtime_ms: u64,
     offset: u64,
+    /// Transient read head within an oversized record; never checkpointed.
+    discard_offset: Option<u64>,
     last_stat_ms: u64,
     last_model: Option<String>,
     last_codex_total: Option<CodexTokenTotals>,
@@ -911,6 +913,7 @@ impl UsageCollector {
                 size,
                 mtime_ms,
                 offset,
+                discard_offset: None,
                 last_stat_ms: 0,
                 last_model,
                 last_codex_total,
@@ -949,6 +952,7 @@ impl UsageCollector {
             let rebuild = cursor_rebuild_reason(cursor, size, mtime_ms, prefix, file_id);
             if rebuild.is_some() {
                 cursor.offset = 0;
+                cursor.discard_offset = None;
                 cursor.last_model = None;
                 cursor.last_codex_total = None;
                 cursor.waiting_incomplete = false;
@@ -983,7 +987,12 @@ impl UsageCollector {
         self.files_opened = self.files_opened.saturating_add(1);
         let chunk = read_appended(
             path,
-            offset,
+            (
+                offset,
+                self.files
+                    .get(path)
+                    .and_then(|cursor| cursor.discard_offset),
+            ),
             size,
             kind,
             previous_model.as_deref(),
@@ -997,6 +1006,7 @@ impl UsageCollector {
         let previous_model = cursor.last_model.clone();
         let mut previous_codex_total = cursor.last_codex_total;
         cursor.offset = chunk.new_offset;
+        cursor.discard_offset = chunk.discard_offset;
         cursor.size = size;
         cursor.mtime_ms = mtime_ms;
         cursor.last_model = chunk.last_model;
@@ -1760,6 +1770,7 @@ fn is_current_month(mtime_ms: u64, window: DayWindow) -> bool {
 
 struct AppendedChunk {
     new_offset: u64,
+    discard_offset: Option<u64>,
     consumed: u64,
     events: Vec<ParsedEvent>,
     dedupe: Vec<Option<[u8; 16]>>,
@@ -1769,41 +1780,44 @@ struct AppendedChunk {
 
 fn read_appended(
     path: &Path,
-    offset: u64,
+    position: (u64, Option<u64>),
     size: u64,
     kind: SourceKind,
     last_model: Option<&str>,
     max_bytes: u64,
     buf: &mut Vec<u8>,
 ) -> AppendedChunk {
+    let (offset, discard_offset) = position;
+    let read_start = discard_offset.unwrap_or(offset);
     let mut events = Vec::new();
     let mut keys = Vec::new();
     let mut limits = None;
     let mut model = last_model.map(str::to_owned);
     let empty = || AppendedChunk {
         new_offset: offset,
+        discard_offset,
         consumed: 0,
         events: Vec::new(),
         dedupe: Vec::new(),
         limits: None,
         last_model: model.clone(),
     };
-    if size <= offset {
+    if size <= read_start {
         return empty();
     }
     let Ok(mut file) = File::open(path) else {
         return empty();
     };
-    if file.seek(SeekFrom::Start(offset)).is_err() {
+    if file.seek(SeekFrom::Start(read_start)).is_err() {
         return empty();
     }
     buf.clear();
     buf.resize(8_192, 0);
     let tick_limit = max_bytes.max(1);
     let mut line = Vec::new();
-    let mut pos = offset;
+    let mut pos = read_start;
     let mut committed = offset;
-    let mut oversize = false;
+    let mut oversize = discard_offset.is_some();
     while pos < size {
         let want = (size - pos) as usize;
         let cap = buf.len();
@@ -1824,13 +1838,12 @@ fn read_appended(
                 line.clear();
                 oversize = false;
                 committed = pos;
-                if committed.saturating_sub(offset) >= tick_limit {
+                if committed.saturating_sub(read_start) >= tick_limit {
                     stop = true;
                     break;
                 }
             } else if oversize {
-                committed = pos;
-                if committed.saturating_sub(offset) >= MAX_SKIP_PER_READ {
+                if pos.saturating_sub(read_start) >= MAX_SKIP_PER_READ {
                     stop = true;
                     break;
                 }
@@ -1839,7 +1852,6 @@ fn read_appended(
             } else {
                 line.clear();
                 oversize = true;
-                committed = pos;
             }
         }
         if stop {
@@ -1848,7 +1860,8 @@ fn read_appended(
     }
     AppendedChunk {
         new_offset: committed,
-        consumed: committed.saturating_sub(offset),
+        discard_offset: oversize.then_some(pos),
+        consumed: if oversize { pos } else { committed }.saturating_sub(read_start),
         events,
         dedupe: keys,
         limits,
@@ -3073,7 +3086,7 @@ mod tests {
         let mut buf = Vec::new();
         super::read_appended(
             path,
-            offset,
+            (offset, None),
             size,
             super::SourceKind::Claude,
             None,
@@ -4572,6 +4585,67 @@ mod tests {
         let chunk = read_chunk(&session, 0, super::MAX_BYTES_PER_TICK);
         let _ = fs::remove_dir_all(&root);
         assert_eq!(chunk.events.len(), 1);
+    }
+
+    #[test]
+    fn component_reader_oversized_suffix_is_never_a_record_across_ticks_or_restart() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-jsonl-huge-suffix-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let session = claude_session(&root);
+        let stamp = current_stamp();
+        let suffix = claude_usage_line("must-skip", &stamp);
+        let good = claude_usage_line("must-count", &stamp);
+        let incomplete = format!("{}{suffix}", " ".repeat(1_100 * 1_024));
+        fs::write(&session, &incomplete).unwrap();
+        let mut position = (0, None);
+        let mut buf = Vec::new();
+        for _ in 0..4 {
+            let chunk = super::read_appended(
+                &session,
+                position,
+                incomplete.len() as u64,
+                super::SourceKind::Claude,
+                None,
+                super::MAX_BYTES_PER_TICK,
+                &mut buf,
+            );
+            assert_eq!(chunk.new_offset, 0);
+            assert!(chunk.events.is_empty());
+            assert!(chunk.consumed <= super::MAX_SKIP_PER_READ);
+            position = (chunk.new_offset, chunk.discard_offset);
+        }
+        // Restart restores only the committed boundary, not the transient head.
+        let restart = read_chunk(&session, position.0, super::MAX_BYTES_PER_TICK);
+        assert_eq!(restart.new_offset, 0);
+        assert!(restart.events.is_empty());
+        fs::write(&session, format!("{incomplete}\n{good}\n")).unwrap();
+        for start in [position, (restart.new_offset, restart.discard_offset)] {
+            let mut position = start;
+            let mut count = 0;
+            let size = fs::metadata(&session).unwrap().len();
+            for _ in 0..6 {
+                let chunk = super::read_appended(
+                    &session,
+                    position,
+                    size,
+                    super::SourceKind::Claude,
+                    None,
+                    super::MAX_BYTES_PER_TICK,
+                    &mut buf,
+                );
+                count += chunk.events.len();
+                if chunk.new_offset != 0 {
+                    assert!(chunk.new_offset > incomplete.len() as u64);
+                }
+                position = (chunk.new_offset, chunk.discard_offset);
+            }
+            assert_eq!(count, 1);
+            assert_eq!(position, (size, None));
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
