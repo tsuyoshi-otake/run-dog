@@ -11,6 +11,10 @@ EXTENDS Naturals, FiniteSets, Sequences, TLC
 \*   2 cursor_ahead
 \*   3 incomplete_commit
 \*   4 stale_overwrite
+\*
+\* The collector sub-model below uses file 1 as the healthy hot log and file
+\* 2 as the path that may remain unreadable. Its retry state is runtime-only;
+\* committed cursors and aggregates are the restart source of truth.
 
 CONSTANTS MaxIds, Fault
 
@@ -22,6 +26,10 @@ Files == {1, 2}
 Months == {1, 2}
 MaxLen == 2
 MaxGen == 2
+MaxRetries == 3
+HealthyFile == 1
+BlockedFile == 2
+MaxCollectorCount == Cardinality(Files) * MaxLen
 
 RecOK(r) ==
     /\ r.complete \in BOOLEAN
@@ -33,12 +41,38 @@ RecOK(r) ==
 VARIABLES recs, cursor, accepted, contribution,
           month, generation, visibleGeneration, lastGoodGeneration,
           ckCursor, ckAccepted, ckGeneration,
-          rebuild, migrated
+          rebuild, migrated,
+          catchUp, discovered, registered, retryAttempts, terminal,
+          appended, collectorCursor, committedCollectorCursor,
+          collectorMonth, collectorToday, committedCollectorMonth,
+          committedCollectorToday, collectorDay
 
 vars == <<recs, cursor, accepted, contribution,
           month, generation, visibleGeneration, lastGoodGeneration,
           ckCursor, ckAccepted, ckGeneration,
           rebuild, migrated>>
+
+collectorVars == <<catchUp, discovered, registered, retryAttempts, terminal,
+                    appended, collectorCursor, committedCollectorCursor,
+                    collectorMonth, collectorToday, committedCollectorMonth,
+                    committedCollectorToday, collectorDay>>
+
+allVars == vars \o collectorVars
+
+CollectorInit ==
+    /\ catchUp = TRUE
+    /\ discovered = {}
+    /\ registered = {}
+    /\ retryAttempts = [f \in Files |-> 0]
+    /\ terminal = {}
+    /\ appended = [f \in Files |-> 0]
+    /\ collectorCursor = [f \in Files |-> 0]
+    /\ committedCollectorCursor = [f \in Files |-> 0]
+    /\ collectorMonth = 0
+    /\ collectorToday = 0
+    /\ committedCollectorMonth = 0
+    /\ committedCollectorToday = 0
+    /\ collectorDay = 1
 
 HasIncomplete(f) ==
     /\ Len(recs[f]) > 0
@@ -66,6 +100,7 @@ Init ==
     /\ ckGeneration = 0
     /\ rebuild = FALSE
     /\ migrated = FALSE
+    /\ CollectorInit
 
 AppendComplete(f, id) ==
     /\ Len(recs[f]) < MaxLen
@@ -226,9 +261,130 @@ StaleOverwrite ==
                   lastGoodGeneration, ckCursor, ckAccepted, ckGeneration,
                   rebuild, migrated>>
 
+CollectorDiscover(f) ==
+    /\ f \in Files
+    /\ f \notin discovered
+    /\ discovered' = discovered \cup {f}
+    /\ UNCHANGED <<catchUp, registered, retryAttempts, terminal, appended,
+                    collectorCursor, committedCollectorCursor, collectorMonth,
+                    collectorToday, committedCollectorMonth,
+                    committedCollectorToday, collectorDay>>
+    /\ UNCHANGED vars
+
+CollectorRegister(f) ==
+    /\ f \in Files
+    /\ f = HealthyFile
+    /\ f \in discovered
+    /\ f \notin terminal
+    /\ registered' = registered \cup {f}
+    /\ UNCHANGED <<catchUp, discovered, retryAttempts, terminal, appended,
+                    collectorCursor, committedCollectorCursor, collectorMonth,
+                    collectorToday, committedCollectorMonth,
+                    committedCollectorToday, collectorDay>>
+    /\ UNCHANGED vars
+
+CollectorPermanentFailure(f) ==
+    /\ f \in Files
+    /\ f \in discovered
+    /\ f \notin registered
+    /\ f \notin terminal
+    /\ retryAttempts[f] < MaxRetries
+    /\ retryAttempts' = [retryAttempts EXCEPT ![f] = @ + 1]
+    /\ terminal' =
+          IF retryAttempts[f] + 1 = MaxRetries
+          THEN terminal \cup {f}
+          ELSE terminal
+    /\ UNCHANGED <<catchUp, discovered, registered, appended,
+                    collectorCursor, committedCollectorCursor, collectorMonth,
+                    collectorToday, committedCollectorMonth,
+                    committedCollectorToday, collectorDay>>
+    /\ UNCHANGED vars
+
+CollectorAppend(f) ==
+    /\ f \in Files
+    /\ f \in registered
+    /\ appended[f] < MaxLen
+    /\ appended' = [appended EXCEPT ![f] = @ + 1]
+    /\ UNCHANGED <<catchUp, discovered, registered, retryAttempts, terminal,
+                    collectorCursor, committedCollectorCursor, collectorMonth,
+                    collectorToday, committedCollectorMonth,
+                    committedCollectorToday, collectorDay>>
+    /\ UNCHANGED vars
+
+CollectorScan(f) ==
+    /\ f \in Files
+    /\ f \in registered
+    /\ collectorCursor[f] < appended[f]
+    /\ LET delta == appended[f] - collectorCursor[f] IN
+        /\ collectorCursor' = [collectorCursor EXCEPT ![f] = appended[f]]
+        /\ collectorMonth' = collectorMonth + delta
+        /\ collectorToday' = collectorToday + delta
+    /\ UNCHANGED <<catchUp, discovered, registered, retryAttempts, terminal,
+                    appended, committedCollectorCursor,
+                    committedCollectorMonth, committedCollectorToday,
+                    collectorDay>>
+    /\ UNCHANGED vars
+
+CollectorCommit ==
+    /\ committedCollectorCursor' = collectorCursor
+    /\ committedCollectorMonth' = collectorMonth
+    /\ committedCollectorToday' = collectorToday
+    /\ UNCHANGED <<catchUp, discovered, registered, retryAttempts, terminal,
+                    appended, collectorCursor, collectorMonth, collectorToday,
+                    collectorDay>>
+    /\ UNCHANGED vars
+
+CollectorRollover ==
+    /\ collectorDay = 1
+    /\ collectorDay' = 2
+    /\ collectorToday' = 0
+    /\ committedCollectorToday' = 0
+    /\ UNCHANGED <<catchUp, discovered, registered, retryAttempts, terminal,
+                    appended, collectorCursor, committedCollectorCursor,
+                    collectorMonth, committedCollectorMonth>>
+    /\ UNCHANGED vars
+
+CollectorFinish ==
+    /\ catchUp
+    /\ \A f \in Files:
+          f \in terminal
+          \/ (f \in registered /\ collectorCursor[f] = appended[f])
+    /\ catchUp' = FALSE
+    /\ UNCHANGED <<discovered, registered, retryAttempts, terminal, appended,
+                    collectorCursor, committedCollectorCursor, collectorMonth,
+                    collectorToday, committedCollectorMonth,
+                    committedCollectorToday, collectorDay>>
+    /\ UNCHANGED vars
+
+CollectorRestart ==
+    /\ ~catchUp
+    /\ collectorCursor' = committedCollectorCursor
+    /\ collectorMonth' = committedCollectorMonth
+    /\ collectorToday' = committedCollectorToday
+    /\ discovered' = {}
+    /\ registered' = {}
+    /\ retryAttempts' = [f \in Files |-> 0]
+    /\ terminal' = {}
+    /\ catchUp' = TRUE
+    /\ UNCHANGED <<appended, committedCollectorCursor,
+                    committedCollectorMonth, committedCollectorToday,
+                    collectorDay>>
+    /\ UNCHANGED vars
+
+CollectorNext ==
+    \/ \E f \in Files: CollectorDiscover(f)
+    \/ \E f \in Files: CollectorRegister(f)
+    \/ CollectorPermanentFailure(BlockedFile)
+    \/ \E f \in Files: CollectorAppend(f)
+    \/ \E f \in Files: CollectorScan(f)
+    \/ CollectorCommit
+    \/ CollectorRollover
+    \/ CollectorFinish
+    \/ CollectorRestart
+
 Idle == UNCHANGED vars
 
-Next ==
+LegacyNext ==
     \/ \E f \in Files, id \in Ids: AppendComplete(f, id)
     \/ \E id \in Ids: Replay(id)
     \/ \E id \in Ids, dest \in Files: DuplicateAcrossFiles(id, dest)
@@ -247,6 +403,40 @@ Next ==
     \/ StaleOverwrite
     \/ Idle
 
+Next ==
+    \/ (LegacyNext /\ UNCHANGED collectorVars)
+    \/ CollectorNext
+
+LegacyStep ==
+    /\ LegacyNext
+    /\ UNCHANGED collectorVars
+
+CollectorTypeOK ==
+    /\ catchUp \in BOOLEAN
+    /\ discovered \subseteq Files
+    /\ registered \subseteq Files
+    /\ retryAttempts \in [Files -> 0..MaxRetries]
+    /\ terminal \subseteq Files
+    /\ terminal \cap registered = {}
+    /\ appended \in [Files -> 0..MaxLen]
+    /\ collectorCursor \in [Files -> 0..MaxLen]
+    /\ committedCollectorCursor \in [Files -> 0..MaxLen]
+    /\ collectorMonth \in 0..MaxCollectorCount
+    /\ collectorToday \in 0..MaxCollectorCount
+    /\ committedCollectorMonth \in 0..MaxCollectorCount
+    /\ committedCollectorToday \in 0..MaxCollectorCount
+    /\ collectorDay \in 1..2
+    /\ collectorMonth = collectorCursor[1] + collectorCursor[2]
+    /\ committedCollectorMonth =
+          committedCollectorCursor[1] + committedCollectorCursor[2]
+    /\ collectorToday <= collectorMonth
+    /\ committedCollectorToday <= committedCollectorMonth
+
+CollectorNoDoubleCount ==
+    /\ collectorMonth = collectorCursor[1] + collectorCursor[2]
+    /\ committedCollectorMonth =
+          committedCollectorCursor[1] + committedCollectorCursor[2]
+
 TypeOK ==
     /\ \A f \in Files:
         /\ \A i \in DOMAIN recs[f]: RecOK(recs[f][i])
@@ -263,9 +453,56 @@ TypeOK ==
     /\ ckGeneration \in 0..MaxGen
     /\ rebuild \in BOOLEAN
     /\ migrated \in BOOLEAN
+    /\ CollectorTypeOK
 
 NoDoubleCount ==
-    \A id \in Ids: contribution[id] <= 1
+    /\ \A id \in Ids: contribution[id] <= 1
+    /\ CollectorNoDoubleCount
+
+\* Fairness is weak and applies only to transitions that are continuously
+\* enabled while a catch-up is active. A terminal registration failure is
+\* reached after MaxRetries fair failure steps; healthy discovery/registration
+\* and scanning are independent. Restart is intentionally not fair so the
+\* model can still check that each restart restores the last commit.
+CollectorFairness ==
+    /\ WF_collectorVars(CollectorDiscover(HealthyFile))
+    /\ WF_collectorVars(CollectorDiscover(BlockedFile))
+    /\ WF_collectorVars(CollectorRegister(HealthyFile))
+    /\ WF_collectorVars(CollectorPermanentFailure(BlockedFile))
+    /\ WF_collectorVars(CollectorScan(HealthyFile))
+    /\ WF_collectorVars(CollectorFinish)
+
+CatchUpSpec ==
+    /\ Init
+    /\ [][CollectorNext]_collectorVars
+    /\ CollectorFairness
+
+NoLostHealthyProgress ==
+    []((catchUp
+        /\ HealthyFile \in registered
+        /\ collectorCursor[HealthyFile] < appended[HealthyFile])
+        => <>(collectorCursor[HealthyFile] = appended[HealthyFile]))
+
+CatchUpHasTerminalOutcome ==
+    [](catchUp => <>((~catchUp)
+        /\ (\A f \in Files:
+              f \in terminal
+              \/ (f \in registered /\ collectorCursor[f] = appended[f]))))
+
+HotLogEventuallyObserved ==
+    []((collectorCursor[HealthyFile] < appended[HealthyFile])
+        => <>(collectorCursor[HealthyFile] = appended[HealthyFile]))
+
+RestartPreservesCommittedState ==
+    [][CollectorRestart =>
+        /\ collectorCursor' = committedCollectorCursor
+        /\ collectorMonth' = committedCollectorMonth
+        /\ collectorToday' = committedCollectorToday]_collectorVars
+
+RolloverPreventsStaleTodayRestore ==
+    [][CollectorRollover =>
+        /\ collectorToday' = 0
+        /\ committedCollectorToday' = 0]_collectorVars
 
 NoSilentLoss ==
     \A f \in Files:
@@ -312,6 +549,6 @@ CheckpointIsPrefix ==
 
 Spec ==
     /\ Init
-    /\ [][Next]_vars
+    /\ [][LegacyStep]_allVars
 
 =============================================================================

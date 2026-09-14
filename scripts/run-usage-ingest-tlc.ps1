@@ -37,6 +37,7 @@ function Invoke-Tlc([string]$config, [string]$expect) {
 
 if ($Mode -eq 'pass' -or $Mode -eq 'all') {
     Invoke-Tlc 'RunDogUsageIngest.cfg' 'pass'
+    Invoke-Tlc 'RunDogUsageCatchUp.cfg' 'pass'
 }
 if ($Mode -eq 'mutations' -or $Mode -eq 'all') {
     Invoke-Tlc 'RunDogUsageIngestNoDedupe.cfg' 'fail'
