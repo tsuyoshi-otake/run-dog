@@ -139,6 +139,149 @@ fn spec_size_rebuild(stored_offset: u64, stored_size: u64, new_size: u64) -> (u6
     }
 }
 
+const MODEL_MAX_RETRIES: u8 = 3;
+
+#[derive(Clone, Copy, Debug)]
+enum CollectorAction {
+    Discover,
+    Register,
+    PermanentFailure,
+    Append,
+    Scan,
+    Commit,
+    Rollover,
+    Restart,
+}
+
+fn arb_collector_action() -> impl Strategy<Value = CollectorAction> {
+    (0_u8..8).prop_map(|action| match action {
+        0 => CollectorAction::Discover,
+        1 => CollectorAction::Register,
+        2 => CollectorAction::PermanentFailure,
+        3 => CollectorAction::Append,
+        4 => CollectorAction::Scan,
+        5 => CollectorAction::Commit,
+        6 => CollectorAction::Rollover,
+        _ => CollectorAction::Restart,
+    })
+}
+
+#[derive(Clone, Debug)]
+struct CollectorStateModel {
+    discovered: bool,
+    registered: bool,
+    bad_attempts: u8,
+    bad_terminal: bool,
+    catch_up: bool,
+    appended: u64,
+    cursor: u64,
+    committed_cursor: u64,
+    month_count: u64,
+    today_count: u64,
+    committed_month_count: u64,
+    committed_today_count: u64,
+    day: u8,
+}
+
+impl Default for CollectorStateModel {
+    fn default() -> Self {
+        Self {
+            discovered: false,
+            registered: false,
+            bad_attempts: 0,
+            bad_terminal: false,
+            catch_up: true,
+            appended: 0,
+            cursor: 0,
+            committed_cursor: 0,
+            month_count: 0,
+            today_count: 0,
+            committed_month_count: 0,
+            committed_today_count: 0,
+            day: 1,
+        }
+    }
+}
+
+impl CollectorStateModel {
+    fn step(&mut self, action: CollectorAction) {
+        match action {
+            CollectorAction::Discover => self.discovered = true,
+            CollectorAction::Register => {
+                if self.discovered {
+                    self.registered = true;
+                }
+            }
+            CollectorAction::PermanentFailure => {
+                if !self.bad_terminal {
+                    self.bad_attempts = self.bad_attempts.saturating_add(1);
+                    self.bad_terminal = self.bad_attempts >= MODEL_MAX_RETRIES;
+                }
+            }
+            CollectorAction::Append => self.appended = self.appended.saturating_add(1),
+            CollectorAction::Scan => {
+                if self.registered && self.cursor < self.appended {
+                    let delta = self.appended - self.cursor;
+                    self.cursor = self.appended;
+                    self.month_count = self.month_count.saturating_add(delta);
+                    self.today_count = self.today_count.saturating_add(delta);
+                }
+            }
+            CollectorAction::Commit => {
+                self.committed_cursor = self.cursor;
+                self.committed_month_count = self.month_count;
+                self.committed_today_count = self.today_count;
+            }
+            CollectorAction::Rollover => {
+                self.day = self.day.saturating_add(1);
+                self.today_count = 0;
+                // The production rollover marks the aggregate dirty in the
+                // same transition. Model that atomic durability boundary so
+                // a restart cannot resurrect the prior day's Today value.
+                self.committed_today_count = 0;
+            }
+            CollectorAction::Restart => {
+                self.cursor = self.committed_cursor;
+                self.month_count = self.committed_month_count;
+                self.today_count = self.committed_today_count;
+                self.discovered = false;
+                self.registered = false;
+                // Runtime retry state is intentionally not durable. A
+                // restart may retry the bad path, but committed usage and
+                // cursor state must remain the source of truth.
+                self.bad_attempts = 0;
+                self.bad_terminal = false;
+                self.catch_up = true;
+            }
+        }
+
+        // A terminal bad registration owns its completion. Healthy work is
+        // independent and can finish the same catch-up when its cursor is
+        // caught up; no intermediate retry state may become terminal.
+        if self.catch_up && self.bad_terminal && (!self.registered || self.cursor == self.appended)
+        {
+            self.catch_up = false;
+        }
+    }
+
+    fn assert_invariants(&self) {
+        assert!(self.cursor <= self.appended);
+        assert!(self.committed_cursor <= self.appended);
+        assert!(self.bad_attempts <= MODEL_MAX_RETRIES);
+        assert_eq!(self.month_count, self.cursor);
+        assert!(self.today_count <= self.month_count);
+        assert_eq!(self.committed_month_count, self.committed_cursor);
+        if self.day > 1 {
+            // Rollover only clears Today; Month remains an exact-once total.
+            assert!(self.month_count >= self.today_count);
+            assert!(self.committed_today_count <= self.today_count);
+        }
+        if self.bad_terminal && (!self.registered || self.cursor == self.appended) {
+            assert!(!self.catch_up);
+        }
+    }
+}
+
 proptest! {
     #![proptest_config(ingest_config())]
 
@@ -312,6 +455,58 @@ proptest! {
             }
             LoadStatus::Missing => prop_assert!(false, "prior generation must stay visible"),
         }
+    }
+
+    #[test]
+    fn pbt_stateful_catch_up_preserves_healthy_progress(
+        actions in proptest::collection::vec(arb_collector_action(), 1..80),
+    ) {
+        let mut model = CollectorStateModel::default();
+        for action in actions {
+            model.step(action);
+            model.assert_invariants();
+        }
+
+        // Exercise the fair suffix explicitly.  It models discovery and
+        // registration of the healthy hot log, one append/read/commit, and
+        // the bounded failure sequence for a separate unreadable path.
+        model.step(CollectorAction::Discover);
+        model.step(CollectorAction::Register);
+        model.step(CollectorAction::Append);
+        model.step(CollectorAction::Scan);
+        model.step(CollectorAction::Commit);
+        let committed = (
+            model.cursor,
+            model.month_count,
+            model.today_count,
+            model.committed_cursor,
+        );
+        for _ in 0..MODEL_MAX_RETRIES {
+            model.step(CollectorAction::PermanentFailure);
+        }
+        model.assert_invariants();
+        prop_assert!(!model.catch_up);
+        prop_assert_eq!(
+            (model.cursor, model.month_count, model.today_count, model.committed_cursor),
+            committed
+        );
+
+        // A restart may forget runtime retry state, but it must restore the
+        // committed aggregate/cursor and then count a later append once.
+        model.step(CollectorAction::Restart);
+        prop_assert_eq!(
+            (model.cursor, model.month_count, model.today_count),
+            (committed.0, committed.1, committed.2)
+        );
+        let restart_totals = (model.cursor, model.month_count, model.today_count);
+        model.step(CollectorAction::Discover);
+        model.step(CollectorAction::Register);
+        model.step(CollectorAction::Append);
+        model.step(CollectorAction::Scan);
+        model.assert_invariants();
+        prop_assert_eq!(model.cursor, restart_totals.0 + 1);
+        prop_assert_eq!(model.month_count, restart_totals.1 + 1);
+        prop_assert_eq!(model.today_count, restart_totals.2 + 1);
     }
 }
 

@@ -1,0 +1,2 @@
+cc 2e353e53eabb29919ceecd394b690c87d307009ac92a70791e89eaef396c7edb # shrinks to actions = [Discover, Append, Register, Scan, Rollover, Discover]
+cc 284ddcc2f11e16ebf74b8fcceeed657582f748c18a219e6587813afe5846e760 # shrinks to actions = [2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 0]
