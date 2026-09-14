@@ -97,6 +97,11 @@ const STAT_COOLDOWN_MS: u64 = USAGE_IDLE_INTERVAL_MS as u64;
 const COLD_RESTAT_MS: u64 = 10 * 60 * 1_000;
 const HOT_AGE_MS: u64 = 48 * 60 * 60 * 1_000;
 const REDISCOVER_MS: u64 = USAGE_IDLE_INTERVAL_MS as u64;
+/// An unreadable registration/probe gets a small number of immediate retry
+/// turns.  Once exhausted, the path has an explicit terminal outcome for the
+/// current catch-up; it is revisited only after the cooldown below.
+const MAX_PATH_RETRIES: u8 = 3;
+const TERMINAL_PATH_RETRY_MS: u64 = 10 * 60 * 1_000;
 const MAX_HEADER_VALUE_BYTES: usize = 8 * 1_024;
 const MAX_CREDENTIAL_FILE_BYTES: usize = 256 * 1_024;
 const CLAUDE_OAUTH_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
@@ -131,6 +136,13 @@ enum SourceKind {
 struct DirListing {
     mtime_ms: u64,
     dirs: Vec<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PathRetryState {
+    attempts: u8,
+    terminal: bool,
+    retry_after_ms: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -172,9 +184,12 @@ pub struct UsageCollector {
     discover: VecDeque<PathBuf>,
     registrations: VecDeque<(PathBuf, bool)>,
     registration_paths: HashSet<PathBuf>,
+    path_retries: HashMap<PathBuf, PathRetryState>,
     file_work_remaining: usize,
     #[cfg(test)]
     fail_file_id: bool,
+    #[cfg(test)]
+    fail_file_id_path: Option<PathBuf>,
     claude_keys: HashSet<ClaudeDedupeKey>,
     pending: VecDeque<PathBuf>,
     snapshot: UsageSnapshot,
@@ -286,9 +301,12 @@ impl UsageCollector {
             discover: VecDeque::new(),
             registrations: VecDeque::new(),
             registration_paths: HashSet::new(),
+            path_retries: HashMap::new(),
             file_work_remaining: CATCH_UP_FILES_PER_TICK,
             #[cfg(test)]
             fail_file_id: false,
+            #[cfg(test)]
+            fail_file_id_path: None,
             claude_keys: HashSet::new(),
             pending: VecDeque::new(),
             snapshot: UsageSnapshot::default(),
@@ -466,7 +484,7 @@ impl UsageCollector {
                 || (!self.catch_up
                     && now_ms.saturating_sub(self.last_discover_ms) >= REDISCOVER_MS))
         {
-            self.queue_roots();
+            self.queue_roots(now_ms);
             self.last_discover_ms = now_ms;
         }
 
@@ -479,7 +497,7 @@ impl UsageCollector {
             self.discover_dir(&dir, window, now_ms);
             dirs += 1;
         }
-        self.process_registrations(window);
+        self.process_registrations(window, now_ms);
         if self.catch_up {
             self.prioritize_newest_pending();
         }
@@ -663,7 +681,7 @@ impl UsageCollector {
                 RescanReason::LegacyIdentity as u64,
                 0,
             );
-            self.begin_month_rescan(window);
+            self.begin_month_rescan(window, unix_now_ms());
             return;
         }
         self.snapshot = state.aggregate.snapshot;
@@ -842,10 +860,10 @@ impl UsageCollector {
         }
         self.month_rescan_notify = true;
         self.record_diag(DiagnosticKind::RescanReason, RescanReason::User as u64, 0);
-        self.begin_month_rescan(window);
+        self.begin_month_rescan(window, unix_now_ms());
     }
 
-    fn begin_month_rescan(&mut self, window: DayWindow) {
+    fn begin_month_rescan(&mut self, window: DayWindow, now_ms: u64) {
         self.day_key = window.today;
         self.last_collected_ms = 0;
         self.file_checkpoint.clear();
@@ -855,6 +873,7 @@ impl UsageCollector {
         self.pending.clear();
         self.registrations.clear();
         self.registration_paths.clear();
+        self.path_retries.clear();
         self.deferred.clear();
         self.catch_up = true;
         self.snapshot.claude.clear_today_cost();
@@ -867,13 +886,12 @@ impl UsageCollector {
         self.snapshot.codex.month_output_tokens = 0;
         self.checkpoint_dirty = true;
         self.last_discover_ms = 0;
-        self.queue_roots();
+        self.queue_roots(now_ms);
     }
 
-    fn queue_roots(&mut self) {
+    fn queue_roots(&mut self, now_ms: u64) {
         self.discover.clear();
         self.discover.push_back(self.claude_dir.join("projects"));
-        let now_ms = unix_now_ms();
         let window = day_window(now_ms);
         let (year, month, _) = window.local_date(now_ms);
         self.discover
@@ -888,10 +906,10 @@ impl UsageCollector {
             now_ms,
             HOT_AGE_MS,
         );
-        self.reconcile_known_paths(window);
+        self.reconcile_known_paths(window, now_ms);
     }
 
-    fn discover_dir(&mut self, dir: &Path, _window: DayWindow, _now_ms: u64) {
+    fn discover_dir(&mut self, dir: &Path, _window: DayWindow, now_ms: u64) {
         let mtime_ms = path_mtime_ms(dir).unwrap_or(0);
         if let Some(cached) = self.dirs.get(dir) {
             if cached.mtime_ms == mtime_ms {
@@ -925,30 +943,78 @@ impl UsageCollector {
             self.discover.push_back(child.clone());
         }
         for path in &files {
-            self.queue_registration(path.clone(), true);
+            self.queue_registration(path.clone(), true, now_ms);
         }
         self.dirs
             .insert(dir.to_path_buf(), DirListing { mtime_ms, dirs });
     }
 
-    fn reconcile_known_paths(&mut self, _window: DayWindow) {
+    fn reconcile_known_paths(&mut self, _window: DayWindow, now_ms: u64) {
         let keys: Vec<FileCheckpointKey> = self.file_checkpoint.keys().cloned().collect();
         for key in keys {
             let path = checkpoint_disk_path(&self.claude_dir, &self.codex_home, &key);
             if self.files.contains_key(&path) {
                 continue;
             }
-            self.queue_registration(path, false);
+            self.queue_registration(path, false, now_ms);
         }
     }
 
-    fn queue_registration(&mut self, path: PathBuf, recent: bool) {
-        if !self.files.contains_key(&path) && self.registration_paths.insert(path.clone()) {
-            self.registrations.push_back((path, recent));
+    fn queue_registration(&mut self, path: PathBuf, recent: bool, now_ms: u64) {
+        if self.files.contains_key(&path) || self.registration_paths.contains(&path) {
+            return;
         }
+        if !self.path_retry_due(&path, now_ms) {
+            return;
+        }
+        self.registration_paths.insert(path.clone());
+        self.registrations.push_back((path, recent));
     }
 
-    fn process_registrations(&mut self, window: DayWindow) {
+    /// Record one failed metadata/identity/read attempt.  The first failures
+    /// are retried on later ticks, but a path that cannot be read forever is
+    /// terminal for this catch-up.  A cooldown leaves a path recoverable if
+    /// permissions or an antivirus lock are later cleared.
+    fn record_path_failure(&mut self, path: &Path, now_ms: u64) -> bool {
+        let state = self
+            .path_retries
+            .entry(path.to_path_buf())
+            .or_insert(PathRetryState {
+                attempts: 0,
+                terminal: false,
+                retry_after_ms: now_ms,
+            });
+        if state.terminal {
+            state.retry_after_ms = now_ms.saturating_add(TERMINAL_PATH_RETRY_MS);
+            return true;
+        }
+        state.attempts = state.attempts.saturating_add(1);
+        state.terminal = state.attempts >= MAX_PATH_RETRIES;
+        state.retry_after_ms = if state.terminal {
+            now_ms.saturating_add(TERMINAL_PATH_RETRY_MS)
+        } else {
+            now_ms
+        };
+        state.terminal
+    }
+
+    fn clear_path_failure(&mut self, path: &Path) {
+        self.path_retries.remove(path);
+    }
+
+    fn path_retry_due(&self, path: &Path, now_ms: u64) -> bool {
+        self.path_retries
+            .get(path)
+            .is_none_or(|state| now_ms >= state.retry_after_ms)
+    }
+
+    fn path_retry_terminal(&self, path: &Path) -> bool {
+        self.path_retries
+            .get(path)
+            .is_some_and(|state| state.terminal)
+    }
+
+    fn process_registrations(&mut self, window: DayWindow, now_ms: u64) {
         // Leave room for reads even while a large registration backlog drains.
         let budget = if self.pending.is_empty() {
             self.file_work_remaining
@@ -960,7 +1026,7 @@ impl UsageCollector {
             let (path, recent) = self.registrations.pop_front().unwrap();
             self.registration_paths.remove(&path);
             self.file_work_remaining -= 1;
-            self.register_jsonl_file(&path, window, recent);
+            self.register_jsonl_file(&path, window, recent, now_ms);
         }
     }
 
@@ -983,12 +1049,30 @@ impl UsageCollector {
             regular_file_id(owned.0)
         });
         #[cfg(test)]
-        let file_id = if self.fail_file_id { None } else { file_id };
+        let file_id = if self.fail_file_id
+            || self
+                .fail_file_id_path
+                .as_ref()
+                .is_some_and(|failed| failed == path)
+        {
+            None
+        } else {
+            file_id
+        };
         (prefix, file_id)
     }
 
-    fn register_jsonl_file(&mut self, path: &Path, window: DayWindow, require_recent_mtime: bool) {
+    fn register_jsonl_file(
+        &mut self,
+        path: &Path,
+        window: DayWindow,
+        require_recent_mtime: bool,
+        now_ms: u64,
+    ) {
         let Some((size, mtime_ms)) = path_size_mtime(path) else {
+            if !self.record_path_failure(path, now_ms) {
+                self.queue_registration(path.to_path_buf(), require_recent_mtime, now_ms);
+            }
             return;
         };
         self.files_stated = self.files_stated.saturating_add(1);
@@ -1007,9 +1091,12 @@ impl UsageCollector {
         }
         let (prefix, file_id) = self.probe_identity(path);
         if file_id.is_none() || prefix.is_none() {
-            self.queue_registration(path.to_path_buf(), require_recent_mtime);
+            if !self.record_path_failure(path, now_ms) {
+                self.queue_registration(path.to_path_buf(), require_recent_mtime, now_ms);
+            }
             return;
         }
+        self.clear_path_failure(path);
         let mut registered_rebuild = None;
         if let std::collections::hash_map::Entry::Vacant(entry) =
             self.files.entry(path.to_path_buf())
@@ -1072,7 +1159,11 @@ impl UsageCollector {
     }
 
     fn scan_file(&mut self, path: &Path, window: DayWindow, now_ms: u64) -> u64 {
+        if !self.path_retry_due(path, now_ms) {
+            return 0;
+        }
         let Some((size, mtime_ms)) = path_size_mtime(path) else {
+            let _ = self.record_path_failure(path, now_ms);
             return 0;
         };
         self.files_stated = self.files_stated.saturating_add(1);
@@ -1086,6 +1177,7 @@ impl UsageCollector {
         // Missing identity is not evidence of replacement. Retry without
         // advancing the cursor or erasing the previous durable identity.
         if file_id.is_none() || prefix.is_none() {
+            let _ = self.record_path_failure(path, now_ms);
             return 0;
         }
         let (kind, offset, previous_model, rebuild, size_matches_offset) = {
@@ -1144,6 +1236,15 @@ impl UsageCollector {
             max_bytes,
             &mut self.read_buf,
         );
+        if !chunk.opened {
+            // Metadata and identity can succeed while the subsequent read is
+            // denied (or loses a transient antivirus/share race). Keep the
+            // committed cursor untouched and give this path the same bounded
+            // retry/terminal treatment as a failed identity probe.
+            let _ = self.record_path_failure(path, now_ms);
+            return 0;
+        }
+        self.clear_path_failure(path);
         self.files_opened += u64::from(chunk.opened);
         self.usage_parse_bytes = self.usage_parse_bytes.saturating_add(chunk.read_bytes);
         let Some(cursor) = self.files.get_mut(path) else {
@@ -1256,62 +1357,73 @@ impl UsageCollector {
                 opens += 1;
                 bytes += consumed;
             }
-            if path_size_mtime(&path).is_some()
-                && self.files.get(&path).is_some_and(|cursor| {
+            let retry_pending = self.path_retries.contains_key(&path);
+            if (retry_pending
+                || self.files.get(&path).is_some_and(|cursor| {
                     cursor.size != cursor.offset && !cursor.waiting_incomplete
-                })
+                }))
+                && !self.path_retry_terminal(&path)
             {
                 self.pending.push_back(path);
             }
         }
 
-        if !self.catch_up {
-            let mut skipped = 0_usize;
-            let mut stated = 0_usize;
-            let mut restat = Vec::new();
-            for (path, cursor) in &self.files {
-                if cursor.size != cursor.offset && !cursor.waiting_incomplete {
-                    continue;
-                }
-                let cooldown = if is_hot(cursor, now_ms) {
-                    STAT_COOLDOWN_MS
-                } else {
-                    COLD_RESTAT_MS
-                };
-                if now_ms.saturating_sub(cursor.last_stat_ms) < cooldown {
-                    continue;
-                }
-                if skipped < self.restat_skip {
-                    skipped += 1;
-                    continue;
-                }
-                if stated >= MAX_STAT_PER_TICK || opens >= file_budget {
-                    break;
-                }
-                restat.push(path.clone());
-                stated += 1;
+        // Restat known files during catch-up as well.  A current-day append
+        // can arrive after its initial scan, and it must not wait behind a
+        // permanently unreadable registration.  The shared work budget and
+        // cooldown keep this bounded while the rotation avoids starvation.
+        let mut skipped = 0_usize;
+        let mut stated = 0_usize;
+        let mut restat = Vec::new();
+        for (path, cursor) in &self.files {
+            let unread = cursor.size != cursor.offset && !cursor.waiting_incomplete;
+            if unread && !self.path_retry_terminal(path) {
+                continue;
             }
-            self.restat_skip = if stated < MAX_STAT_PER_TICK {
-                0
+            if !self.path_retry_due(path, now_ms) {
+                continue;
+            }
+            let cooldown = if is_hot(cursor, now_ms) {
+                STAT_COOLDOWN_MS
             } else {
-                self.restat_skip.saturating_add(stated)
+                COLD_RESTAT_MS
             };
+            if now_ms.saturating_sub(cursor.last_stat_ms) < cooldown {
+                continue;
+            }
+            if skipped < self.restat_skip {
+                skipped += 1;
+                continue;
+            }
+            if stated >= MAX_STAT_PER_TICK || opens >= file_budget {
+                break;
+            }
+            restat.push(path.clone());
+            stated += 1;
+        }
+        self.restat_skip = if stated < MAX_STAT_PER_TICK {
+            0
+        } else {
+            self.restat_skip.saturating_add(stated)
+        };
 
-            for path in restat {
-                if opens >= file_budget || bytes >= byte_budget || self.file_work_remaining == 0 {
-                    break;
-                }
-                self.file_work_remaining -= 1;
-                let consumed = self.scan_file(&path, window, now_ms);
-                if consumed > 0 {
-                    opens += 1;
-                    bytes += consumed;
-                    if self.files.get(&path).is_some_and(|cursor| {
-                        cursor.size != cursor.offset && !cursor.waiting_incomplete
-                    }) {
-                        self.pending.push_back(path);
-                    }
-                }
+        for path in restat {
+            if opens >= file_budget || bytes >= byte_budget || self.file_work_remaining == 0 {
+                break;
+            }
+            self.file_work_remaining -= 1;
+            let consumed = self.scan_file(&path, window, now_ms);
+            if consumed > 0 {
+                opens += 1;
+                bytes += consumed;
+            }
+            if self
+                .files
+                .get(&path)
+                .is_some_and(|cursor| cursor.size != cursor.offset && !cursor.waiting_incomplete)
+                && !self.path_retry_terminal(&path)
+            {
+                self.pending.push_back(path);
             }
         }
 
@@ -1319,6 +1431,7 @@ impl UsageCollector {
             self.files
                 .get(path)
                 .is_some_and(|cursor| cursor.size != cursor.offset && !cursor.waiting_incomplete)
+                && !self.path_retry_terminal(path)
         });
         (opens, unread_remaining)
     }
@@ -3041,6 +3154,10 @@ mod tests {
             }
         }
 
+        fn test_fail_file_id_for(&mut self, path: &Path) {
+            self.fail_file_id_path = Some(path.to_path_buf());
+        }
+
         fn test_complete_fetch(
             &mut self,
             kind: crate::core::ProviderFetchKind,
@@ -3384,7 +3501,7 @@ mod tests {
             today: 20261101,
             month_start: 20261101,
         };
-        collector.register_jsonl_file(&session, window, false);
+        collector.register_jsonl_file(&session, window, false, unix_now_ms());
         collector.scan_file(&session, window, unix_now_ms());
         assert_eq!(collector.snapshot.claude.month_input_tokens, 1_000_000);
         assert!(collector.snapshot.claude.today_cents > 0);
@@ -3438,7 +3555,7 @@ mod tests {
             }
             fs::write(&session, payload).unwrap();
             let mut collector = new_claude_collector(&root);
-            collector.register_jsonl_file(&session, window, false);
+            collector.register_jsonl_file(&session, window, false, unix_now_ms());
             collector.scan_file(&session, window, unix_now_ms());
             assert_eq!(collector.snapshot.claude.month_input_tokens, 2_000_000);
             assert!(collector.snapshot.claude.today_cents > 0);
@@ -4509,22 +4626,145 @@ mod tests {
         let offset = collector.test_file_offset(&session).unwrap();
         assert!(offset > 0 && offset < body.len() as u64);
         fs::remove_file(&session).unwrap();
-        let _ = collector.tick(ptr::null_mut());
+        let start = unix_now_ms();
+        for tick in 1..=super::MAX_PATH_RETRIES {
+            collector.tick_at(
+                ptr::null_mut(),
+                start.saturating_add(u64::from(tick) * super::REDISCOVER_MS),
+            );
+        }
         assert!(!collector.snapshot().month_scan_in_progress);
         assert!(collector.pending.is_empty());
+        assert!(collector
+            .path_retries
+            .get(&session)
+            .is_some_and(|state| state.terminal));
         assert_eq!(collector.test_file_offset(&session), Some(offset));
         assert_eq!(collector.snapshot().claude.month_input_tokens, collected);
         // Reappearance must resume without counting the already collected IDs.
         fs::write(&session, body).unwrap();
-        for _ in 0..32 {
-            collector.scan_file(
-                &session,
-                super::day_window(unix_now_ms()),
-                unix_now_ms() + super::COLD_RESTAT_MS,
+        for tick in 1_u64..=32 {
+            collector.tick_at(
+                ptr::null_mut(),
+                start
+                    .saturating_add(super::TERMINAL_PATH_RETRY_MS)
+                    .saturating_add(super::COLD_RESTAT_MS)
+                    .saturating_add(tick * super::REDISCOVER_MS),
             );
         }
         assert_eq!(collector.snapshot().claude.month_input_tokens, 8_000_000);
+        assert_eq!(collector.snapshot().claude.today_cost_nanos, 40_000_000_000);
+        assert!(!collector.path_retries.contains_key(&session));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn component_permanent_registration_failure_reaches_terminal_and_keeps_healthy_append_live() {
+        use std::io::Write;
+        let root = std::env::temp_dir().join(format!(
+            "rundog-terminal-registration-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let healthy = claude_session(&root);
+        fs::write(
+            &healthy,
+            format!("{}\n", claude_usage_line("healthy-first", &current_stamp())),
+        )
+        .unwrap();
+        let unreadable_dir = root.join("claude").join("projects").join("unreadable");
+        fs::create_dir_all(&unreadable_dir).unwrap();
+        let unreadable = unreadable_dir.join("session.jsonl");
+        fs::write(
+            &unreadable,
+            format!("{}\n", claude_usage_line("never-probed", &current_stamp())),
+        )
+        .unwrap();
+
+        let mut collector = new_claude_collector(&root);
+        collector.test_fail_file_id_for(&unreadable);
+        let start = unix_now_ms();
+        collector.tick_at(ptr::null_mut(), start);
+        assert_eq!(collector.snapshot().claude.month_input_tokens, 1_000_000);
+
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&healthy)
+            .unwrap()
+            .write_all(
+                format!(
+                    "{}\n",
+                    claude_usage_line("healthy-append", &current_stamp())
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        for tick in 1..=super::MAX_PATH_RETRIES {
+            collector.tick_at(
+                ptr::null_mut(),
+                start.saturating_add(u64::from(tick) * super::REDISCOVER_MS),
+            );
+        }
+
+        assert!(!collector.snapshot().month_scan_in_progress);
+        assert!(collector.registrations.is_empty());
+        assert!(collector
+            .path_retries
+            .get(&unreadable)
+            .is_some_and(|state| state.terminal));
+        assert_eq!(collector.snapshot().claude.month_input_tokens, 2_000_000);
+        assert_eq!(collector.snapshot().claude.today_cost_nanos, 10_000_000_000);
+        assert_eq!(collector.snapshot().claude.month_cost_nanos, 10_000_000_000);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn component_new_session_during_terminal_catch_up_is_discovered_once_after_roll_forward() {
+        let root = std::env::temp_dir().join(format!(
+            "rundog-hot-session-during-catch-up-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let unreadable_dir = root.join("claude").join("projects").join("unreadable");
+        fs::create_dir_all(&unreadable_dir).unwrap();
+        let unreadable = unreadable_dir.join("session.jsonl");
+        fs::write(
+            &unreadable,
+            format!("{}\n", claude_usage_line("never-probed", &current_stamp())),
+        )
+        .unwrap();
+        let mut collector = new_claude_collector(&root);
+        collector.test_fail_file_id_for(&unreadable);
+        let start = unix_now_ms();
+        collector.tick_at(ptr::null_mut(), start);
+
+        let hot_dir = root.join("claude").join("projects").join("hot");
+        fs::create_dir_all(&hot_dir).unwrap();
+        let hot = hot_dir.join("session.jsonl");
+        fs::write(
+            &hot,
+            format!("{}\n", claude_usage_line("hot-session", &current_stamp())),
+        )
+        .unwrap();
+
+        for tick in 1..=(super::MAX_PATH_RETRIES + 1) {
+            collector.tick_at(
+                ptr::null_mut(),
+                start.saturating_add(u64::from(tick) * super::REDISCOVER_MS),
+            );
+        }
+        assert!(!collector.snapshot().month_scan_in_progress);
+        assert_eq!(collector.snapshot().claude.month_input_tokens, 1_000_000);
+        assert_eq!(collector.snapshot().claude.today_cost_nanos, 5_000_000_000);
+
+        // A second rediscovery must not replay the committed hot session.
+        collector.tick_at(
+            ptr::null_mut(),
+            start.saturating_add(u64::from(super::MAX_PATH_RETRIES + 2) * super::REDISCOVER_MS),
+        );
+        assert_eq!(collector.snapshot().claude.month_input_tokens, 1_000_000);
+        assert_eq!(collector.snapshot().claude.today_cost_nanos, 5_000_000_000);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -5546,6 +5786,100 @@ mod tests {
             let _ = fs::remove_dir_all(&root);
             proptest::prop_assert_eq!(chunk.new_offset, 0);
             proptest::prop_assert!(chunk.events.is_empty());
+        }
+
+        #[test]
+        fn pbt_production_collector_counts_appends_once_across_ticks_and_restarts(
+            actions in proptest::collection::vec(0_u8..5, 1..40),
+        ) {
+            use std::io::Write;
+
+            let case_id = actions.iter().fold(0_u64, |hash, action| {
+                hash.wrapping_mul(31).wrapping_add(u64::from(*action) + 1)
+            });
+            let root = std::env::temp_dir().join(format!(
+                "run-dog-production-stateful-pbt-{}-{}-{case_id}",
+                std::process::id(),
+                unix_now_ms()
+            ));
+            let store_root = root.join("store");
+            let session = claude_session(&root);
+            fs::write(&session, "").expect("empty session");
+            let stamp = current_stamp();
+            let mut collector = new_persisted_collector(&root, store_root.clone());
+            let mut unique_events = 0_u64;
+            let mut last_line = None;
+            let mut logical_now = unix_now_ms();
+
+            for action in actions {
+                match action {
+                    0 => {
+                        let line = format!(
+                            "{}\n",
+                            claude_usage_line(&format!("pbt-event-{unique_events}"), &stamp)
+                        );
+                        fs::OpenOptions::new()
+                            .append(true)
+                            .open(&session)
+                            .expect("append unique event")
+                            .write_all(line.as_bytes())
+                            .expect("write unique event");
+                        unique_events += 1;
+                        last_line = Some(line);
+                    }
+                    1 => {
+                        if let Some(line) = &last_line {
+                            fs::OpenOptions::new()
+                                .append(true)
+                                .open(&session)
+                                .expect("append replay")
+                                .write_all(line.as_bytes())
+                                .expect("write replay");
+                        }
+                    }
+                    2 => {
+                        collector.test_force_restat();
+                        logical_now =
+                            logical_now.saturating_add(super::STAT_COOLDOWN_MS + 1);
+                        let _ = collector.tick_at(ptr::null_mut(), logical_now);
+                    }
+                    3 => {
+                        for _ in 0..16 {
+                            collector.test_force_restat();
+                            logical_now =
+                                logical_now.saturating_add(super::STAT_COOLDOWN_MS + 1);
+                            if collector.tick_at(ptr::null_mut(), logical_now) == UsageTick::Idle
+                                && !collector.catch_up
+                            {
+                                break;
+                            }
+                        }
+                    }
+                    _ => {
+                        collector.flush_checkpoint();
+                        drop(collector);
+                        collector = new_persisted_collector(&root, store_root.clone());
+                    }
+                }
+            }
+
+            for _ in 0..64 {
+                collector.test_force_restat();
+                logical_now = logical_now.saturating_add(super::STAT_COOLDOWN_MS + 1);
+                if collector.tick_at(ptr::null_mut(), logical_now) == UsageTick::Idle
+                    && !collector.catch_up
+                {
+                    break;
+                }
+            }
+            let expected = unique_events.saturating_mul(1_000_000);
+            let usage = collector.snapshot().claude;
+            let _ = fs::remove_dir_all(&root);
+            proptest::prop_assert_eq!(usage.month_input_tokens, expected);
+            proptest::prop_assert_eq!(
+                usage.today_cost_nanos,
+                unique_events.saturating_mul(5_000_000_000)
+            );
         }
     }
 
