@@ -199,7 +199,6 @@ pub struct UsageCollector {
     file_checkpoint: HashMap<FileCheckpointKey, UsageCursor>,
     last_discover_ms: u64,
     last_codex_limits_ms: u64,
-    restat_skip: usize,
     catch_up: bool,
     deferred: VecDeque<PathBuf>,
     read_buf: Vec<u8>,
@@ -316,7 +315,6 @@ impl UsageCollector {
             file_checkpoint: HashMap::new(),
             last_discover_ms: 0,
             last_codex_limits_ms: 0,
-            restat_skip: 0,
             catch_up: true,
             deferred: VecDeque::new(),
             read_buf: Vec::new(),
@@ -909,14 +907,21 @@ impl UsageCollector {
         self.reconcile_known_paths(window, now_ms);
     }
 
-    fn discover_dir(&mut self, dir: &Path, _window: DayWindow, now_ms: u64) {
+    fn discover_dir(&mut self, dir: &Path, window: DayWindow, now_ms: u64) {
         let mtime_ms = path_mtime_ms(dir).unwrap_or(0);
-        if let Some(cached) = self.dirs.get(dir) {
-            if cached.mtime_ms == mtime_ms {
-                for child in &cached.dirs {
-                    self.discover.push_back(child.clone());
+        let current_codex_month = codex_month_dir(
+            &self.codex_home,
+            (window.month_start / 10_000) as i32,
+            ((window.month_start / 100) % 100) as u8,
+        );
+        if dir != current_codex_month {
+            if let Some(cached) = self.dirs.get(dir) {
+                if cached.mtime_ms == mtime_ms {
+                    for child in &cached.dirs {
+                        self.discover.push_back(child.clone());
+                    }
+                    return;
                 }
-                return;
             }
         }
         let Ok(entries) = fs::read_dir(dir) else {
@@ -943,7 +948,16 @@ impl UsageCollector {
             self.discover.push_back(child.clone());
         }
         for path in &files {
-            self.queue_registration(path.clone(), true, now_ms);
+            if self.files.contains_key(path) {
+                // A changed directory is a precise hint that one of its files
+                // may have been appended. Queue known files directly so a hot
+                // session cannot wait behind the global cold-file rotation.
+                if !self.pending.contains(path) && self.path_retry_due(path, now_ms) {
+                    self.pending.push_back(path.clone());
+                }
+            } else {
+                self.queue_registration(path.clone(), true, now_ms);
+            }
         }
         self.dirs
             .insert(dir.to_path_buf(), DirListing { mtime_ms, dirs });
@@ -1372,9 +1386,7 @@ impl UsageCollector {
         // can arrive after its initial scan, and it must not wait behind a
         // permanently unreadable registration.  The shared work budget and
         // cooldown keep this bounded while the rotation avoids starvation.
-        let mut skipped = 0_usize;
-        let mut stated = 0_usize;
-        let mut restat = Vec::new();
+        let mut candidates = Vec::new();
         for (path, cursor) in &self.files {
             let unread = cursor.size != cursor.offset && !cursor.waiting_incomplete;
             if unread && !self.path_retry_terminal(path) {
@@ -1391,21 +1403,25 @@ impl UsageCollector {
             if now_ms.saturating_sub(cursor.last_stat_ms) < cooldown {
                 continue;
             }
-            if skipped < self.restat_skip {
-                skipped += 1;
-                continue;
-            }
-            if stated >= MAX_STAT_PER_TICK || opens >= file_budget {
-                break;
-            }
-            restat.push(path.clone());
-            stated += 1;
+            candidates.push((path, cursor));
         }
-        self.restat_skip = if stated < MAX_STAT_PER_TICK {
-            0
-        } else {
-            self.restat_skip.saturating_add(stated)
-        };
+        // Prioritize sessions that were most recently active. The old
+        // HashMap-order rotation could leave a growing file behind thousands
+        // of cold cursors for hours after midnight.
+        if candidates.len() > MAX_STAT_PER_TICK {
+            candidates.select_nth_unstable_by(MAX_STAT_PER_TICK, |(_, left), (_, right)| {
+                is_hot(right, now_ms)
+                    .cmp(&is_hot(left, now_ms))
+                    .then_with(|| right.mtime_ms.cmp(&left.mtime_ms))
+                    .then_with(|| left.last_stat_ms.cmp(&right.last_stat_ms))
+            });
+            candidates.truncate(MAX_STAT_PER_TICK);
+        }
+        let restat: Vec<PathBuf> = candidates
+            .into_iter()
+            .take(MAX_STAT_PER_TICK)
+            .map(|(path, _)| path.clone())
+            .collect();
 
         for path in restat {
             if opens >= file_budget || bytes >= byte_budget || self.file_work_remaining == 0 {
@@ -3235,10 +3251,28 @@ mod tests {
     }
 
     fn current_stamp() -> String {
-        let now = unix_now_ms();
-        let (year, month, day) = local_ymd(now, 0);
-        let (hour, minute) = local_hms(now, 0);
+        stamp_at(unix_now_ms())
+    }
+
+    fn stamp_at(unix_ms: u64) -> String {
+        let (year, month, day) = local_ymd(unix_ms, 0);
+        let (hour, minute) = local_hms(unix_ms, 0);
         format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:00Z")
+    }
+
+    fn stable_test_now() -> u64 {
+        const DAY_MS: u64 = 24 * 60 * 60 * 1_000;
+        const NOON_MS: u64 = 12 * 60 * 60 * 1_000;
+        let actual = unix_now_ms();
+        let target_day = super::day_window(actual).today;
+        let mut candidate = actual - actual % DAY_MS + NOON_MS;
+        while super::day_window(candidate).today < target_day {
+            candidate = candidate.saturating_add(DAY_MS);
+        }
+        while super::day_window(candidate).today > target_day {
+            candidate = candidate.saturating_sub(DAY_MS);
+        }
+        candidate
     }
 
     fn claude_usage_line(id: &str, stamp: &str) -> String {
@@ -3584,6 +3618,104 @@ mod tests {
 
         assert_eq!(tick_idle(&mut collector), UsageTick::Idle);
         assert_eq!(collector.snapshot().claude.month_input_tokens, 1_000_000);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn component_current_codex_month_is_relisted_when_cached_mtime_is_unchanged() {
+        let root = std::env::temp_dir().join(format!(
+            "rundog-codex-day-rollover-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let now = unix_now_ms();
+        let (year, month, _) = local_ymd(now, 0);
+        let month_dir = root
+            .join("codex/sessions")
+            .join(year.to_string())
+            .join(format!("{month:02}"));
+        let first_day = month_dir.join("17");
+        fs::create_dir_all(&first_day).unwrap();
+        fs::write(
+            first_day.join("first.jsonl"),
+            format!(
+                "{TURN_CONTEXT}\n{}\n",
+                token_count_line(&current_stamp(), 1_000_000, 0, 0, 1_000_000, 0, 0)
+            ),
+        )
+        .unwrap();
+
+        let mut collector = new_claude_collector(&root);
+        assert_eq!(tick_idle(&mut collector), UsageTick::Idle);
+        assert_eq!(collector.snapshot().codex.month_input_tokens, 1_000_000);
+
+        let next_day = month_dir.join("18");
+        fs::create_dir_all(&next_day).unwrap();
+        fs::write(
+            next_day.join("next.jsonl"),
+            format!(
+                "{TURN_CONTEXT}\n{}\n",
+                token_count_line(&current_stamp(), 2_000_000, 0, 0, 2_000_000, 0, 0)
+            ),
+        )
+        .unwrap();
+        // Reproduce NTFS preserving the cached parent-directory timestamp.
+        collector.dirs.get_mut(&month_dir).unwrap().mtime_ms =
+            super::path_mtime_ms(&month_dir).unwrap();
+        collector.last_discover_ms = now.saturating_sub(super::REDISCOVER_MS + 1);
+
+        assert_eq!(tick_idle(&mut collector), UsageTick::Idle);
+        assert_eq!(collector.snapshot().codex.month_input_tokens, 3_000_000);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn component_restat_prioritizes_recent_session_over_cold_cursor_backlog() {
+        use std::io::Write;
+
+        let root = std::env::temp_dir().join(format!(
+            "rundog-hot-restat-priority-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let mut sessions = Vec::new();
+        for index in 0..(super::MAX_STAT_PER_TICK * 3) {
+            let dir = root.join("claude/projects").join(format!("p{index:02}"));
+            fs::create_dir_all(&dir).unwrap();
+            let session = dir.join("session.jsonl");
+            fs::write(
+                &session,
+                format!(
+                    "{}\n",
+                    claude_usage_line(&format!("initial-{index}"), &current_stamp())
+                ),
+            )
+            .unwrap();
+            sessions.push(session);
+        }
+        let mut collector = new_claude_collector(&root);
+        assert_eq!(tick_idle(&mut collector), UsageTick::Idle);
+
+        let active = sessions.last().unwrap();
+        fs::OpenOptions::new()
+            .append(true)
+            .open(active)
+            .unwrap()
+            .write_all(
+                format!("{}\n", claude_usage_line("active-append", &current_stamp())).as_bytes(),
+            )
+            .unwrap();
+        for cursor in collector.files.values_mut() {
+            cursor.mtime_ms = 1;
+            cursor.last_stat_ms = 0;
+        }
+        collector.files.get_mut(active).unwrap().mtime_ms = unix_now_ms();
+        collector.tick_at(ptr::null_mut(), unix_now_ms());
+
+        assert_eq!(
+            collector.snapshot().claude.month_input_tokens,
+            (sessions.len() as u64 + 1) * 1_000_000
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -4610,7 +4742,8 @@ mod tests {
             unix_now_ms()
         ));
         let session = claude_session(&root);
-        let stamp = current_stamp();
+        let start = stable_test_now();
+        let stamp = stamp_at(start);
         let body: String = (0..8)
             .map(|n| {
                 format!(
@@ -4621,12 +4754,14 @@ mod tests {
             .collect();
         fs::write(&session, &body).unwrap();
         let mut collector = new_claude_collector(&root);
-        assert_eq!(collector.tick(ptr::null_mut()), UsageTick::MoreWork);
+        assert_eq!(
+            collector.tick_at(ptr::null_mut(), start),
+            UsageTick::MoreWork
+        );
         let collected = collector.snapshot().claude.month_input_tokens;
         let offset = collector.test_file_offset(&session).unwrap();
         assert!(offset > 0 && offset < body.len() as u64);
         fs::remove_file(&session).unwrap();
-        let start = unix_now_ms();
         for tick in 1..=super::MAX_PATH_RETRIES {
             collector.tick_at(
                 ptr::null_mut(),
@@ -4725,17 +4860,18 @@ mod tests {
             std::process::id(),
             unix_now_ms()
         ));
+        let start = stable_test_now();
+        let stamp = stamp_at(start);
         let unreadable_dir = root.join("claude").join("projects").join("unreadable");
         fs::create_dir_all(&unreadable_dir).unwrap();
         let unreadable = unreadable_dir.join("session.jsonl");
         fs::write(
             &unreadable,
-            format!("{}\n", claude_usage_line("never-probed", &current_stamp())),
+            format!("{}\n", claude_usage_line("never-probed", &stamp)),
         )
         .unwrap();
         let mut collector = new_claude_collector(&root);
         collector.test_fail_file_id_for(&unreadable);
-        let start = unix_now_ms();
         collector.tick_at(ptr::null_mut(), start);
 
         let hot_dir = root.join("claude").join("projects").join("hot");
@@ -4743,7 +4879,7 @@ mod tests {
         let hot = hot_dir.join("session.jsonl");
         fs::write(
             &hot,
-            format!("{}\n", claude_usage_line("hot-session", &current_stamp())),
+            format!("{}\n", claude_usage_line("hot-session", &stamp)),
         )
         .unwrap();
 
