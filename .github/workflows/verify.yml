@@ -32,5 +32,12 @@ jobs:
       - name: test
         run: cargo test --all-targets
 
+      - name: dependency audit
+        run: |
+          cargo install cargo-audit --locked --version 0.22.2
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo audit
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: release build
         run: cargo build --release
