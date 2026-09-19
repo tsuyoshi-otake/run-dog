@@ -3,7 +3,19 @@
 //! The shell tooltip is text-only, so `NIN_POPUPOPEN` owns a `WS_EX_NOACTIVATE`
 //! popup instead. All GDI objects live only for one paint.
 
-use std::{mem::size_of, ptr, sync::Once};
+use std::{
+    fs,
+    mem::size_of,
+    os::windows::fs::MetadataExt,
+    path::{Path, PathBuf},
+    ptr,
+    sync::{
+        mpsc::{self, Receiver},
+        Once,
+    },
+    thread,
+    time::{Duration, Instant},
+};
 
 use windows_sys::{
     core::GUID,
@@ -27,12 +39,12 @@ use windows_sys::{
             Shell::{Shell_NotifyIconGetRect, NOTIFYICONIDENTIFIER},
             WindowsAndMessaging::{
                 CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetCursorPos,
-                GetSystemMetrics, GetWindowLongPtrW, IsWindow, IsWindowVisible, RegisterClassW,
-                SetWindowLongPtrW, SetWindowPos, ShowWindow, CS_DROPSHADOW, GWLP_USERDATA,
-                HWND_TOPMOST, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
-                SM_YVIRTUALSCREEN, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE, SW_SHOWNOACTIVATE,
-                WM_DESTROY, WM_MOUSEACTIVATE, WM_PAINT, WNDCLASSW, WS_EX_NOACTIVATE,
-                WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+                GetSystemMetrics, GetWindowLongPtrW, IsWindow, IsWindowVisible, KillTimer,
+                RegisterClassW, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+                CS_DROPSHADOW, GWLP_USERDATA, HWND_TOPMOST, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+                SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE,
+                SW_SHOWNOACTIVATE, WM_DESTROY, WM_MOUSEACTIVATE, WM_PAINT, WM_TIMER, WNDCLASSW,
+                WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
             },
         },
     },
@@ -54,7 +66,9 @@ const MA_NOACTIVATE: LRESULT = 3;
 const CARD_WIDTH: i32 = 320;
 const CARD_HEIGHT: i32 = 273;
 const CARD_GPU_BLOCK_HEIGHT: i32 = 86;
-const CARD_USAGE_BLOCK_HEIGHT: i32 = 110;
+const CARD_USAGE_BLOCK_HEIGHT: i32 = 125;
+const DISK_TIMER_ID: usize = 1;
+const DISK_REFRESH: Duration = Duration::from_secs(600);
 
 static REGISTER_CLASS: Once = Once::new();
 
@@ -63,6 +77,9 @@ pub struct HoverFlyout {
     owner: HWND,
     state: Option<TrayIcon>,
     pinned: bool,
+    disk_bytes: [Option<u64>; 2],
+    disk_scan: Option<Receiver<[Option<u64>; 2]>>,
+    disk_scanned_at: Option<Instant>,
 }
 
 impl HoverFlyout {
@@ -73,6 +90,9 @@ impl HoverFlyout {
             owner: ptr::null_mut(),
             state: None,
             pinned: false,
+            disk_bytes: [None, None],
+            disk_scan: None,
+            disk_scanned_at: None,
         }
     }
 
@@ -104,8 +124,58 @@ impl HoverFlyout {
                 return;
             }
         }
+        self.start_disk_scan();
         self.place_near_icon();
         let _ = unsafe { ShowWindow(self.hwnd, SW_SHOWNOACTIVATE) };
+        let _ = unsafe { InvalidateRect(self.hwnd, ptr::null(), 1) };
+    }
+
+    fn start_disk_scan(&mut self) {
+        if self.disk_scan.is_some()
+            || self
+                .disk_scanned_at
+                .is_some_and(|at| at.elapsed() < DISK_REFRESH)
+        {
+            return;
+        }
+        let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))
+        else {
+            return;
+        };
+        let home = PathBuf::from(home);
+        let claude = std::env::var_os("CLAUDE_CONFIG_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".claude"));
+        let codex = std::env::var_os("CODEX_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".codex"));
+        let (sender, receiver) = mpsc::channel();
+        if thread::Builder::new()
+            .name("provider-disk-usage".into())
+            .spawn(move || {
+                let _ = sender.send([directory_bytes(&claude), directory_bytes(&codex)]);
+            })
+            .is_ok()
+        {
+            self.disk_scan = Some(receiver);
+            let _ = unsafe { SetTimer(self.hwnd, DISK_TIMER_ID, 1_000, None) };
+        }
+    }
+
+    fn poll_disk_scan(&mut self) {
+        let Some(receiver) = self.disk_scan.as_ref() else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok(bytes) => {
+                self.disk_bytes = bytes;
+                self.disk_scanned_at = Some(Instant::now());
+            }
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => {}
+        }
+        self.disk_scan = None;
+        let _ = unsafe { KillTimer(self.hwnd, DISK_TIMER_ID) };
         let _ = unsafe { InvalidateRect(self.hwnd, ptr::null(), 1) };
     }
 
@@ -146,6 +216,9 @@ impl HoverFlyout {
     }
 
     pub fn destroy(&mut self) {
+        if !self.hwnd.is_null() {
+            let _ = unsafe { KillTimer(self.hwnd, DISK_TIMER_ID) };
+        }
         if !self.hwnd.is_null() && unsafe { IsWindow(self.hwnd) } != 0 {
             let _ = unsafe { SetWindowLongPtrW(self.hwnd, GWLP_USERDATA, 0) };
             let _ = unsafe { DestroyWindow(self.hwnd) };
@@ -154,6 +227,7 @@ impl HoverFlyout {
         self.owner = ptr::null_mut();
         self.state = None;
         self.pinned = false;
+        self.disk_scan = None;
     }
 
     #[must_use]
@@ -477,6 +551,13 @@ unsafe extern "system" fn flyout_proc(
         paint(hwnd);
         return 0;
     }
+    if message == WM_TIMER && wparam == DISK_TIMER_ID {
+        let pointer = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut HoverFlyout };
+        if let Some(flyout) = unsafe { pointer.as_mut() } {
+            flyout.poll_disk_scan();
+        }
+        return 0;
+    }
     unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
 }
 
@@ -618,6 +699,11 @@ fn paint(hwnd: HWND) {
             row.title,
             row.usage,
             row.mark,
+            flyout.disk_bytes[match row.mark {
+                UsageMark::Claude => 0,
+                UsageMark::Codex => 1,
+            }],
+            flyout.disk_scan.is_some(),
             state.usage.month_scan_in_progress,
             &palette,
             &layout,
@@ -996,6 +1082,8 @@ fn paint_usage_row(
     title: &str,
     usage: ProviderUsage,
     mark: UsageMark,
+    disk_bytes: Option<u64>,
+    disk_scanning: bool,
     month_scan_in_progress: bool,
     palette: &Palette,
     layout: &Layout,
@@ -1111,6 +1199,52 @@ fn paint_usage_row(
         &format_month_usage(usage, month_scan_in_progress),
         0,
     );
+    draw_text(
+        hdc,
+        RECT {
+            left: content_left,
+            top: metric_top + layout.detail_h,
+            right: row.right,
+            bottom: metric_top + layout.detail_h * 2,
+        },
+        &format_provider_disk(disk_bytes, disk_scanning),
+        0,
+    );
+}
+
+fn format_provider_disk(bytes: Option<u64>, scanning: bool) -> String {
+    match bytes {
+        Some(bytes) => format!("Local files: {}", format_bytes(bytes, 1)),
+        None if scanning => "Local files: Scanning...".to_owned(),
+        None => "Local files: --".to_owned(),
+    }
+}
+
+// Metadata only; directory links and junctions are excluded to avoid cycles and
+// counting files outside the selected provider root.
+fn directory_bytes(root: &Path) -> Option<u64> {
+    let metadata = fs::symlink_metadata(root).ok()?;
+    if !metadata.is_dir() || metadata.file_attributes() & 0x400 != 0 {
+        return None;
+    }
+    let mut total = 0_u64;
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        let entries = fs::read_dir(dir).ok()?;
+        for entry in entries {
+            let entry = entry.ok()?;
+            let metadata = fs::symlink_metadata(entry.path()).ok()?;
+            if metadata.file_attributes() & 0x400 != 0 {
+                continue;
+            }
+            if metadata.is_dir() {
+                pending.push(entry.path());
+            } else if metadata.is_file() {
+                total = total.saturating_add(metadata.len());
+            }
+        }
+    }
+    Some(total)
 }
 
 fn format_today_usage(usage: ProviderUsage) -> String {
@@ -1178,7 +1312,7 @@ fn usage_block_height(layout: &Layout, usage: ProviderUsage) -> i32 {
     } else {
         0
     };
-    layout.title_h + metric * metrics + banked + layout.detail_h + px(2, layout.dpi)
+    layout.title_h + metric * metrics + banked + layout.detail_h * 2 + px(2, layout.dpi)
 }
 
 fn paint_limit_metric(
@@ -1753,15 +1887,33 @@ fn wide(value: &str) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::{
-        extra_usage_block_units, format_bytes, format_gpu_capacity, format_limit_metric_label,
-        format_month_usage, format_percent, format_reset_local, format_self_usage,
-        format_today_usage, gpu_details, position_flyout, visible_usage_count, window_size,
-        PixelRect, CARD_GPU_BLOCK_HEIGHT, CARD_HEIGHT, CARD_USAGE_BLOCK_HEIGHT, CARD_WIDTH,
+        directory_bytes, extra_usage_block_units, format_bytes, format_gpu_capacity,
+        format_limit_metric_label, format_month_usage, format_percent, format_provider_disk,
+        format_reset_local, format_self_usage, format_today_usage, gpu_details, position_flyout,
+        visible_usage_count, window_size, PixelRect, CARD_GPU_BLOCK_HEIGHT, CARD_HEIGHT,
+        CARD_USAGE_BLOCK_HEIGHT, CARD_WIDTH,
     };
     use crate::core::{
         format_banked_reset_label, format_fable_limit_label, CpuLoad, LimitWindow, ProcessStatus,
         ProviderUsage, UsageSnapshot,
     };
+
+    #[test]
+    fn provider_disk_counts_nested_files_and_reports_missing_root() {
+        let root = std::env::temp_dir().join(format!("run-dog-disk-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(root.join("nested")).unwrap();
+        std::fs::write(root.join("a"), [0_u8; 3]).unwrap();
+        std::fs::write(root.join("nested").join("b"), [0_u8; 5]).unwrap();
+        assert_eq!(directory_bytes(&root), Some(8));
+        assert_eq!(directory_bytes(&root.join("missing")), None);
+        std::fs::remove_dir_all(root).unwrap();
+        assert_eq!(
+            format_provider_disk(Some(1024), false),
+            "Local files: 1.0 KB"
+        );
+        assert_eq!(format_provider_disk(None, true), "Local files: Scanning...");
+    }
 
     #[test]
     fn component_flyout_formatters_cover_unknown_and_scaled_values() {

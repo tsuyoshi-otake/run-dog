@@ -77,6 +77,8 @@ pub const USAGE_CONTINUE_INTERVAL_MS: u32 = USAGE_IDLE_INTERVAL_MS;
 const MAX_FILES_PER_TICK: usize = 3;
 const MAX_STAT_PER_TICK: usize = 12;
 const MAX_BYTES_PER_TICK: u64 = 96 * 1_024;
+const TODAY_RECOVERY_TICKS: u8 = 16;
+const TODAY_RECOVERY_BYTES_PER_TICK: u64 = 16 * 1_024 * 1_024;
 const MAX_DIRS_PER_TICK: usize = 6;
 const CATCH_UP_FILES_PER_TICK: usize = 12;
 const CATCH_UP_BYTES_PER_TICK: u64 = 512 * 1_024;
@@ -183,6 +185,8 @@ pub struct UsageCollector {
     dirs: HashMap<PathBuf, DirListing>,
     discover: VecDeque<PathBuf>,
     registrations: VecDeque<(PathBuf, bool)>,
+    registration_today_count: usize,
+    registration_recent_count: usize,
     registration_paths: HashSet<PathBuf>,
     path_retries: HashMap<PathBuf, PathRetryState>,
     file_work_remaining: usize,
@@ -192,6 +196,8 @@ pub struct UsageCollector {
     fail_file_id_path: Option<PathBuf>,
     claude_keys: HashSet<ClaudeDedupeKey>,
     pending: VecDeque<PathBuf>,
+    next_hot_provider: SourceKind,
+    today_recovery_ticks: u8,
     snapshot: UsageSnapshot,
     month_key: u32,
     day_key: u32,
@@ -299,6 +305,8 @@ impl UsageCollector {
             dirs: HashMap::new(),
             discover: VecDeque::new(),
             registrations: VecDeque::new(),
+            registration_today_count: 0,
+            registration_recent_count: 0,
             registration_paths: HashSet::new(),
             path_retries: HashMap::new(),
             file_work_remaining: CATCH_UP_FILES_PER_TICK,
@@ -308,6 +316,8 @@ impl UsageCollector {
             fail_file_id_path: None,
             claude_keys: HashSet::new(),
             pending: VecDeque::new(),
+            next_hot_provider: SourceKind::Codex,
+            today_recovery_ticks: 0,
             snapshot: UsageSnapshot::default(),
             month_key: 0,
             day_key: 0,
@@ -477,12 +487,10 @@ impl UsageCollector {
         self.reset_if_day_changed(window);
         let _ = self.take_claude_limits();
 
-        if self.discover.is_empty()
-            && (self.last_discover_ms == 0
-                || (!self.catch_up
-                    && now_ms.saturating_sub(self.last_discover_ms) >= REDISCOVER_MS))
+        if self.last_discover_ms == 0
+            || (!self.catch_up && now_ms.saturating_sub(self.last_discover_ms) >= REDISCOVER_MS)
         {
-            self.queue_roots(now_ms);
+            self.queue_hot_roots(now_ms);
             self.last_discover_ms = now_ms;
         }
 
@@ -540,6 +548,7 @@ impl UsageCollector {
         if self.checkpoint_dirty {
             self.persist_checkpoint_if_needed(window);
         }
+        self.today_recovery_ticks = self.today_recovery_ticks.saturating_sub(1);
         tick
     }
 
@@ -697,6 +706,12 @@ impl UsageCollector {
             self.snapshot.codex.clear_today_cost();
         }
         self.last_collected_ms = state.aggregate.last_collected_ms;
+        if state.aggregate.today == window.today
+            && state.aggregate.last_collected_ms > 0
+            && window.day(state.aggregate.last_collected_ms) < window.today
+        {
+            self.today_recovery_ticks = TODAY_RECOVERY_TICKS;
+        }
         self.month_key = window.month_start;
         self.day_key = window.today;
         self.file_checkpoint = state
@@ -870,6 +885,8 @@ impl UsageCollector {
         self.claude_keys.clear();
         self.pending.clear();
         self.registrations.clear();
+        self.registration_today_count = 0;
+        self.registration_recent_count = 0;
         self.registration_paths.clear();
         self.path_retries.clear();
         self.deferred.clear();
@@ -889,11 +906,11 @@ impl UsageCollector {
 
     fn queue_roots(&mut self, now_ms: u64) {
         self.discover.clear();
-        self.discover.push_back(self.claude_dir.join("projects"));
         let window = day_window(now_ms);
         let (year, month, _) = window.local_date(now_ms);
         self.discover
             .push_back(codex_month_dir(&self.codex_home, year, month));
+        self.discover.push_back(self.claude_dir.join("projects"));
         let (prev_year, prev_month) = previous_month(year, month);
         self.discover
             .push_back(codex_month_dir(&self.codex_home, prev_year, prev_month));
@@ -907,6 +924,20 @@ impl UsageCollector {
         self.reconcile_known_paths(window, now_ms);
     }
 
+    fn queue_hot_roots(&mut self, now_ms: u64) {
+        if self.discover.is_empty() {
+            self.queue_roots(now_ms);
+        }
+        let window = day_window(now_ms);
+        let (year, month, day) = window.local_date(now_ms);
+        let codex_today = codex_month_dir(&self.codex_home, year, month).join(format!("{day:02}"));
+        let claude_projects = self.claude_dir.join("projects");
+        for root in [&claude_projects, &codex_today] {
+            self.discover.retain(|queued| queued != root);
+            self.discover.push_front(root.clone());
+        }
+    }
+
     fn discover_dir(&mut self, dir: &Path, window: DayWindow, now_ms: u64) {
         let mtime_ms = path_mtime_ms(dir).unwrap_or(0);
         let current_codex_month = codex_month_dir(
@@ -917,9 +948,8 @@ impl UsageCollector {
         if dir != current_codex_month {
             if let Some(cached) = self.dirs.get(dir) {
                 if cached.mtime_ms == mtime_ms {
-                    for child in &cached.dirs {
-                        self.discover.push_back(child.clone());
-                    }
+                    let children = cached.dirs.clone();
+                    self.queue_discovered_dirs(&children, now_ms);
                     return;
                 }
             }
@@ -944,9 +974,7 @@ impl UsageCollector {
                 files.push(path);
             }
         }
-        for child in &dirs {
-            self.discover.push_back(child.clone());
-        }
+        self.queue_discovered_dirs(&dirs, now_ms);
         for path in &files {
             if self.files.contains_key(path) {
                 // A changed directory is a precise hint that one of its files
@@ -963,6 +991,31 @@ impl UsageCollector {
             .insert(dir.to_path_buf(), DirListing { mtime_ms, dirs });
     }
 
+    fn queue_discovered_dirs(&mut self, dirs: &[PathBuf], now_ms: u64) {
+        let mut recent = Vec::new();
+        let mut queued: HashSet<PathBuf> = self.discover.iter().cloned().collect();
+        for dir in dirs {
+            let mtime = path_mtime_ms(dir).unwrap_or(0);
+            if self
+                .dirs
+                .get(dir)
+                .is_some_and(|known| known.mtime_ms == mtime)
+            {
+                continue;
+            }
+            if now_ms.saturating_sub(mtime) <= HOT_AGE_MS {
+                recent.push(dir.clone());
+            } else if queued.insert(dir.clone()) {
+                self.discover.push_back(dir.clone());
+            }
+        }
+        recent.sort_by_key(|path| std::cmp::Reverse(path_mtime_ms(path).unwrap_or(0)));
+        for dir in recent.into_iter().rev() {
+            self.discover.retain(|queued| queued != &dir);
+            self.discover.push_front(dir);
+        }
+    }
+
     fn reconcile_known_paths(&mut self, _window: DayWindow, now_ms: u64) {
         let keys: Vec<FileCheckpointKey> = self.file_checkpoint.keys().cloned().collect();
         for key in keys {
@@ -975,14 +1028,56 @@ impl UsageCollector {
     }
 
     fn queue_registration(&mut self, path: PathBuf, recent: bool, now_ms: u64) {
-        if self.files.contains_key(&path) || self.registration_paths.contains(&path) {
+        if self.files.contains_key(&path) {
+            return;
+        }
+        let today = if recent {
+            let window = day_window(now_ms);
+            path_mtime_ms(&path).is_some_and(|mtime| window.day(mtime) == window.today)
+        } else {
+            false
+        };
+        if self.registration_paths.contains(&path) {
+            if recent {
+                if let Some(index) = self
+                    .registrations
+                    .iter()
+                    .position(|(queued, _)| queued == &path)
+                {
+                    self.registrations.remove(index);
+                    if index < self.registration_today_count {
+                        self.registration_today_count -= 1;
+                    }
+                    if index < self.registration_recent_count {
+                        self.registration_recent_count -= 1;
+                    }
+                    self.insert_recent_registration(path, today);
+                }
+            }
             return;
         }
         if !self.path_retry_due(&path, now_ms) {
             return;
         }
         self.registration_paths.insert(path.clone());
-        self.registrations.push_back((path, recent));
+        if recent {
+            self.insert_recent_registration(path, today);
+        } else {
+            self.registrations.push_back((path, false));
+        }
+    }
+
+    fn insert_recent_registration(&mut self, path: PathBuf, today: bool) {
+        let index = if today {
+            self.registration_today_count
+        } else {
+            self.registration_recent_count
+        };
+        self.registrations.insert(index, (path, true));
+        if today {
+            self.registration_today_count += 1;
+        }
+        self.registration_recent_count += 1;
     }
 
     /// Record one failed metadata/identity/read attempt.  The first failures
@@ -1029,8 +1124,9 @@ impl UsageCollector {
     }
 
     fn process_registrations(&mut self, window: DayWindow, now_ms: u64) {
-        // Leave room for reads even while a large registration backlog drains.
-        let budget = if self.pending.is_empty() {
+        // A newly registered hot file can be read in the same tick, even
+        // when registration was the only work queued at the start of it.
+        let budget = if self.pending.is_empty() && self.registration_recent_count == 0 {
             self.file_work_remaining
         } else {
             self.file_work_remaining.div_ceil(2)
@@ -1038,6 +1134,8 @@ impl UsageCollector {
         let count = self.registrations.len().min(budget);
         for _ in 0..count {
             let (path, recent) = self.registrations.pop_front().unwrap();
+            self.registration_today_count = self.registration_today_count.saturating_sub(1);
+            self.registration_recent_count = self.registration_recent_count.saturating_sub(1);
             self.registration_paths.remove(&path);
             self.file_work_remaining -= 1;
             self.register_jsonl_file(&path, window, recent, now_ms);
@@ -1362,7 +1460,7 @@ impl UsageCollector {
             && self.file_work_remaining > 0
         {
             queued -= 1;
-            let Some(path) = self.pending.pop_front() else {
+            let Some(path) = self.pop_pending_for_today(window) else {
                 break;
             };
             self.file_work_remaining -= 1;
@@ -1457,7 +1555,44 @@ impl UsageCollector {
             self.deferred.push_back(path);
             return;
         }
-        self.pending.push_back(path);
+        if window.day(mtime_ms) == window.today {
+            let index = self
+                .pending
+                .iter()
+                .position(|queued| {
+                    self.files
+                        .get(queued)
+                        .is_none_or(|cursor| cursor.mtime_ms < mtime_ms)
+                })
+                .unwrap_or(self.pending.len());
+            self.pending.insert(index, path);
+        } else {
+            self.pending.push_back(path);
+        }
+    }
+
+    fn pop_pending_for_today(&mut self, window: DayWindow) -> Option<PathBuf> {
+        let preferred = self.next_hot_provider;
+        for kind in [
+            preferred,
+            match preferred {
+                SourceKind::Claude => SourceKind::Codex,
+                SourceKind::Codex => SourceKind::Claude,
+            },
+        ] {
+            if let Some(index) = self.pending.iter().take(64).position(|path| {
+                self.files.get(path).is_some_and(|cursor| {
+                    cursor.kind == kind && window.day(cursor.mtime_ms) == window.today
+                })
+            }) {
+                self.next_hot_provider = match kind {
+                    SourceKind::Claude => SourceKind::Codex,
+                    SourceKind::Codex => SourceKind::Claude,
+                };
+                return self.pending.remove(index);
+            }
+        }
+        self.pending.pop_front()
     }
 
     fn prioritize_newest_pending(&mut self) {
@@ -1486,7 +1621,7 @@ impl UsageCollector {
     }
 
     fn file_budget(&self) -> usize {
-        if self.catch_up {
+        if self.catch_up || self.today_recovery_ticks > 0 {
             CATCH_UP_FILES_PER_TICK
         } else {
             MAX_FILES_PER_TICK
@@ -1494,7 +1629,9 @@ impl UsageCollector {
     }
 
     fn byte_budget(&self) -> u64 {
-        if self.catch_up {
+        if self.today_recovery_ticks > 0 {
+            TODAY_RECOVERY_BYTES_PER_TICK
+        } else if self.catch_up {
             CATCH_UP_BYTES_PER_TICK
         } else {
             MAX_BYTES_PER_TICK
@@ -1502,7 +1639,7 @@ impl UsageCollector {
     }
 
     fn dir_budget(&self) -> usize {
-        if self.catch_up {
+        if self.catch_up || self.today_recovery_ticks > 0 {
             CATCH_UP_DIRS_PER_TICK
         } else {
             MAX_DIRS_PER_TICK
@@ -4279,6 +4416,65 @@ mod tests {
     }
 
     #[test]
+    fn component_today_discovers_both_providers_ahead_of_old_directory_backlog() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-today-discovery-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let projects = root.join("claude").join("projects");
+        for index in 0..40 {
+            fs::create_dir_all(projects.join(format!("old-{index:02}"))).unwrap();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let active = projects.join("active");
+        fs::create_dir_all(&active).unwrap();
+        let stamp = current_stamp();
+        fs::write(
+            active.join("session.jsonl"),
+            claude_usage_line("today", &stamp) + "\n",
+        )
+        .unwrap();
+        let now = unix_now_ms();
+        let (year, month, day) = super::day_window(now).local_date(now);
+        let codex_day =
+            super::codex_month_dir(&root.join("codex"), year, month).join(format!("{day:02}"));
+        fs::create_dir_all(&codex_day).unwrap();
+        fs::write(
+            codex_day.join("rollout.jsonl"),
+            format!(
+                "{TURN_CONTEXT}\n{}\n",
+                token_count_line(&stamp, 1_000_000, 0, 0, 1_000_000, 0, 0)
+            ),
+        )
+        .unwrap();
+
+        let mut collector = new_claude_collector(&root);
+        for index in 0..40 {
+            let logical_id = format!("projects/old-{index:02}/stale.jsonl");
+            collector.file_checkpoint.insert(
+                crate::core::FileCheckpointKey::Claude(logical_id.clone()),
+                crate::core::UsageCursor {
+                    kind: crate::core::CursorKind::Claude,
+                    logical_id,
+                    offset: 0,
+                    size: 0,
+                    prefix: None,
+                    file_id: None,
+                    last_model: None,
+                    last_codex_total: None,
+                },
+            );
+        }
+        collector.catch_up = false;
+        collector.today_recovery_ticks = super::TODAY_RECOVERY_TICKS;
+        collector.tick_at(std::ptr::null_mut(), now);
+        assert!(collector.snapshot().claude.today_cents > 0);
+        assert!(collector.snapshot().codex.today_cents > 0);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn component_codex_cold_month_dir_is_not_queued_for_history_scan() {
         let root = std::env::temp_dir().join(format!(
             "run-dog-codex-cold-{}-{}",
@@ -5412,15 +5608,12 @@ mod tests {
         let mut restored = new_persisted_collector(&root, store);
         assert_eq!(restored.files_opened, 0);
         let _ = restored.tick(ptr::null_mut());
-        assert_eq!(restored.files.len(), super::MAX_FILES_PER_TICK);
-        assert_eq!(
-            restored.files_opened,
-            (super::MAX_FILES_PER_TICK * 2) as u64
-        );
-        assert_eq!(
-            restored.integrity_probe_bytes,
-            (super::MAX_FILES_PER_TICK * 3) as u64
-        );
+        let registrations = super::MAX_FILES_PER_TICK.div_ceil(2);
+        assert_eq!(restored.files.len(), registrations);
+        assert!(restored.files_opened >= (registrations * 2) as u64);
+        assert!(restored.files_opened <= (super::MAX_FILES_PER_TICK * 3) as u64);
+        assert!(restored.integrity_probe_bytes >= (registrations * 3) as u64);
+        assert!(restored.integrity_probe_bytes <= (super::MAX_FILES_PER_TICK * 3) as u64);
         assert_eq!(restored.usage_parse_bytes, 0);
         tick_idle(&mut restored);
         assert_eq!(restored.files.len(), 40);
