@@ -138,22 +138,23 @@ impl HoverFlyout {
         {
             return;
         }
-        let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))
-        else {
-            return;
-        };
-        let home = PathBuf::from(home);
+        let home = std::env::var_os("USERPROFILE")
+            .or_else(|| std::env::var_os("HOME"))
+            .map(PathBuf::from);
         let claude = std::env::var_os("CLAUDE_CONFIG_DIR")
             .map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".claude"));
+            .or_else(|| home.as_ref().map(|home| home.join(".claude")));
         let codex = std::env::var_os("CODEX_HOME")
             .map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".codex"));
+            .or_else(|| home.as_ref().map(|home| home.join(".codex")));
         let (sender, receiver) = mpsc::channel();
         if thread::Builder::new()
             .name("provider-disk-usage".into())
             .spawn(move || {
-                let _ = sender.send([directory_bytes(&claude), directory_bytes(&codex)]);
+                let _ = sender.send([
+                    claude.as_deref().and_then(directory_bytes),
+                    codex.as_deref().and_then(directory_bytes),
+                ]);
             })
             .is_ok()
         {
@@ -176,6 +177,7 @@ impl HoverFlyout {
         }
         self.disk_scan = None;
         let _ = unsafe { KillTimer(self.hwnd, DISK_TIMER_ID) };
+        self.place_near_icon();
         let _ = unsafe { InvalidateRect(self.hwnd, ptr::null(), 1) };
     }
 
@@ -186,7 +188,7 @@ impl HoverFlyout {
         let dpi = window_dpi(self.hwnd);
         let usage = self.state.as_ref().map(|state| state.usage);
         let show_gpu = self.state.as_ref().is_some_and(|state| state.gpu.is_some());
-        let (width, height) = window_size(dpi, usage, show_gpu);
+        let (width, height) = window_size_with_disk(dpi, usage, show_gpu, self.disk_visibility());
         let (x, y) = position_near_icon(self.owner, width, height);
         let _ = unsafe {
             SetWindowPos(
@@ -201,6 +203,14 @@ impl HoverFlyout {
         };
         apply_rounded_chrome(self.hwnd, width, height, dpi);
         let _ = unsafe { InvalidateRect(self.hwnd, ptr::null(), 1) };
+    }
+
+    fn disk_visibility(&self) -> [bool; 2] {
+        let scanning = self.disk_scan.is_some();
+        [
+            scanning || self.disk_bytes[0].is_some(),
+            scanning || self.disk_bytes[1].is_some(),
+        ]
     }
 
     pub fn hide_unless_pinned(&mut self) {
@@ -419,8 +429,20 @@ fn virtual_screen_rect() -> PixelRect {
     }
 }
 
+#[cfg(test)]
 fn window_size(dpi: i32, usage: Option<UsageSnapshot>, show_gpu: bool) -> (i32, i32) {
-    let blocks = usage.map(visible_usage_count).unwrap_or(0) as i32;
+    window_size_with_disk(dpi, usage, show_gpu, [false; 2])
+}
+
+fn window_size_with_disk(
+    dpi: i32,
+    usage: Option<UsageSnapshot>,
+    show_gpu: bool,
+    disk_visible: [bool; 2],
+) -> (i32, i32) {
+    let blocks = usage
+        .map(|usage| visible_usage_rows(usage, disk_visible).len())
+        .unwrap_or(0) as i32;
     let extra = usage.map(extra_usage_block_units).unwrap_or(0);
     let gpu = i32::from(show_gpu) * CARD_GPU_BLOCK_HEIGHT;
     (
@@ -439,13 +461,9 @@ fn extra_usage_block_units(usage: UsageSnapshot) -> i32 {
         + i32::from(usage.codex.shows_banked_reset()) * LINE
 }
 
+#[cfg(test)]
 fn visible_usage_count(usage: UsageSnapshot) -> usize {
-    if usage.month_scan_in_progress {
-        2
-    } else {
-        usize::from(usage.claude.has_month_activity())
-            + usize::from(usage.codex.shows_chatgpt_card(flyout_now_ms()))
-    }
+    visible_usage_rows(usage, [false; 2]).len()
 }
 
 fn window_dpi(hwnd: HWND) -> i32 {
@@ -683,7 +701,7 @@ fn paint(hwnd: HWND) {
     draw_separator(hdc, content_left, content_right, top, palette.separator);
     top += px(9, dpi);
 
-    let usage_rows = visible_usage_rows(state.usage);
+    let usage_rows = visible_usage_rows(state.usage, flyout.disk_visibility());
     let last = usage_rows.len().saturating_sub(1);
     for (index, row) in usage_rows.iter().enumerate() {
         let block_bottom = top + usage_block_height(&layout, row.usage);
@@ -1054,17 +1072,17 @@ struct VisibleUsageRow {
     mark: UsageMark,
 }
 
-fn visible_usage_rows(usage: UsageSnapshot) -> Vec<VisibleUsageRow> {
+fn visible_usage_rows(usage: UsageSnapshot, disk_visible: [bool; 2]) -> Vec<VisibleUsageRow> {
     let scanning = usage.month_scan_in_progress;
     let mut rows = Vec::with_capacity(2);
-    if usage.claude.has_month_activity() || scanning {
+    if usage.claude.has_month_activity() || scanning || disk_visible[0] {
         rows.push(VisibleUsageRow {
             title: "Claude",
             usage: usage.claude,
             mark: UsageMark::Claude,
         });
     }
-    if usage.codex.shows_chatgpt_card(flyout_now_ms()) || scanning {
+    if usage.codex.shows_chatgpt_card(flyout_now_ms()) || scanning || disk_visible[1] {
         rows.push(VisibleUsageRow {
             title: "Codex",
             usage: usage.codex,
@@ -1890,8 +1908,8 @@ mod tests {
         directory_bytes, extra_usage_block_units, format_bytes, format_gpu_capacity,
         format_limit_metric_label, format_month_usage, format_percent, format_provider_disk,
         format_reset_local, format_self_usage, format_today_usage, gpu_details, position_flyout,
-        visible_usage_count, window_size, PixelRect, CARD_GPU_BLOCK_HEIGHT, CARD_HEIGHT,
-        CARD_USAGE_BLOCK_HEIGHT, CARD_WIDTH,
+        visible_usage_count, visible_usage_rows, window_size, window_size_with_disk, PixelRect,
+        CARD_GPU_BLOCK_HEIGHT, CARD_HEIGHT, CARD_USAGE_BLOCK_HEIGHT, CARD_WIDTH,
     };
     use crate::core::{
         format_banked_reset_label, format_fable_limit_label, CpuLoad, LimitWindow, ProcessStatus,
@@ -2122,6 +2140,18 @@ mod tests {
         assert_eq!(
             window_size(96, Some(usage), false),
             (CARD_WIDTH, CARD_HEIGHT + CARD_USAGE_BLOCK_HEIGHT * 2)
+        );
+    }
+
+    #[test]
+    fn component_flyout_shows_provider_with_only_disk_usage() {
+        let usage = UsageSnapshot::default();
+        assert_eq!(visible_usage_rows(usage, [true, false]).len(), 1);
+        assert_eq!(visible_usage_rows(usage, [false, true]).len(), 1);
+        assert_eq!(visible_usage_rows(usage, [true, true]).len(), 2);
+        assert_eq!(
+            window_size_with_disk(96, Some(usage), false, [true, false]),
+            (CARD_WIDTH, CARD_HEIGHT + CARD_USAGE_BLOCK_HEIGHT)
         );
     }
 
