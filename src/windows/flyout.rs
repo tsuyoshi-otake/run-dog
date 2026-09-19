@@ -3,7 +3,19 @@
 //! The shell tooltip is text-only, so `NIN_POPUPOPEN` owns a `WS_EX_NOACTIVATE`
 //! popup instead. All GDI objects live only for one paint.
 
-use std::{mem::size_of, ptr, sync::Once};
+use std::{
+    fs,
+    mem::size_of,
+    os::windows::fs::MetadataExt,
+    path::{Path, PathBuf},
+    ptr,
+    sync::{
+        mpsc::{self, Receiver},
+        Once,
+    },
+    thread,
+    time::{Duration, Instant},
+};
 
 use windows_sys::{
     core::GUID,
@@ -27,12 +39,12 @@ use windows_sys::{
             Shell::{Shell_NotifyIconGetRect, NOTIFYICONIDENTIFIER},
             WindowsAndMessaging::{
                 CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetCursorPos,
-                GetSystemMetrics, GetWindowLongPtrW, IsWindow, IsWindowVisible, RegisterClassW,
-                SetWindowLongPtrW, SetWindowPos, ShowWindow, CS_DROPSHADOW, GWLP_USERDATA,
-                HWND_TOPMOST, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
-                SM_YVIRTUALSCREEN, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE, SW_SHOWNOACTIVATE,
-                WM_DESTROY, WM_MOUSEACTIVATE, WM_PAINT, WNDCLASSW, WS_EX_NOACTIVATE,
-                WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+                GetSystemMetrics, GetWindowLongPtrW, IsWindow, IsWindowVisible, KillTimer,
+                RegisterClassW, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+                CS_DROPSHADOW, GWLP_USERDATA, HWND_TOPMOST, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+                SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE,
+                SW_SHOWNOACTIVATE, WM_DESTROY, WM_MOUSEACTIVATE, WM_PAINT, WM_TIMER, WNDCLASSW,
+                WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
             },
         },
     },
@@ -54,7 +66,9 @@ const MA_NOACTIVATE: LRESULT = 3;
 const CARD_WIDTH: i32 = 320;
 const CARD_HEIGHT: i32 = 273;
 const CARD_GPU_BLOCK_HEIGHT: i32 = 86;
-const CARD_USAGE_BLOCK_HEIGHT: i32 = 110;
+const CARD_USAGE_BLOCK_HEIGHT: i32 = 125;
+const DISK_TIMER_ID: usize = 1;
+const DISK_REFRESH: Duration = Duration::from_secs(600);
 
 static REGISTER_CLASS: Once = Once::new();
 
@@ -63,6 +77,9 @@ pub struct HoverFlyout {
     owner: HWND,
     state: Option<TrayIcon>,
     pinned: bool,
+    disk_bytes: [Option<u64>; 2],
+    disk_scan: Option<Receiver<[Option<u64>; 2]>>,
+    disk_scanned_at: Option<Instant>,
 }
 
 impl HoverFlyout {
@@ -73,6 +90,9 @@ impl HoverFlyout {
             owner: ptr::null_mut(),
             state: None,
             pinned: false,
+            disk_bytes: [None, None],
+            disk_scan: None,
+            disk_scanned_at: None,
         }
     }
 
@@ -104,8 +124,60 @@ impl HoverFlyout {
                 return;
             }
         }
+        self.start_disk_scan();
         self.place_near_icon();
         let _ = unsafe { ShowWindow(self.hwnd, SW_SHOWNOACTIVATE) };
+        let _ = unsafe { InvalidateRect(self.hwnd, ptr::null(), 1) };
+    }
+
+    fn start_disk_scan(&mut self) {
+        if self.disk_scan.is_some()
+            || self
+                .disk_scanned_at
+                .is_some_and(|at| at.elapsed() < DISK_REFRESH)
+        {
+            return;
+        }
+        let home = std::env::var_os("USERPROFILE")
+            .or_else(|| std::env::var_os("HOME"))
+            .map(PathBuf::from);
+        let claude = std::env::var_os("CLAUDE_CONFIG_DIR")
+            .map(PathBuf::from)
+            .or_else(|| home.as_ref().map(|home| home.join(".claude")));
+        let codex = std::env::var_os("CODEX_HOME")
+            .map(PathBuf::from)
+            .or_else(|| home.as_ref().map(|home| home.join(".codex")));
+        let (sender, receiver) = mpsc::channel();
+        if thread::Builder::new()
+            .name("provider-disk-usage".into())
+            .spawn(move || {
+                let _ = sender.send([
+                    claude.as_deref().and_then(directory_bytes),
+                    codex.as_deref().and_then(directory_bytes),
+                ]);
+            })
+            .is_ok()
+        {
+            self.disk_scan = Some(receiver);
+            let _ = unsafe { SetTimer(self.hwnd, DISK_TIMER_ID, 1_000, None) };
+        }
+    }
+
+    fn poll_disk_scan(&mut self) {
+        let Some(receiver) = self.disk_scan.as_ref() else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok(bytes) => {
+                self.disk_bytes = bytes;
+                self.disk_scanned_at = Some(Instant::now());
+            }
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => {}
+        }
+        self.disk_scan = None;
+        let _ = unsafe { KillTimer(self.hwnd, DISK_TIMER_ID) };
+        self.place_near_icon();
         let _ = unsafe { InvalidateRect(self.hwnd, ptr::null(), 1) };
     }
 
@@ -116,7 +188,7 @@ impl HoverFlyout {
         let dpi = window_dpi(self.hwnd);
         let usage = self.state.as_ref().map(|state| state.usage);
         let show_gpu = self.state.as_ref().is_some_and(|state| state.gpu.is_some());
-        let (width, height) = window_size(dpi, usage, show_gpu);
+        let (width, height) = window_size_with_disk(dpi, usage, show_gpu, self.disk_visibility());
         let (x, y) = position_near_icon(self.owner, width, height);
         let _ = unsafe {
             SetWindowPos(
@@ -133,6 +205,14 @@ impl HoverFlyout {
         let _ = unsafe { InvalidateRect(self.hwnd, ptr::null(), 1) };
     }
 
+    fn disk_visibility(&self) -> [bool; 2] {
+        let scanning = self.disk_scan.is_some();
+        [
+            scanning || self.disk_bytes[0].is_some(),
+            scanning || self.disk_bytes[1].is_some(),
+        ]
+    }
+
     pub fn hide_unless_pinned(&mut self) {
         if !self.pinned {
             self.hide();
@@ -146,6 +226,9 @@ impl HoverFlyout {
     }
 
     pub fn destroy(&mut self) {
+        if !self.hwnd.is_null() {
+            let _ = unsafe { KillTimer(self.hwnd, DISK_TIMER_ID) };
+        }
         if !self.hwnd.is_null() && unsafe { IsWindow(self.hwnd) } != 0 {
             let _ = unsafe { SetWindowLongPtrW(self.hwnd, GWLP_USERDATA, 0) };
             let _ = unsafe { DestroyWindow(self.hwnd) };
@@ -154,6 +237,7 @@ impl HoverFlyout {
         self.owner = ptr::null_mut();
         self.state = None;
         self.pinned = false;
+        self.disk_scan = None;
     }
 
     #[must_use]
@@ -345,8 +429,20 @@ fn virtual_screen_rect() -> PixelRect {
     }
 }
 
+#[cfg(test)]
 fn window_size(dpi: i32, usage: Option<UsageSnapshot>, show_gpu: bool) -> (i32, i32) {
-    let blocks = usage.map(visible_usage_count).unwrap_or(0) as i32;
+    window_size_with_disk(dpi, usage, show_gpu, [false; 2])
+}
+
+fn window_size_with_disk(
+    dpi: i32,
+    usage: Option<UsageSnapshot>,
+    show_gpu: bool,
+    disk_visible: [bool; 2],
+) -> (i32, i32) {
+    let blocks = usage
+        .map(|usage| visible_usage_rows(usage, disk_visible).len())
+        .unwrap_or(0) as i32;
     let extra = usage.map(extra_usage_block_units).unwrap_or(0);
     let gpu = i32::from(show_gpu) * CARD_GPU_BLOCK_HEIGHT;
     (
@@ -365,13 +461,9 @@ fn extra_usage_block_units(usage: UsageSnapshot) -> i32 {
         + i32::from(usage.codex.shows_banked_reset()) * LINE
 }
 
+#[cfg(test)]
 fn visible_usage_count(usage: UsageSnapshot) -> usize {
-    if usage.month_scan_in_progress {
-        2
-    } else {
-        usize::from(usage.claude.has_month_activity())
-            + usize::from(usage.codex.shows_chatgpt_card(flyout_now_ms()))
-    }
+    visible_usage_rows(usage, [false; 2]).len()
 }
 
 fn window_dpi(hwnd: HWND) -> i32 {
@@ -475,6 +567,13 @@ unsafe extern "system" fn flyout_proc(
     }
     if message == WM_PAINT {
         paint(hwnd);
+        return 0;
+    }
+    if message == WM_TIMER && wparam == DISK_TIMER_ID {
+        let pointer = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut HoverFlyout };
+        if let Some(flyout) = unsafe { pointer.as_mut() } {
+            flyout.poll_disk_scan();
+        }
         return 0;
     }
     unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
@@ -602,7 +701,7 @@ fn paint(hwnd: HWND) {
     draw_separator(hdc, content_left, content_right, top, palette.separator);
     top += px(9, dpi);
 
-    let usage_rows = visible_usage_rows(state.usage);
+    let usage_rows = visible_usage_rows(state.usage, flyout.disk_visibility());
     let last = usage_rows.len().saturating_sub(1);
     for (index, row) in usage_rows.iter().enumerate() {
         let block_bottom = top + usage_block_height(&layout, row.usage);
@@ -618,6 +717,11 @@ fn paint(hwnd: HWND) {
             row.title,
             row.usage,
             row.mark,
+            flyout.disk_bytes[match row.mark {
+                UsageMark::Claude => 0,
+                UsageMark::Codex => 1,
+            }],
+            flyout.disk_scan.is_some(),
             state.usage.month_scan_in_progress,
             &palette,
             &layout,
@@ -968,17 +1072,17 @@ struct VisibleUsageRow {
     mark: UsageMark,
 }
 
-fn visible_usage_rows(usage: UsageSnapshot) -> Vec<VisibleUsageRow> {
+fn visible_usage_rows(usage: UsageSnapshot, disk_visible: [bool; 2]) -> Vec<VisibleUsageRow> {
     let scanning = usage.month_scan_in_progress;
     let mut rows = Vec::with_capacity(2);
-    if usage.claude.has_month_activity() || scanning {
+    if usage.claude.has_month_activity() || scanning || disk_visible[0] {
         rows.push(VisibleUsageRow {
             title: "Claude",
             usage: usage.claude,
             mark: UsageMark::Claude,
         });
     }
-    if usage.codex.shows_chatgpt_card(flyout_now_ms()) || scanning {
+    if usage.codex.shows_chatgpt_card(flyout_now_ms()) || scanning || disk_visible[1] {
         rows.push(VisibleUsageRow {
             title: "Codex",
             usage: usage.codex,
@@ -996,6 +1100,8 @@ fn paint_usage_row(
     title: &str,
     usage: ProviderUsage,
     mark: UsageMark,
+    disk_bytes: Option<u64>,
+    disk_scanning: bool,
     month_scan_in_progress: bool,
     palette: &Palette,
     layout: &Layout,
@@ -1111,6 +1217,52 @@ fn paint_usage_row(
         &format_month_usage(usage, month_scan_in_progress),
         0,
     );
+    draw_text(
+        hdc,
+        RECT {
+            left: content_left,
+            top: metric_top + layout.detail_h,
+            right: row.right,
+            bottom: metric_top + layout.detail_h * 2,
+        },
+        &format_provider_disk(disk_bytes, disk_scanning),
+        0,
+    );
+}
+
+fn format_provider_disk(bytes: Option<u64>, scanning: bool) -> String {
+    match bytes {
+        Some(bytes) => format!("Local files: {}", format_bytes(bytes, 1)),
+        None if scanning => "Local files: Scanning...".to_owned(),
+        None => "Local files: --".to_owned(),
+    }
+}
+
+// Metadata only; directory links and junctions are excluded to avoid cycles and
+// counting files outside the selected provider root.
+fn directory_bytes(root: &Path) -> Option<u64> {
+    let metadata = fs::symlink_metadata(root).ok()?;
+    if !metadata.is_dir() || metadata.file_attributes() & 0x400 != 0 {
+        return None;
+    }
+    let mut total = 0_u64;
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        let entries = fs::read_dir(dir).ok()?;
+        for entry in entries {
+            let entry = entry.ok()?;
+            let metadata = fs::symlink_metadata(entry.path()).ok()?;
+            if metadata.file_attributes() & 0x400 != 0 {
+                continue;
+            }
+            if metadata.is_dir() {
+                pending.push(entry.path());
+            } else if metadata.is_file() {
+                total = total.saturating_add(metadata.len());
+            }
+        }
+    }
+    Some(total)
 }
 
 fn format_today_usage(usage: ProviderUsage) -> String {
@@ -1178,7 +1330,7 @@ fn usage_block_height(layout: &Layout, usage: ProviderUsage) -> i32 {
     } else {
         0
     };
-    layout.title_h + metric * metrics + banked + layout.detail_h + px(2, layout.dpi)
+    layout.title_h + metric * metrics + banked + layout.detail_h * 2 + px(2, layout.dpi)
 }
 
 fn paint_limit_metric(
@@ -1753,15 +1905,33 @@ fn wide(value: &str) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::{
-        extra_usage_block_units, format_bytes, format_gpu_capacity, format_limit_metric_label,
-        format_month_usage, format_percent, format_reset_local, format_self_usage,
-        format_today_usage, gpu_details, position_flyout, visible_usage_count, window_size,
-        PixelRect, CARD_GPU_BLOCK_HEIGHT, CARD_HEIGHT, CARD_USAGE_BLOCK_HEIGHT, CARD_WIDTH,
+        directory_bytes, extra_usage_block_units, format_bytes, format_gpu_capacity,
+        format_limit_metric_label, format_month_usage, format_percent, format_provider_disk,
+        format_reset_local, format_self_usage, format_today_usage, gpu_details, position_flyout,
+        visible_usage_count, visible_usage_rows, window_size, window_size_with_disk, PixelRect,
+        CARD_GPU_BLOCK_HEIGHT, CARD_HEIGHT, CARD_USAGE_BLOCK_HEIGHT, CARD_WIDTH,
     };
     use crate::core::{
         format_banked_reset_label, format_fable_limit_label, CpuLoad, LimitWindow, ProcessStatus,
         ProviderUsage, UsageSnapshot,
     };
+
+    #[test]
+    fn provider_disk_counts_nested_files_and_reports_missing_root() {
+        let root = std::env::temp_dir().join(format!("run-dog-disk-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(root.join("nested")).unwrap();
+        std::fs::write(root.join("a"), [0_u8; 3]).unwrap();
+        std::fs::write(root.join("nested").join("b"), [0_u8; 5]).unwrap();
+        assert_eq!(directory_bytes(&root), Some(8));
+        assert_eq!(directory_bytes(&root.join("missing")), None);
+        std::fs::remove_dir_all(root).unwrap();
+        assert_eq!(
+            format_provider_disk(Some(1024), false),
+            "Local files: 1.0 KB"
+        );
+        assert_eq!(format_provider_disk(None, true), "Local files: Scanning...");
+    }
 
     #[test]
     fn component_flyout_formatters_cover_unknown_and_scaled_values() {
@@ -1970,6 +2140,18 @@ mod tests {
         assert_eq!(
             window_size(96, Some(usage), false),
             (CARD_WIDTH, CARD_HEIGHT + CARD_USAGE_BLOCK_HEIGHT * 2)
+        );
+    }
+
+    #[test]
+    fn component_flyout_shows_provider_with_only_disk_usage() {
+        let usage = UsageSnapshot::default();
+        assert_eq!(visible_usage_rows(usage, [true, false]).len(), 1);
+        assert_eq!(visible_usage_rows(usage, [false, true]).len(), 1);
+        assert_eq!(visible_usage_rows(usage, [true, true]).len(), 2);
+        assert_eq!(
+            window_size_with_disk(96, Some(usage), false, [true, false]),
+            (CARD_WIDTH, CARD_HEIGHT + CARD_USAGE_BLOCK_HEIGHT)
         );
     }
 
