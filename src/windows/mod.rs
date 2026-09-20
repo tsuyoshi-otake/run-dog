@@ -12,6 +12,7 @@ mod messages;
 mod notify_icon;
 mod process;
 pub mod registry;
+mod run_history;
 mod storage;
 mod tray;
 mod update;
@@ -88,6 +89,16 @@ pub fn run() -> Result<(), String> {
         return Ok(());
     };
 
+    let session = run_history::RunSession::start_production();
+    let result = run_single_instance();
+    match &result {
+        Ok(()) => session.finish_clean(),
+        Err(error) => session.finish_error(error),
+    }
+    result
+}
+
+fn run_single_instance() -> Result<(), String> {
     let mut store = registry::RegistryStore::production();
     let _ = store.clear_tombstone();
     let recovered = store.recover();

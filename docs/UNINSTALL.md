@@ -20,6 +20,7 @@ download an update cache installer → exit → uninstall from Windows Apps.
 | Launch at startup | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` value `RunDog` | **DELETE** |
 | Settings | `HKCU\Software\SystemExe\RunDog` (including subkeys) | **DELETE** |
 | Usage state | `%LOCALAPPDATA%\RunDog\usage` | **DELETE** |
+| Process diagnostics | `%LOCALAPPDATA%\RunDog\diagnostics` | **DELETE** |
 | Legacy usage state | `%LOCALAPPDATA%\SystemExe\RunDog\usage` | **DELETE** (migrated on startup) |
 | Update cache | `%LOCALAPPDATA%\SystemExe\RunDog\updates` | **DELETE** |
 | Claude logs | `%USERPROFILE%\.claude\projects\*.jsonl` (or `%CLAUDE_CONFIG_DIR%`) | **PRESERVE** |

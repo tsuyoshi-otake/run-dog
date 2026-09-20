@@ -71,6 +71,7 @@ fn contract_document_states_delete_preserve_and_not_run() {
     assert!(CONTRACT.contains(".claude"));
     assert!(CONTRACT.contains(".codex"));
     assert!(CONTRACT.contains("%LOCALAPPDATA%\\RunDog\\usage"));
+    assert!(CONTRACT.contains("%LOCALAPPDATA%\\RunDog\\diagnostics"));
     assert!(CONTRACT.contains("%LOCALAPPDATA%\\SystemExe\\RunDog\\usage"));
     assert!(CONTRACT.contains("%LOCALAPPDATA%\\SystemExe\\RunDog\\updates"));
     assert!(CONTRACT.contains("Launch at startup"));
