@@ -945,7 +945,8 @@ impl UsageCollector {
             (window.month_start / 10_000) as i32,
             ((window.month_start / 100) % 100) as u8,
         );
-        if dir != current_codex_month {
+        let claude_projects = self.claude_dir.join("projects");
+        if dir != current_codex_month && dir != claude_projects {
             if let Some(cached) = self.dirs.get(dir) {
                 if cached.mtime_ms == mtime_ms {
                     let children = cached.dirs.clone();
@@ -5078,6 +5079,16 @@ mod tests {
             format!("{}\n", claude_usage_line("hot-session", &stamp)),
         )
         .unwrap();
+        // Model filesystems whose directory timestamps are too coarse to
+        // distinguish creation of the new session directory from the first
+        // projects-root scan.
+        let projects = root.join("claude").join("projects");
+        let unchanged_mtime = super::path_mtime_ms(&projects).unwrap();
+        collector
+            .dirs
+            .get_mut(&projects)
+            .expect("projects root was discovered")
+            .mtime_ms = unchanged_mtime;
 
         for tick in 1..=(super::MAX_PATH_RETRIES + 1) {
             collector.tick_at(
