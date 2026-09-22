@@ -6372,13 +6372,31 @@ mod tests {
         let first = claude_usage_line_with_len("a", &stamp, 512);
         let second = claude_usage_line_with_len("b", &stamp, 512);
         assert_eq!(first.len(), second.len());
+        assert_eq!(&first.as_bytes()[..64], &second.as_bytes()[..64]);
         fs::write(&session, format!("{first}\n")).expect("a");
+        let first_modified = fs::metadata(&session).unwrap().modified().unwrap();
         let mut collector = new_claude_collector(&root);
         assert_eq!(tick_idle(&mut collector), UsageTick::Idle);
         assert_eq!(collector.snapshot().claude.month_cents, 500);
         fs::write(&session, format!("{second}\n")).expect("same-size b");
+        // This case exercises the mtime hint: both the file ID and the
+        // bounded prefix remain unchanged. Fast CI writes can share one
+        // millisecond, so establish the required timestamp change explicitly.
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&session)
+            .unwrap()
+            .set_times(
+                fs::FileTimes::new()
+                    .set_modified(first_modified + std::time::Duration::from_secs(2)),
+            )
+            .unwrap();
         collector.test_force_restat();
         assert_eq!(tick_idle(&mut collector), UsageTick::Idle);
+        assert_eq!(
+            collector.last_rebuild_reason,
+            Some(CursorRebuildReason::SameSizeRewriteHint)
+        );
         let cents = collector.snapshot().claude.month_cents;
         let _ = fs::remove_dir_all(&root);
         assert_eq!(cents, 1_000);

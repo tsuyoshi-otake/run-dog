@@ -20,6 +20,14 @@ The GDI resource assertion runs its own child test process, avoiding interferenc
 from concurrent GUI tests. The first per-handle assertion was replaced because
 Windows caches deleted region handles; process GDI counts are the verified oracle.
 
+The initial main CI run exposed an existing nondeterministic same-size rewrite
+fixture: identical file IDs and 64-byte prefixes depend on a changed millisecond
+mtime, but two fast writes can have equal timestamps. The test now explicitly
+sets a different `FileTimes` value and asserts `SameSizeRewriteHint`. Production
+rewrite detection is unchanged. The complete local suite passed again (357,
+with the same one manual test ignored); the first release run was cancelled
+before publication so the corrected fixture is included in the final release.
+
 ## Findings and fixes
 
 The baseline deleted-file probe retained 64 cursors after month rollover and
