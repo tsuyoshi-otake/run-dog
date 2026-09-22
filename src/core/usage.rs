@@ -457,10 +457,14 @@ fn entry_long_context(key: &'static str, input: f64, cached: f64, output: f64) -
     pricing
 }
 
-fn pricing_table() -> [ModelPricing; 57] {
+fn pricing_table() -> [ModelPricing; 63] {
     [
         entry_cache_read("claude-fable-5-1", 10.0, 0.25, 50.0),
         entry_cache_read("claude-mythos-5-1", 10.0, 0.25, 50.0),
+        entry_cache_read("claude-opus-5-5-fast", 8.0, 0.4, 40.0),
+        entry_cache_read("claude-opus-5.5-fast", 8.0, 0.4, 40.0),
+        entry_cache_read("claude-opus-5-5", 4.0, 0.2, 20.0),
+        entry_cache_read("claude-opus-5.5", 4.0, 0.2, 20.0),
         entry("claude-fable-5", 10.0, 50.0),
         entry("claude-mythos-5", 10.0, 50.0),
         entry("claude-opus-5", 5.0, 25.0),
@@ -486,6 +490,8 @@ fn pricing_table() -> [ModelPricing; 57] {
         entry("claude-3-sonnet", 3.0, 15.0),
         entry("claude-3-haiku", 0.25, 1.25),
         entry_long_context("gpt-6-astra", 10.0, 1.0, 50.0),
+        entry_long_context("gpt-6-sol", 2.0, 0.2, 10.0),
+        entry_long_context("gpt-6-luna", 0.1, 0.01, 0.5),
         entry_long_context("gpt-5.6-sol", 5.0, 0.5, 30.0),
         entry_long_context("gpt-5.6-terra", 2.5, 0.25, 15.0),
         entry_long_context("gpt-5.6-luna", 1.0, 0.1, 6.0),
