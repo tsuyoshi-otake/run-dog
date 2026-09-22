@@ -3,7 +3,7 @@
 //! This is not the Registry `UsageCheckpoint` text. Extra positional columns
 //! from experimental reader/Codex patches are rejected, not merged in.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use super::{
     display_cents, hex_decode, retain_keys_for_month, ClaudeDedupeKey, CodexTokenTotals,
@@ -16,7 +16,7 @@ pub const USAGE_STATE_HEADER: &str = "rundog-usage-state-2";
 // migration that rebuilt aggregates. The serialized field layout is unchanged.
 pub const USAGE_STATE_SCHEMA_VERSION: u32 = 3;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum CursorKind {
     Claude,
     Codex,
@@ -37,6 +37,9 @@ pub struct UsageCursor {
     pub last_model: Option<String>,
     /// Last seen Codex `total_token_usage`. Named line, not a `file=` column.
     pub last_codex_total: Option<CodexTokenTotals>,
+    /// Last month in which new bytes were consumed. Missing legacy values
+    /// conservatively use the checkpoint's aggregate month during restore.
+    pub active_month: Option<u32>,
 }
 
 /// Why a cursor was rebuilt instead of appended. No paths or payloads.
@@ -79,6 +82,7 @@ impl UsageState {
                     FileCheckpointKey::Codex(id) => (CursorKind::Codex, id.clone()),
                 };
                 UsageCursor {
+                    active_month: None,
                     kind,
                     logical_id,
                     offset: cursor.offset,
@@ -179,6 +183,12 @@ impl UsageState {
                 "cursor={kind}\t{}\t{}\t{}\n",
                 cursor.logical_id, cursor.offset, cursor.size
             ));
+            if let Some(month) = cursor.active_month {
+                out.push_str(&format!(
+                    "active_month={kind}\t{}\t{month}\n",
+                    cursor.logical_id
+                ));
+            }
             if let Some(prefix) = cursor.prefix {
                 out.push_str(&format!("prefix={kind}\t{}\t{prefix}\n", cursor.logical_id));
             }
@@ -246,6 +256,7 @@ impl UsageState {
         let mut cursors = Vec::new();
         let mut prefixes: Vec<(CursorKind, String, u64)> = Vec::new();
         let mut file_ids = Vec::new();
+        let mut active_months = HashMap::new();
         let mut models: Vec<(CursorKind, String, String)> = Vec::new();
         let mut totals: Vec<(CursorKind, String, CodexTokenTotals)> = Vec::new();
         let mut claude_keys = HashSet::new();
@@ -293,6 +304,18 @@ impl UsageState {
                 cursors.push(parse_cursor_line(value)?);
             } else if let Some(value) = line.strip_prefix("prefix=") {
                 prefixes.push(parse_prefix_line(value)?);
+            } else if let Some(value) = line.strip_prefix("active_month=") {
+                let (kind, id, month) = parse_prefix_line(value)?;
+                let month = u32::try_from(month).ok()?;
+                if month / 10_000 == 0
+                    || month % 100 != 1
+                    || !(1..=12).contains(&(month / 100 % 100))
+                {
+                    return None;
+                }
+                if active_months.insert((kind, id), month).is_some() {
+                    return None;
+                }
             } else if let Some(value) = line.strip_prefix("file_id=") {
                 let parts: Vec<_> = value.split('\t').collect();
                 if parts.len() != 5 {
@@ -323,6 +346,12 @@ impl UsageState {
             } else if line.starts_with("file=") {
                 return None;
             }
+        }
+        for cursor in &mut cursors {
+            cursor.active_month = active_months.remove(&(cursor.kind, cursor.logical_id.clone()));
+        }
+        if !active_months.is_empty() {
+            return None;
         }
         for (kind, logical_id, prefix) in prefixes {
             if let Some(cursor) = cursors
@@ -452,6 +481,7 @@ fn parse_cursor_line(value: &str) -> Option<UsageCursor> {
         return None;
     }
     Some(UsageCursor {
+        active_month: None,
         kind,
         logical_id: parts[1].to_owned(),
         offset: parts[2].parse().ok()?,
@@ -585,6 +615,7 @@ mod tests {
                 },
             },
             cursors: vec![UsageCursor {
+                active_month: None,
                 kind: CursorKind::Claude,
                 logical_id: "projects/p/session.jsonl".to_owned(),
                 offset: 8,
@@ -603,6 +634,7 @@ mod tests {
     fn sample_codex_state() -> UsageState {
         let mut state = sample_state(true);
         state.cursors.push(UsageCursor {
+            active_month: None,
             kind: CursorKind::Codex,
             logical_id: "sessions/2026/09/a.jsonl".to_owned(),
             offset: 4,
@@ -620,10 +652,39 @@ mod tests {
     }
 
     #[test]
+    fn cursor_activity_month_roundtrips_and_is_optional_for_legacy_states() {
+        let mut state = sample_codex_state();
+        assert!(UsageState::decode(&state.encode())
+            .unwrap()
+            .cursors
+            .iter()
+            .all(|cursor| cursor.active_month.is_none()));
+        state.cursors[0].active_month = Some(20_260_801);
+        state.cursors[1].active_month = Some(20_260_901);
+        let decoded = UsageState::decode(&state.encode()).unwrap();
+        assert_eq!(decoded, state);
+    }
+
+    #[test]
+    fn cursor_activity_month_rejects_invalid_duplicate_and_orphan_records() {
+        let state = sample_state(true).encode();
+        for row in [
+            "active_month=c\tprojects/p/session.jsonl\t20261301\n",
+            "active_month=c\tprojects/p/session.jsonl\t20260902\n",
+            "active_month=c\tprojects/p/session.jsonl\t0\n",
+            "active_month=c\tprojects/missing.jsonl\t20260901\n",
+            "active_month=c\tprojects/p/session.jsonl\t20260901\nactive_month=c\tprojects/p/session.jsonl\t20260901\n",
+        ] {
+            assert!(UsageState::decode(&format!("{state}{row}")).is_none(), "{row}");
+        }
+    }
+
+    #[test]
     fn component_encode_orders_claude_before_codex_then_logical_id() {
         let mut state = sample_state(true);
         state.cursors = vec![
             UsageCursor {
+                active_month: None,
                 kind: CursorKind::Codex,
                 logical_id: "sessions/z.jsonl".to_owned(),
                 offset: 1,
@@ -634,6 +695,7 @@ mod tests {
                 last_codex_total: None,
             },
             UsageCursor {
+                active_month: None,
                 kind: CursorKind::Claude,
                 logical_id: "projects/z.jsonl".to_owned(),
                 offset: 2,
@@ -644,6 +706,7 @@ mod tests {
                 last_codex_total: None,
             },
             UsageCursor {
+                active_month: None,
                 kind: CursorKind::Claude,
                 logical_id: "projects/a.jsonl".to_owned(),
                 offset: 3,

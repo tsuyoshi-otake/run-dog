@@ -15,6 +15,7 @@ use std::{
     fs::{self, File},
     hash::{Hash, Hasher},
     io::{Read, Seek, SeekFrom},
+    os::windows::fs::MetadataExt,
     path::{Path, PathBuf},
     ptr,
     sync::{
@@ -76,6 +77,8 @@ pub const USAGE_CONTINUE_INTERVAL_MS: u32 = USAGE_IDLE_INTERVAL_MS;
 
 const MAX_FILES_PER_TICK: usize = 3;
 const MAX_STAT_PER_TICK: usize = 12;
+/// Metadata-only retirement, independent of the bounded JSONL read budget.
+const MAX_RETIRE_PER_TICK: usize = 4;
 const MAX_BYTES_PER_TICK: u64 = 96 * 1_024;
 const TODAY_RECOVERY_TICKS: u8 = 16;
 const TODAY_RECOVERY_BYTES_PER_TICK: u64 = 16 * 1_024 * 1_024;
@@ -115,6 +118,7 @@ pub enum UsageTick {
 }
 
 struct FileCursor {
+    active_month: u32,
     size: u64,
     mtime_ms: u64,
     offset: u64,
@@ -203,6 +207,8 @@ pub struct UsageCollector {
     day_key: u32,
     last_collected_ms: u64,
     file_checkpoint: HashMap<FileCheckpointKey, UsageCursor>,
+    retirement: VecDeque<(PathBuf, SourceKind)>,
+    retired_paths: HashSet<PathBuf>,
     last_discover_ms: u64,
     last_codex_limits_ms: u64,
     catch_up: bool,
@@ -323,6 +329,8 @@ impl UsageCollector {
             day_key: 0,
             last_collected_ms: 0,
             file_checkpoint: HashMap::new(),
+            retirement: VecDeque::new(),
+            retired_paths: HashSet::new(),
             last_discover_ms: 0,
             last_codex_limits_ms: 0,
             catch_up: true,
@@ -485,6 +493,7 @@ impl UsageCollector {
         self.file_work_remaining = self.file_budget();
         self.reset_if_month_changed(window);
         self.reset_if_day_changed(window);
+        self.retire_obsolete_paths(window);
         let _ = self.take_claude_limits();
 
         if self.last_discover_ms == 0
@@ -717,7 +726,10 @@ impl UsageCollector {
         self.file_checkpoint = state
             .cursors
             .into_iter()
-            .map(|cursor| {
+            .map(|mut cursor| {
+                cursor
+                    .active_month
+                    .get_or_insert(state.aggregate.month_start);
                 let key = match cursor.kind {
                     CursorKind::Claude => FileCheckpointKey::Claude(cursor.logical_id.clone()),
                     CursorKind::Codex => FileCheckpointKey::Codex(cursor.logical_id.clone()),
@@ -725,9 +737,11 @@ impl UsageCollector {
                 (key, cursor)
             })
             .collect();
-        self.claude_keys = state.claude_keys;
+        self.claude_keys = retain_keys_for_month(&state.claude_keys, window.month_start);
+        self.checkpoint_dirty |= self.claude_keys.len() != state.claude_keys.len();
         self.catch_up = !state.aggregate.catch_up_done;
         self.last_discover_ms = 0;
+        self.queue_retirement();
     }
 
     fn build_state(&self, window: DayWindow) -> UsageState {
@@ -741,6 +755,7 @@ impl UsageCollector {
             };
             seen.insert((cursor.kind, logical_id.clone()));
             cursors.push(UsageCursor {
+                active_month: Some(cursor.active_month),
                 kind: match cursor.kind {
                     SourceKind::Claude => CursorKind::Claude,
                     SourceKind::Codex => CursorKind::Codex,
@@ -861,7 +876,130 @@ impl UsageCollector {
         self.snapshot.codex.month_input_tokens = 0;
         self.snapshot.codex.month_output_tokens = 0;
         self.claude_keys = retain_keys_for_month(&self.claude_keys, window.month_start);
+        // Cached directory listings and failed discovery paths must not outlive
+        // their month indefinitely. Discovery repopulates these lazily.
+        self.dirs = HashMap::new();
+        self.path_retries = HashMap::new();
+        self.queue_retirement();
         self.checkpoint_dirty = true;
+    }
+
+    fn queue_retirement(&mut self) {
+        self.retired_paths = HashSet::new();
+        // Keep the recorded provider: canonicalizing a deleted path cannot
+        // recover it, and cleanup must not follow a new filesystem alias.
+        let mut paths: HashMap<PathBuf, SourceKind> = self
+            .file_checkpoint
+            .keys()
+            .map(|key| {
+                let kind = match key {
+                    FileCheckpointKey::Claude(_) => SourceKind::Claude,
+                    FileCheckpointKey::Codex(_) => SourceKind::Codex,
+                };
+                (
+                    checkpoint_disk_path(&self.claude_dir, &self.codex_home, key),
+                    kind,
+                )
+            })
+            .collect();
+        paths.extend(
+            self.files
+                .iter()
+                .map(|(path, cursor)| (path.clone(), cursor.kind)),
+        );
+        self.retirement = paths.into_iter().collect();
+    }
+
+    fn retire_obsolete_paths(&mut self, window: DayWindow) {
+        if self.retirement.is_empty() {
+            return;
+        }
+        for _ in 0..MAX_RETIRE_PER_TICK {
+            let Some((path, kind)) = self.retirement.pop_front() else {
+                break;
+            };
+            let Some(key) = file_checkpoint_key(&path, &self.claude_dir, &self.codex_home, kind)
+            else {
+                continue;
+            };
+            let progress = self
+                .files
+                .get(&path)
+                .map(|cursor| (cursor.active_month, cursor.offset, cursor.size))
+                .or_else(|| {
+                    self.file_checkpoint.get(&key).map(|cursor| {
+                        (
+                            cursor.active_month.unwrap_or(window.month_start),
+                            cursor.offset,
+                            cursor.size,
+                        )
+                    })
+                });
+            let Some((active_month, offset, size)) = progress else {
+                continue;
+            };
+            // Even a deleted current-month file needs its cursor if it returns:
+            // otherwise Codex events could be counted twice after reappearance.
+            if active_month >= window.month_start {
+                continue;
+            }
+            let obsolete = match fs::symlink_metadata(&path) {
+                Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+                Ok(metadata) => {
+                    self.files_stated = self.files_stated.saturating_add(1);
+                    metadata.is_file()
+                        && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
+                        && metadata.len() == size
+                        && offset == size
+                        && metadata
+                            .modified()
+                            .ok()
+                            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                            .is_some_and(|time| {
+                                window.day(time.as_millis() as u64) < previous_month_start(window)
+                            })
+                }
+            };
+            if obsolete {
+                self.files.remove(&path);
+                self.file_checkpoint.remove(&key);
+                self.path_retries.remove(&path);
+                self.retired_paths.insert(path);
+                self.checkpoint_dirty = true;
+            }
+        }
+        // Sweep queues once, at the end: filtering N queued registrations after
+        // each small batch would make a full retirement pass O(N squared).
+        if self.retirement.is_empty() && !self.retired_paths.is_empty() {
+            let retired = std::mem::take(&mut self.retired_paths);
+            self.pending.retain(|path| !retired.contains(path));
+            self.deferred.retain(|path| !retired.contains(path));
+            let mut index = 0;
+            let mut today = 0;
+            let mut recent = 0;
+            self.registrations.retain(|(path, _)| {
+                let keep = !retired.contains(path);
+                if keep {
+                    today += usize::from(index < self.registration_today_count);
+                    recent += usize::from(index < self.registration_recent_count);
+                }
+                index += 1;
+                keep
+            });
+            self.registration_today_count = today;
+            self.registration_recent_count = recent;
+            for path in &retired {
+                self.registration_paths.remove(path);
+            }
+        }
+        if self.retirement.is_empty() {
+            self.retirement.shrink_to_fit();
+            self.files.shrink_to_fit();
+            self.file_checkpoint.shrink_to_fit();
+            self.path_retries.shrink_to_fit();
+            self.pending.shrink_to_fit();
+            self.deferred.shrink_to_fit();
+        }
     }
 
     /// Clears the durable checkpoint and rescans every JSONL file for the
@@ -880,6 +1018,8 @@ impl UsageCollector {
         self.day_key = window.today;
         self.last_collected_ms = 0;
         self.file_checkpoint.clear();
+        self.retirement.clear();
+        self.retired_paths.clear();
         self.files.clear();
         self.dirs.clear();
         self.claude_keys.clear();
@@ -1189,9 +1329,13 @@ impl UsageCollector {
             return;
         };
         self.files_stated = self.files_stated.saturating_add(1);
-        if require_recent_mtime && window.day(mtime_ms) < previous_month_start(window) {
+        if (require_recent_mtime || self.retired_paths.contains(path))
+            && window.day(mtime_ms) < previous_month_start(window)
+        {
             return;
         }
+        // A retired old session may receive new bytes before the sweep ends.
+        self.retired_paths.remove(path);
         let kind = if path_is_under(path, &self.codex_home) {
             SourceKind::Codex
         } else if path_is_under(path, &self.claude_dir) {
@@ -1245,6 +1389,9 @@ impl UsageCollector {
                 )
             };
             entry.insert(FileCursor {
+                active_month: stored
+                    .and_then(|cursor| cursor.active_month)
+                    .unwrap_or(window.month_start),
                 size,
                 mtime_ms,
                 offset,
@@ -1367,6 +1514,9 @@ impl UsageCollector {
         let mut previous_codex_total = cursor.last_codex_total;
         self.checkpoint_dirty |= cursor.offset != chunk.new_offset || cursor.size != size;
         cursor.offset = chunk.new_offset;
+        if chunk.new_offset != offset || chunk.consumed > 0 {
+            cursor.active_month = window.month_start;
+        }
         cursor.discard_offset = chunk.discard_offset;
         cursor.size = size;
         cursor.mtime_ms = mtime_ms;
@@ -1389,7 +1539,7 @@ impl UsageCollector {
         for (mut event, digest) in chunk.events.into_iter().zip(chunk.dedupe) {
             let (year, month, day_of_month) = window.local_date(event.timestamp_ms);
             let day = ymd_key(year, month, day_of_month);
-            if let Some(digest) = digest {
+            if let Some(digest) = digest.filter(|_| window.contains_month_day(day)) {
                 let key = ClaudeDedupeKey {
                     digest,
                     month: ymd_key(year, month, 1),
@@ -3364,6 +3514,7 @@ mod tests {
             self.file_checkpoint.insert(
                 crate::core::FileCheckpointKey::Codex(logical_id.to_owned()),
                 crate::core::UsageCursor {
+                    active_month: None,
                     file_id: None,
                     kind: crate::core::CursorKind::Codex,
                     logical_id: logical_id.to_owned(),
@@ -3449,6 +3600,263 @@ mod tests {
             root.join("codex"),
             Some(super::FileUsageStore::at(store_root)),
         )
+    }
+
+    #[test]
+    fn deleted_cursors_retire_in_bounded_batches_and_survive_restart_mid_sweep() {
+        let root = std::env::temp_dir().join(format!("rundog-retirement-{}", std::process::id()));
+        let store_root = root.join("store");
+        let mut collector = new_persisted_collector(&root, store_root.clone());
+        let now = unix_now_ms();
+        let window = super::day_window(now);
+        for index in 0..13 {
+            write_codex_session(
+                &root,
+                &format!("{index}.jsonl"),
+                &[token_count_line(&current_stamp(), 100, 0, 10, 100, 0, 10)],
+            );
+        }
+        tick_idle(&mut collector);
+        assert_eq!(collector.files.len(), 13);
+        assert_eq!(collector.file_checkpoint.len(), 13);
+        let snapshot = collector.snapshot;
+        for path in collector.files.keys() {
+            fs::remove_file(path).unwrap();
+        }
+        collector.queue_retirement();
+        while !collector.retirement.is_empty() {
+            collector.retire_obsolete_paths(window);
+        }
+        assert_eq!(
+            collector.files.len(),
+            13,
+            "current-month missing files may return"
+        );
+        assert_eq!(collector.snapshot, snapshot);
+
+        let mut next = window;
+        next.month_start = if window.month_start / 100 % 100 == 12 {
+            window.month_start + 8_900
+        } else {
+            window.month_start + 100
+        };
+        next.today = next.month_start;
+        collector.reset_if_month_changed(next);
+        collector.reset_if_day_changed(next);
+        collector.retire_obsolete_paths(next);
+        assert_eq!(collector.files.len(), 13 - super::MAX_RETIRE_PER_TICK);
+        assert_eq!(collector.file_checkpoint.len(), collector.files.len());
+        collector.persist_checkpoint_if_needed(next);
+        let crate::core::LoadStatus::Loaded(state) = collector.store.as_ref().unwrap().load()
+        else {
+            panic!("durable checkpoint missing");
+        };
+        let mut restarted = new_persisted_collector(&root, store_root);
+        restarted.apply_state(next, state);
+        assert_eq!(
+            restarted.file_checkpoint.len(),
+            13 - super::MAX_RETIRE_PER_TICK
+        );
+        while !restarted.retirement.is_empty() {
+            restarted.retire_obsolete_paths(next);
+        }
+        restarted.persist_checkpoint_if_needed(next);
+        let crate::core::LoadStatus::Loaded(state) = restarted.store.as_ref().unwrap().load()
+        else {
+            panic!("durable checkpoint missing");
+        };
+        assert!(state.cursors.is_empty());
+        assert!(restarted.files.is_empty() && restarted.pending.is_empty());
+        assert_eq!(restarted.snapshot.codex.month_input_tokens, 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_checkpoint_keeps_current_month_offsets_when_missing_file_returns() {
+        let root =
+            std::env::temp_dir().join(format!("rundog-retirement-return-{}", std::process::id()));
+        let path = write_codex_session(
+            &root,
+            "session.jsonl",
+            &[token_count_line(&current_stamp(), 100, 0, 10, 100, 0, 10)],
+        );
+        let mut collector = new_claude_collector(&root);
+        tick_idle(&mut collector);
+        let window = super::day_window(unix_now_ms());
+        let mut state = collector.build_state(window);
+        state.cursors[0].active_month = None;
+        let parked = path.with_extension("parked");
+        fs::rename(&path, &parked).unwrap();
+        let mut restored = new_claude_collector(&root);
+        restored.apply_state(window, state);
+        restored.retire_obsolete_paths(window);
+        assert_eq!(restored.file_checkpoint.len(), 1);
+        fs::rename(&parked, &path).unwrap();
+        use std::io::Write;
+        writeln!(
+            fs::OpenOptions::new().append(true).open(&path).unwrap(),
+            "{}",
+            token_count_line(&current_stamp(), 50, 0, 5, 150, 0, 15)
+        )
+        .unwrap();
+        tick_idle(&mut restored);
+        assert_eq!(restored.snapshot.codex.month_input_tokens, 150);
+        assert_eq!(restored.snapshot.codex.month_output_tokens, 15);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn retired_cold_codex_session_rebuilds_baseline_when_resumed() {
+        use std::{
+            io::Write,
+            time::{Duration, UNIX_EPOCH},
+        };
+        let root =
+            std::env::temp_dir().join(format!("rundog-retirement-resume-{}", std::process::id()));
+        let window = super::day_window(unix_now_ms());
+        let path = write_codex_session(
+            &root,
+            "old.jsonl",
+            &[token_count_line(
+                "2001-01-02T12:00:00Z",
+                100,
+                0,
+                10,
+                100,
+                0,
+                10,
+            )],
+        );
+        let mut collector = new_claude_collector(&root);
+        tick_idle(&mut collector);
+        collector.files.get_mut(&path).unwrap().active_month = 20_010_101;
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(
+                fs::FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(1_000_000_000)),
+            )
+            .unwrap();
+        collector.queue_retirement();
+        collector.retire_obsolete_paths(window);
+        assert!(collector.files.is_empty());
+        assert!(collector.build_state(window).cursors.is_empty());
+        writeln!(
+            fs::OpenOptions::new().append(true).open(&path).unwrap(),
+            "{}",
+            token_count_line(&current_stamp(), 50, 0, 5, 150, 0, 15)
+        )
+        .unwrap();
+        collector.register_jsonl_file(&path, window, true, unix_now_ms());
+        collector.scan_file(&path, window, unix_now_ms());
+        assert_eq!(collector.snapshot.codex.month_input_tokens, 50);
+        assert_eq!(collector.snapshot.codex.month_output_tokens, 5);
+        assert_eq!(collector.test_codex_total(&path), Some((150, 0, 15)));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn retirement_keeps_unread_recent_and_nonregular_paths() {
+        use std::time::{Duration, UNIX_EPOCH};
+        let root =
+            std::env::temp_dir().join(format!("rundog-retirement-keep-{}", std::process::id()));
+        let unread = write_codex_session(&root, "unread.jsonl", &[]);
+        let recent = write_codex_session(&root, "recent.jsonl", &[]);
+        let nonregular = write_codex_session(&root, "directory.jsonl", &[]);
+        let mut collector = new_claude_collector(&root);
+        tick_idle(&mut collector);
+        for cursor in collector.files.values_mut() {
+            cursor.active_month = 20_010_101;
+        }
+        collector.files.get_mut(&unread).unwrap().offset = 0;
+        fs::File::options()
+            .write(true)
+            .open(&unread)
+            .unwrap()
+            .set_times(
+                fs::FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(1_000_000_000)),
+            )
+            .unwrap();
+        fs::remove_file(&nonregular).unwrap();
+        fs::create_dir(&nonregular).unwrap();
+        collector.queue_retirement();
+        collector.retire_obsolete_paths(super::day_window(unix_now_ms()));
+        assert!(collector.files.contains_key(&unread));
+        assert!(collector.files.contains_key(&recent));
+        assert!(collector.files.contains_key(&nonregular));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn retirement_does_not_reregister_cold_paths_but_allows_live_resume_mid_sweep() {
+        use std::{
+            io::Write,
+            time::{Duration, UNIX_EPOCH},
+        };
+        let root =
+            std::env::temp_dir().join(format!("rundog-retirement-mid-{}", std::process::id()));
+        let paths: Vec<_> = (0..9)
+            .map(|index| write_codex_session(&root, &format!("{index}.jsonl"), &[]))
+            .collect();
+        let mut collector = new_claude_collector(&root);
+        tick_idle(&mut collector);
+        for path in &paths {
+            collector.files.get_mut(path).unwrap().active_month = 20_010_101;
+            fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_times(
+                    fs::FileTimes::new()
+                        .set_modified(UNIX_EPOCH + Duration::from_secs(1_000_000_000)),
+                )
+                .unwrap();
+        }
+        let window = super::day_window(unix_now_ms());
+        collector.queue_retirement();
+        collector.retire_obsolete_paths(window);
+        assert_eq!(collector.retired_paths.len(), super::MAX_RETIRE_PER_TICK);
+        let path = collector.retired_paths.iter().next().unwrap().clone();
+        collector.register_jsonl_file(&path, window, false, unix_now_ms());
+        assert!(!collector.files.contains_key(&path));
+        writeln!(
+            fs::OpenOptions::new().append(true).open(&path).unwrap(),
+            "{}",
+            token_count_line(&current_stamp(), 50, 0, 5, 50, 0, 5)
+        )
+        .unwrap();
+        collector.register_jsonl_file(&path, window, false, unix_now_ms());
+        collector.scan_file(&path, window, unix_now_ms());
+        while !collector.retirement.is_empty() {
+            collector.retire_obsolete_paths(window);
+        }
+        assert_eq!(collector.files.len(), 1);
+        assert!(collector.files.contains_key(&path));
+        assert!(collector.retired_paths.is_empty());
+        assert_eq!(collector.snapshot.codex.month_input_tokens, 50);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn historical_claude_rows_do_not_repopulate_expired_dedupe_keys() {
+        let root =
+            std::env::temp_dir().join(format!("rundog-retirement-keys-{}", std::process::id()));
+        let path = claude_session(&root);
+        fs::write(
+            &path,
+            format!(
+                "{}\n{}\n",
+                claude_usage_line("old", "2001-01-02T12:00:00Z"),
+                claude_usage_line("new", &current_stamp())
+            ),
+        )
+        .unwrap();
+        let mut collector = new_claude_collector(&root);
+        tick_idle(&mut collector);
+        assert_eq!(collector.claude_keys.len(), 1);
+        assert_eq!(collector.snapshot.claude.month_input_tokens, 1_000_000);
+        fs::remove_dir_all(root).unwrap();
     }
 
     const TURN_CONTEXT: &str = r#"{"type":"turn_context","payload":{"model":"gpt-5.4"}}"#;
@@ -4456,6 +4864,7 @@ mod tests {
             collector.file_checkpoint.insert(
                 crate::core::FileCheckpointKey::Claude(logical_id.clone()),
                 crate::core::UsageCursor {
+                    active_month: None,
                     kind: crate::core::CursorKind::Claude,
                     logical_id,
                     offset: 0,

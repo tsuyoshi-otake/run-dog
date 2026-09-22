@@ -42,6 +42,21 @@ JSONL cursors commit only on a complete newline. Failed persist is not
 reported durable. Month rollover must not replay history. Formal model:
 `formal/RunDogUsageIngest.tla`. TLC PASS is not a Rust proof.
 
+`UsageCollector` owns cursor retirement. Restore and month rollover enqueue a
+single pass; each tick inspects at most four paths using metadata only. A cursor
+active this month is preserved even while its file is missing. Older cursors may
+be retired when their file is missing, or when it is fully consumed and its mtime
+predates the previous month. Unread files, recent files, reparse points and
+metadata errors other than NotFound are preserved. No provider file is deleted.
+Queues are filtered once per pass, so retirement bookkeeping is O(N).
+
+The optional `active_month` named record in schema 3 persists the last month in
+which bytes were consumed; legacy cursors inherit the checkpoint aggregate month.
+This protects offsets across restart and allows an interrupted retirement pass
+to continue. A resumed retired session is parsed again to rebuild its Codex
+cumulative baseline; only events in the requested month contribute to that month.
+Claude deduplication keys are retained only for the requested month.
+
 ## Updates
 
 Public GitHub Releases only. SHA-256 sidecar is required before Inno

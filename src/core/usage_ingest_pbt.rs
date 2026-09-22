@@ -40,10 +40,12 @@ fn arb_cursor() -> impl Strategy<Value = UsageCursor> {
         0_u64..64,
         0_u64..64,
         proptest::option::of(0_u64..1000),
+        proptest::option::of(1_u32..13),
     )
-        .prop_map(|(codex, logical_id, offset, extra, prefix)| {
+        .prop_map(|(codex, logical_id, offset, extra, prefix, month)| {
             let size = offset.saturating_add(extra);
             UsageCursor {
+                active_month: month.map(|month| 20_260_001 + month * 100),
                 kind: if codex {
                     CursorKind::Codex
                 } else {
@@ -522,6 +524,7 @@ fn state_at(offset: u64) -> UsageState {
             snapshot: UsageSnapshot::default(),
         },
         cursors: vec![UsageCursor {
+            active_month: None,
             kind: CursorKind::Claude,
             logical_id: "p/a.jsonl".to_owned(),
             offset,

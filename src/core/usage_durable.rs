@@ -162,6 +162,7 @@ mod tests {
                 snapshot: UsageSnapshot::default(),
             },
             cursors: vec![UsageCursor {
+                active_month: None,
                 kind: CursorKind::Claude,
                 logical_id: "p/a.jsonl".to_owned(),
                 offset,

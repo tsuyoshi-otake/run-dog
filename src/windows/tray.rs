@@ -714,7 +714,7 @@ impl TrayAdapter {
 
 fn append_submenu(parent: HMENU, submenu: HMENU, label: &str) {
     let label = wide(label);
-    let _ = unsafe {
+    let attached = unsafe {
         AppendMenuW(
             parent,
             MF_POPUP | MF_STRING,
@@ -722,6 +722,10 @@ fn append_submenu(parent: HMENU, submenu: HMENU, label: &str) {
             label.as_ptr(),
         )
     };
+    if attached == 0 {
+        // An unattached submenu is not owned by the root's DestroyMenu call.
+        let _ = unsafe { DestroyMenu(submenu) };
+    }
 }
 
 fn append_checked(menu: HMENU, command: u32, label: &str, checked: bool) {
@@ -814,6 +818,34 @@ fn wide(value: &str) -> Vec<u16> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn failed_submenu_attachment_destroys_unowned_menu() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{CreatePopupMenu, IsMenu};
+        for _ in 0..64 {
+            let child = unsafe { CreatePopupMenu() };
+            assert!(!child.is_null());
+            super::append_submenu(std::ptr::null_mut(), child, "test");
+            assert_eq!(unsafe { IsMenu(child) }, 0);
+        }
+    }
+
+    #[test]
+    fn successful_submenu_attachment_transfers_ownership_to_parent() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            CreatePopupMenu, DestroyMenu, GetSubMenu, IsMenu,
+        };
+        let parent = unsafe { CreatePopupMenu() };
+        let child = unsafe { CreatePopupMenu() };
+        assert!(!parent.is_null() && !child.is_null());
+        super::append_submenu(parent, child, "test");
+        let attached = unsafe { GetSubMenu(parent, 0) };
+        let alive = unsafe { IsMenu(child) };
+        unsafe { DestroyMenu(parent) };
+        assert_eq!(attached, child);
+        assert_ne!(alive, 0);
+        assert_eq!(unsafe { IsMenu(child) }, 0);
+    }
+
     use super::{
         event_for_command, update_balloon_text, TrayAdapter, UpdateMenuState, COMMAND_ABOUT,
         COMMAND_CHECK_FOR_UPDATES, COMMAND_DISPLAY_CLAUDE_5H, COMMAND_DISPLAY_CODEX_WEEK,

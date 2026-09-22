@@ -307,7 +307,14 @@ fn apply_rounded_chrome(hwnd: HWND, width: i32, height: i32, dpi: i32) {
     let radius = px(12, dpi);
     let region = unsafe { CreateRoundRectRgn(0, 0, width + 1, height + 1, radius * 2, radius * 2) };
     if !region.is_null() {
-        let _ = unsafe { SetWindowRgn(hwnd, region, 1) };
+        set_owned_window_region(hwnd, region);
+    }
+}
+
+fn set_owned_window_region(hwnd: HWND, region: windows_sys::Win32::Graphics::Gdi::HRGN) {
+    // Ownership transfers to Windows only on success.
+    if unsafe { SetWindowRgn(hwnd, region, 1) } == 0 {
+        let _ = unsafe { DeleteObject(region) };
     }
 }
 
@@ -1904,6 +1911,81 @@ fn wide(value: &str) -> Vec<u16> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn failed_window_region_transfer_releases_the_region() {
+        // GDI caches deleted region handles, so GetObjectType is not a lifetime
+        // oracle. Use process resource counts in an isolated test process.
+        if std::env::var_os("RUN_DOG_REGION_TEST_CHILD").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "windows::flyout::tests::failed_window_region_transfer_releases_the_region",
+                    "--nocapture",
+                ])
+                .env("RUN_DOG_REGION_TEST_CHILD", "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        use windows_sys::Win32::{
+            Graphics::Gdi::{CreateRoundRectRgn, DeleteObject},
+            System::Threading::{GetCurrentProcess, GetGuiResources},
+        };
+        let warmup = unsafe { CreateRoundRectRgn(0, 0, 20, 20, 4, 4) };
+        assert!(!warmup.is_null());
+        assert_ne!(unsafe { DeleteObject(warmup) }, 0);
+        let process = unsafe { GetCurrentProcess() };
+        let before = unsafe { GetGuiResources(process, 0) };
+        for _ in 0..64 {
+            let region = unsafe { CreateRoundRectRgn(0, 0, 20, 20, 4, 4) };
+            assert!(!region.is_null());
+            super::set_owned_window_region(std::ptr::null_mut(), region);
+        }
+        assert_eq!(unsafe { GetGuiResources(process, 0) }, before);
+    }
+
+    #[test]
+    fn successful_window_region_transfer_preserves_window_shape() {
+        use windows_sys::Win32::{
+            Graphics::Gdi::{CreateRectRgn, CreateRoundRectRgn, DeleteObject, GetWindowRgn},
+            UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, WS_POPUP},
+        };
+        let class: Vec<u16> = "STATIC\0".encode_utf16().collect();
+        let hwnd = unsafe {
+            CreateWindowExW(
+                0,
+                class.as_ptr(),
+                std::ptr::null(),
+                WS_POPUP,
+                0,
+                0,
+                20,
+                20,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+            )
+        };
+        assert!(!hwnd.is_null());
+        let region = unsafe { CreateRoundRectRgn(0, 0, 20, 20, 4, 4) };
+        assert!(!region.is_null());
+        super::set_owned_window_region(hwnd, region);
+        let copy = unsafe { CreateRectRgn(0, 0, 0, 0) };
+        let shape = unsafe { GetWindowRgn(hwnd, copy) };
+        unsafe {
+            DeleteObject(copy);
+            DestroyWindow(hwnd);
+        }
+        assert_ne!(shape, 0, "the window must retain the transferred region");
+    }
+
     use super::{
         directory_bytes, extra_usage_block_units, format_bytes, format_gpu_capacity,
         format_limit_metric_label, format_month_usage, format_percent, format_provider_disk,
