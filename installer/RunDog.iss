@@ -2,7 +2,7 @@
 ; The release workflow invokes ISCC with /DAppVersion=X.Y.Z.
 
 #ifndef AppVersion
-  #define AppVersion "1.1.33"
+  #define AppVersion "1.1.34"
 #endif
 
 #ifndef UpdateRepository
