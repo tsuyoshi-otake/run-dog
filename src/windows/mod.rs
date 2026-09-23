@@ -72,13 +72,21 @@ use self::{
     },
     update::{UpdateController, UpdateMenuState},
     usage::{
-        UsageCollector, UsageTick, USAGE_CONTINUE_INTERVAL_MS, USAGE_FIRST_INTERVAL_MS,
-        USAGE_IDLE_INTERVAL_MS, USAGE_TIMER_ID,
+        UsageCollector, UsageTick, USAGE_CATCH_UP_INTERVAL_MS, USAGE_CONTINUE_INTERVAL_MS,
+        USAGE_FIRST_INTERVAL_MS, USAGE_IDLE_INTERVAL_MS, USAGE_TIMER_ID,
     },
 };
 
 const WINDOW_CLASS_NAME: &str = "SystemExe.RunDog.MessageWindow";
 const MUTEX_NAME: &str = "Local\\SystemExe.RunDog";
+
+fn usage_timer_interval(tick: UsageTick, catch_up: bool) -> u32 {
+    match (tick, catch_up) {
+        (UsageTick::MoreWork, true) => USAGE_CATCH_UP_INTERVAL_MS,
+        (UsageTick::MoreWork, false) => USAGE_CONTINUE_INTERVAL_MS,
+        (UsageTick::Idle, _) => USAGE_IDLE_INTERVAL_MS,
+    }
+}
 const TASKBAR_CREATED_MESSAGE: &str = "TaskbarCreated";
 const TIMER_CPU: usize = 1;
 const TIMER_ANIMATION: usize = 2;
@@ -251,13 +259,10 @@ impl WindowContext {
         if self.usage.take_month_rescan_finished() {
             self.platform.tray.notify_month_rescan_finished();
         }
-        let interval = match more {
-            UsageTick::MoreWork => USAGE_CONTINUE_INTERVAL_MS,
-            UsageTick::Idle => {
-                self::process::trim_working_set();
-                USAGE_IDLE_INTERVAL_MS
-            }
-        };
+        let interval = usage_timer_interval(more, self.usage.snapshot().month_scan_in_progress);
+        if more == UsageTick::Idle {
+            self::process::trim_working_set();
+        }
         self.arm_usage_timer(interval);
     }
 
@@ -618,7 +623,15 @@ fn last_error(operation: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::create_process_command_line;
+    use super::{create_process_command_line, usage_timer_interval, UsageTick};
+
+    #[test]
+    fn catch_up_advances_local_backlog_without_accelerating_idle_polling() {
+        assert_eq!(usage_timer_interval(UsageTick::MoreWork, true), 50);
+        assert_eq!(usage_timer_interval(UsageTick::MoreWork, false), 60_000);
+        assert_eq!(usage_timer_interval(UsageTick::Idle, true), 60_000);
+        assert_eq!(usage_timer_interval(UsageTick::Idle, false), 60_000);
+    }
 
     #[test]
     fn c2_create_process_command_line_quotes_the_image_and_rejects_injection() {
