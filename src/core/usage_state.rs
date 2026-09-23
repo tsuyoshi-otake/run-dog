@@ -13,7 +13,7 @@ use super::{
 
 const USAGE_STATE_HEADER_V1: &str = "rundog-usage-state-1";
 pub const USAGE_STATE_HEADER: &str = "rundog-usage-state-2";
-// Version 6 rebuilds checkpoints whose cache marker could survive a manual rescan.
+// Version 6 invalidates v1.1.38 cache markers without losing scan progress.
 pub const USAGE_STATE_SCHEMA_VERSION: u32 = 6;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
