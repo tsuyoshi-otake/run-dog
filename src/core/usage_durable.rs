@@ -159,6 +159,7 @@ mod tests {
                 today: 20_260_905,
                 last_collected_ms: 1,
                 catch_up_done: false,
+                codex_cache_reconciled_month: None,
                 snapshot: UsageSnapshot::default(),
             },
             cursors: vec![UsageCursor {

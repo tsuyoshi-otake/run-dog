@@ -64,6 +64,7 @@ use crate::core::{
 #[cfg(test)]
 use crate::core::UsageCheckpoint;
 
+use super::otak_snapshot::{read_codex_snapshot, CodexSnapshot};
 use super::usage_store::FileUsageStore;
 
 pub const USAGE_TIMER_ID: usize = 4;
@@ -232,6 +233,8 @@ pub struct UsageCollector {
     cursor_reset_count: u64,
     cancelled: bool,
     checkpoint_dirty: bool,
+    codex_cache_reconciled_month: Option<u32>,
+    last_codex_cache_attempt_ms: u64,
     last_checkpoint_attempt_ms: u64,
     persist_checkpoint: bool,
     month_rescan_notify: bool,
@@ -354,6 +357,8 @@ impl UsageCollector {
             cursor_reset_count: 0,
             cancelled: false,
             checkpoint_dirty: false,
+            codex_cache_reconciled_month: None,
+            last_codex_cache_attempt_ms: 0,
             last_checkpoint_attempt_ms: 0,
             persist_checkpoint,
             month_rescan_notify: false,
@@ -547,6 +552,21 @@ impl UsageCollector {
             self.finish_catch_up(window);
         }
 
+        // otak-usage can retain this month's usage from logs deleted before
+        // RunDog was installed. Import that history only after local catch-up,
+        // while keeping RunDog's own cursors for subsequent appends.
+        if !self.catch_up
+            && self.pending.is_empty()
+            && self.discover.is_empty()
+            && self.registrations.is_empty()
+            && self.codex_cache_reconciled_month != Some(window.month_start)
+            && (self.last_codex_cache_attempt_ms == 0
+                || now_ms.saturating_sub(self.last_codex_cache_attempt_ms) >= 60_000)
+        {
+            self.last_codex_cache_attempt_ms = now_ms;
+            self.try_reconcile_codex_cache(window);
+        }
+
         let tick = if self.discover.is_empty()
             && self.registrations.is_empty()
             && !unread_remaining
@@ -728,6 +748,7 @@ impl UsageCollector {
             return;
         }
         self.snapshot = state.aggregate.snapshot;
+        self.codex_cache_reconciled_month = state.aggregate.codex_cache_reconciled_month;
         self.snapshot.month_scan_in_progress = !state.aggregate.catch_up_done;
         if state.aggregate.month_start != window.month_start {
             self.snapshot.claude.clear_month_cost();
@@ -813,6 +834,7 @@ impl UsageCollector {
                 today: window.today,
                 last_collected_ms: self.last_collected_ms,
                 catch_up_done: !self.catch_up,
+                codex_cache_reconciled_month: self.codex_cache_reconciled_month,
                 snapshot: UsageSnapshot {
                     claude: self.snapshot.claude,
                     codex: self.snapshot.codex,
@@ -892,6 +914,7 @@ impl UsageCollector {
             return;
         }
         self.month_key = window.month_start;
+        self.codex_cache_reconciled_month = None;
         self.snapshot.claude.clear_today_cost();
         self.snapshot.claude.clear_month_cost();
         self.snapshot.claude.month_input_tokens = 0;
@@ -1045,11 +1068,15 @@ impl UsageCollector {
             self.month_key = window.month_start;
         }
         self.month_rescan_notify = true;
+        self.codex_cache_reconciled_month = Some(window.month_start);
         self.record_diag(DiagnosticKind::RescanReason, RescanReason::User as u64, 0);
         self.begin_month_rescan(window, unix_now_ms());
     }
 
     fn begin_month_rescan(&mut self, window: DayWindow, now_ms: u64) {
+        if !self.month_rescan_notify {
+            self.codex_cache_reconciled_month = None;
+        }
         self.day_key = window.today;
         self.last_collected_ms = 0;
         self.file_checkpoint.clear();
@@ -1846,6 +1873,53 @@ impl UsageCollector {
         self.checkpoint_dirty = true;
         self.pending.extend(self.deferred.drain(..));
         self.persist_checkpoint_if_needed(window);
+    }
+
+    fn try_reconcile_codex_cache(&mut self, window: DayWindow) {
+        if !self.store_is_production() {
+            return;
+        }
+        let Some(appdata) = std::env::var_os("APPDATA") else {
+            return;
+        };
+        let storage_dir = PathBuf::from(appdata)
+            .join("Code")
+            .join("User")
+            .join("globalStorage")
+            .join("odangoo.otak-usage");
+        let Some(source) = read_codex_snapshot(
+            &storage_dir,
+            &self.claude_dir,
+            &self.codex_home,
+            window.month_start,
+            window.today,
+        ) else {
+            return;
+        };
+        if self.reconcile_codex_snapshot(window, source) {
+            self.persist_checkpoint_if_needed(window);
+        }
+    }
+
+    fn reconcile_codex_snapshot(&mut self, window: DayWindow, source: CodexSnapshot) -> bool {
+        if self.catch_up
+            || self.codex_cache_reconciled_month == Some(window.month_start)
+            || source.month_cost_nanos < self.snapshot.codex.month_cost_nanos
+        {
+            return false;
+        }
+        let codex = &mut self.snapshot.codex;
+        codex.add_month_nanos(source.month_cost_nanos - codex.month_cost_nanos);
+        codex.add_today_nanos(
+            source
+                .today_cost_nanos
+                .saturating_sub(codex.today_cost_nanos),
+        );
+        codex.month_input_tokens = codex.month_input_tokens.max(source.month_input_tokens);
+        codex.month_output_tokens = codex.month_output_tokens.max(source.month_output_tokens);
+        self.codex_cache_reconciled_month = Some(window.month_start);
+        self.checkpoint_dirty = true;
+        true
     }
 
     fn release_scratch(&mut self) {
@@ -3489,11 +3563,11 @@ fn path_size_mtime(path: &Path) -> Option<(u64, u64)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_current_month, is_safe_header_value, is_subscription_limits, parse_claude_line,
-        parse_claude_usage_response, parse_codex_limits_line, parse_codex_model,
+        day_window, is_current_month, is_safe_header_value, is_subscription_limits,
+        parse_claude_line, parse_claude_usage_response, parse_codex_limits_line, parse_codex_model,
         parse_codex_usage_line, parse_timestamp, parse_wham_usage_response,
         persist_claude_credentials, read_claude_credentials, read_regular_file, unix_now_ms,
-        UsageCollector, UsageTick,
+        CodexSnapshot, UsageCollector, UsageTick,
     };
     use crate::core::{local_hms, local_ymd, CursorRebuildReason};
     use std::{
@@ -3501,6 +3575,43 @@ mod tests {
         path::{Path, PathBuf},
         ptr,
     };
+
+    #[test]
+    fn component_codex_cache_reconciliation_replaces_overlap_once_and_survives_restore() {
+        let root = std::env::temp_dir().join("run-dog-codex-cache-reconcile-test");
+        let mut collector =
+            UsageCollector::with_dirs(root.join("claude"), root.join("codex"), false);
+        let window = day_window(unix_now_ms());
+        collector.catch_up = false;
+        collector.snapshot.codex.add_month_nanos(2_870_620_000_000);
+        collector.snapshot.codex.add_today_nanos(42_760_000_000);
+        let source = CodexSnapshot {
+            month_cost_nanos: 8_206_370_000_000,
+            today_cost_nanos: 49_480_000_000,
+            month_input_tokens: 4_000_000_000,
+            month_output_tokens: 20_000_000,
+        };
+        assert!(collector.reconcile_codex_snapshot(window, source));
+        assert_eq!(
+            collector.snapshot.codex.month_cost_nanos,
+            source.month_cost_nanos
+        );
+        assert_eq!(
+            collector.snapshot.codex.today_cost_nanos,
+            source.today_cost_nanos
+        );
+        assert!(!collector.reconcile_codex_snapshot(window, source));
+        let restored = crate::core::UsageState::decode(&collector.build_state(window).encode())
+            .expect("durable reconciliation marker");
+        assert_eq!(
+            restored.aggregate.codex_cache_reconciled_month,
+            Some(window.month_start)
+        );
+        assert_eq!(
+            restored.aggregate.snapshot.codex.month_cost_nanos,
+            source.month_cost_nanos
+        );
+    }
 
     impl UsageCollector {
         fn test_file_offset(&self, path: &Path) -> Option<u64> {
