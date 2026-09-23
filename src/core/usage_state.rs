@@ -13,8 +13,8 @@ use super::{
 
 const USAGE_STATE_HEADER_V1: &str = "rundog-usage-state-1";
 pub const USAGE_STATE_HEADER: &str = "rundog-usage-state-2";
-// Version 5 retains per-file bounded dedupe windows and Claude supersede state.
-pub const USAGE_STATE_SCHEMA_VERSION: u32 = 5;
+// Version 6 rebuilds checkpoints whose cache marker could survive a manual rescan.
+pub const USAGE_STATE_SCHEMA_VERSION: u32 = 6;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum CursorKind {
@@ -60,8 +60,8 @@ pub struct UsageAggregate {
     pub today: u32,
     pub last_collected_ms: u64,
     pub catch_up_done: bool,
-    /// Current month reconciled with an existing otak-usage cache, or explicitly
-    /// rebuilt by the user. Prevents applying the same historical offset twice.
+    /// Current month reconciled with an existing otak-usage cache. Cleared when
+    /// the aggregate is rebuilt, so historical usage can be reconciled again.
     pub codex_cache_reconciled_month: Option<u32>,
     pub snapshot: UsageSnapshot,
 }
