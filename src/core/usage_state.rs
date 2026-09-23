@@ -60,8 +60,9 @@ pub struct UsageAggregate {
     pub today: u32,
     pub last_collected_ms: u64,
     pub catch_up_done: bool,
-    /// Current month reconciled with an existing otak-usage cache. Cleared when
-    /// the aggregate is rebuilt, so historical usage can be reconciled again.
+    /// Legacy marker: older releases added otak-usage history into the local
+    /// aggregate. A marked aggregate must be rebuilt before using a separate
+    /// cache display floor. New states always write None.
     pub codex_cache_reconciled_month: Option<u32>,
     pub snapshot: UsageSnapshot,
 }
