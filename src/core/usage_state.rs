@@ -60,6 +60,9 @@ pub struct UsageAggregate {
     pub today: u32,
     pub last_collected_ms: u64,
     pub catch_up_done: bool,
+    /// Current month reconciled with an existing otak-usage cache, or explicitly
+    /// rebuilt by the user. Prevents applying the same historical offset twice.
+    pub codex_cache_reconciled_month: Option<u32>,
     pub snapshot: UsageSnapshot,
 }
 
@@ -107,6 +110,7 @@ impl UsageState {
                 today: checkpoint.today,
                 last_collected_ms: checkpoint.last_collected_ms,
                 catch_up_done: checkpoint.catch_up_done,
+                codex_cache_reconciled_month: None,
                 snapshot: UsageSnapshot {
                     claude: checkpoint.snapshot.claude,
                     codex: checkpoint.snapshot.codex,
@@ -130,6 +134,7 @@ impl UsageState {
                 "day={day}\n",
                 "last_ms={last_ms}\n",
                 "catch_up_done={catch_up}\n",
+                "codex_cache_reconciled_month={codex_cache_reconciled_month}\n",
                 "claude_today={claude_today}\n",
                 "claude_month={claude_month}\n",
                 "claude_today_nanos={claude_today_nanos}\n",
@@ -150,6 +155,7 @@ impl UsageState {
             day = self.aggregate.today,
             last_ms = self.aggregate.last_collected_ms,
             catch_up = u32::from(self.aggregate.catch_up_done),
+            codex_cache_reconciled_month = self.aggregate.codex_cache_reconciled_month.unwrap_or(0),
             claude_today = self.aggregate.snapshot.claude.today_cents,
             claude_month = self.aggregate.snapshot.claude.month_cents,
             claude_today_nanos = persisted_nanos(
@@ -264,6 +270,7 @@ impl UsageState {
         let mut today = None;
         let mut last_collected_ms = None;
         let mut catch_up_done = None;
+        let mut codex_cache_reconciled_month = None;
         let mut claude_today = 0_u32;
         let mut claude_month = 0_u32;
         let mut claude_today_nanos = None;
@@ -300,6 +307,12 @@ impl UsageState {
                 last_collected_ms = Some(value.parse().ok()?);
             } else if let Some(value) = line.strip_prefix("catch_up_done=") {
                 catch_up_done = Some(value.parse::<u32>().ok()? != 0);
+            } else if let Some(value) = line.strip_prefix("codex_cache_reconciled_month=") {
+                let month = value.parse::<u32>().ok()?;
+                if month != 0 && (month % 100 != 1 || !(1..=12).contains(&(month / 100 % 100))) {
+                    return None;
+                }
+                codex_cache_reconciled_month = (month != 0).then_some(month);
             } else if let Some(value) = line.strip_prefix("claude_today=") {
                 claude_today = value.parse().ok()?;
             } else if let Some(value) = line.strip_prefix("claude_month=") {
@@ -458,6 +471,7 @@ impl UsageState {
                 today: today?,
                 last_collected_ms: last_collected_ms?,
                 catch_up_done: catch_up_done?,
+                codex_cache_reconciled_month,
                 snapshot: UsageSnapshot {
                     claude: restore_provider(
                         claude_today,
@@ -698,6 +712,7 @@ mod tests {
                 today: 20_260_905,
                 last_collected_ms: 10,
                 catch_up_done,
+                codex_cache_reconciled_month: None,
                 snapshot: UsageSnapshot {
                     claude: ProviderUsage {
                         today_cents: 3,
@@ -753,6 +768,33 @@ mod tests {
             claude_pending: Vec::new(),
         });
         state
+    }
+
+    #[test]
+    fn codex_cache_reconciliation_marker_round_trips_and_old_states_default_to_none() {
+        let mut state = sample_codex_state();
+        let old_payload = state
+            .encode()
+            .replace("codex_cache_reconciled_month=0\n", "");
+        assert_eq!(
+            UsageState::decode(&old_payload)
+                .expect("pre-reconciliation state")
+                .aggregate
+                .codex_cache_reconciled_month,
+            None
+        );
+
+        state.aggregate.codex_cache_reconciled_month = Some(20_260_901);
+        let restored = UsageState::decode(&state.encode()).expect("reconciled state");
+        assert_eq!(
+            restored.aggregate.codex_cache_reconciled_month,
+            Some(20_260_901)
+        );
+        assert_eq!(
+            restored.aggregate.snapshot.codex,
+            state.aggregate.snapshot.codex
+        );
+        assert_eq!(restored.cursors, state.cursors);
     }
 
     #[test]
