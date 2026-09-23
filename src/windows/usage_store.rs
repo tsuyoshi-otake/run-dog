@@ -303,7 +303,6 @@ mod tests {
                 snapshot: UsageSnapshot::default(),
             },
             cursors: Vec::new(),
-            claude_keys: std::collections::HashSet::new(),
         }
     }
 
