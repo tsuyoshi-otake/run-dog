@@ -351,7 +351,9 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let storage = std::env::temp_dir().join(format!(
+        let temporary_root = PathBuf::from(std::env::var_os("USERPROFILE").unwrap()).join("tmp");
+        std::fs::create_dir_all(&temporary_root).unwrap();
+        let storage = temporary_root.join(format!(
             "run-dog-otak-snapshot-{}-{unique}",
             std::process::id()
         ));
