@@ -233,7 +233,7 @@ pub struct UsageCollector {
     cursor_reset_count: u64,
     cancelled: bool,
     checkpoint_dirty: bool,
-    codex_cache_reconciled_month: Option<u32>,
+    codex_cache_floor: Option<CodexSnapshot>,
     last_codex_cache_attempt_ms: u64,
     last_checkpoint_attempt_ms: u64,
     persist_checkpoint: bool,
@@ -357,7 +357,7 @@ impl UsageCollector {
             cursor_reset_count: 0,
             cancelled: false,
             checkpoint_dirty: false,
-            codex_cache_reconciled_month: None,
+            codex_cache_floor: None,
             last_codex_cache_attempt_ms: 0,
             last_checkpoint_attempt_ms: 0,
             persist_checkpoint,
@@ -410,10 +410,31 @@ impl UsageCollector {
 
     #[must_use]
     pub fn snapshot(&self) -> UsageSnapshot {
-        UsageSnapshot {
+        let mut snapshot = UsageSnapshot {
             month_scan_in_progress: self.catch_up,
             ..self.snapshot
+        };
+        if let Some(cache) = self.codex_cache_floor {
+            snapshot.codex.add_month_nanos(
+                cache
+                    .month_cost_nanos
+                    .saturating_sub(snapshot.codex.month_cost_nanos),
+            );
+            snapshot.codex.add_today_nanos(
+                cache
+                    .today_cost_nanos
+                    .saturating_sub(snapshot.codex.today_cost_nanos),
+            );
+            snapshot.codex.month_input_tokens = snapshot
+                .codex
+                .month_input_tokens
+                .max(cache.month_input_tokens);
+            snapshot.codex.month_output_tokens = snapshot
+                .codex
+                .month_output_tokens
+                .max(cache.month_output_tokens);
         }
+        snapshot
     }
 
     #[must_use]
@@ -552,16 +573,11 @@ impl UsageCollector {
             self.finish_catch_up(window);
         }
 
-        // otak-usage can retain this month's usage from logs deleted before
-        // RunDog was installed. Import that history only after local catch-up,
-        // while keeping RunDog's own cursors for subsequent appends.
-        if !self.catch_up
-            && self.pending.is_empty()
-            && self.discover.is_empty()
-            && self.registrations.is_empty()
-            && self.codex_cache_reconciled_month != Some(window.month_start)
-            && (self.last_codex_cache_attempt_ms == 0
-                || now_ms.saturating_sub(self.last_codex_cache_attempt_ms) >= 60_000)
+        // Keep the extension's complete month as a display floor. The local
+        // aggregate and cursors remain independent, so rediscovered files
+        // cannot count an already cached record twice.
+        if self.last_codex_cache_attempt_ms == 0
+            || now_ms.saturating_sub(self.last_codex_cache_attempt_ms) >= 60_000
         {
             self.last_codex_cache_attempt_ms = now_ms;
             self.try_reconcile_codex_cache(window);
@@ -748,12 +764,19 @@ impl UsageCollector {
             return;
         }
         self.snapshot = state.aggregate.snapshot;
-        // v1.1.38 could persist this marker after clearing the aggregate for
-        // a manual rescan. Its file cursors remain valid; only the marker must
-        // be invalidated so the cache can be applied after catch-up.
-        self.codex_cache_reconciled_month = (state.schema_version >= USAGE_STATE_SCHEMA_VERSION)
-            .then_some(state.aggregate.codex_cache_reconciled_month)
-            .flatten();
+        // A marker means an older release may have mixed cached dollars into
+        // the local aggregate. Its cursors cannot recover the local-only sum.
+        if state.aggregate.codex_cache_reconciled_month == Some(window.month_start) {
+            // Older releases added cached history into the local aggregate.
+            // Rebuild the local-only value before using an independent floor.
+            self.record_diag(
+                DiagnosticKind::RescanReason,
+                RescanReason::UsageAccountingSchema as u64,
+                0,
+            );
+            self.begin_month_rescan(window, unix_now_ms());
+            return;
+        }
         self.checkpoint_dirty = state.schema_version < USAGE_STATE_SCHEMA_VERSION;
         self.snapshot.month_scan_in_progress = !state.aggregate.catch_up_done;
         if state.aggregate.month_start != window.month_start {
@@ -840,7 +863,7 @@ impl UsageCollector {
                 today: window.today,
                 last_collected_ms: self.last_collected_ms,
                 catch_up_done: !self.catch_up,
-                codex_cache_reconciled_month: self.codex_cache_reconciled_month,
+                codex_cache_reconciled_month: None,
                 snapshot: UsageSnapshot {
                     claude: self.snapshot.claude,
                     codex: self.snapshot.codex,
@@ -906,6 +929,7 @@ impl UsageCollector {
             return;
         }
         self.day_key = window.today;
+        self.codex_cache_floor = None;
         self.snapshot.claude.clear_today_cost();
         self.snapshot.codex.clear_today_cost();
         self.checkpoint_dirty = true;
@@ -920,7 +944,7 @@ impl UsageCollector {
             return;
         }
         self.month_key = window.month_start;
-        self.codex_cache_reconciled_month = None;
+        self.codex_cache_floor = None;
         self.snapshot.claude.clear_today_cost();
         self.snapshot.claude.clear_month_cost();
         self.snapshot.claude.month_input_tokens = 0;
@@ -1079,9 +1103,7 @@ impl UsageCollector {
     }
 
     fn begin_month_rescan(&mut self, window: DayWindow, now_ms: u64) {
-        // A rescan clears the aggregate that the cache was reconciled into.
-        // Let the refreshed local scan reconcile against the cache again.
-        self.codex_cache_reconciled_month = None;
+        // Preserve the independent cache floor while rebuilding local files.
         self.day_key = window.today;
         self.last_collected_ms = 0;
         self.file_checkpoint.clear();
@@ -1901,40 +1923,17 @@ impl UsageCollector {
         ) else {
             return;
         };
-        if self.reconcile_codex_snapshot(window, source) {
-            self.persist_checkpoint_if_needed(window);
-        }
+        self.reconcile_codex_snapshot(window, source);
     }
 
-    fn reconcile_codex_snapshot(&mut self, window: DayWindow, source: CodexSnapshot) -> bool {
-        // A stale extension snapshot can omit records already included in the
-        // local aggregate. Wait for otak-usage to publish after the newest
-        // Codex file write before replacing that aggregate.
-        let latest_codex_write_ms = self
-            .files
-            .values()
-            .filter(|cursor| cursor.kind == SourceKind::Codex)
-            .map(|cursor| cursor.mtime_ms)
-            .max()
-            .unwrap_or(0);
-        if self.catch_up
-            || self.codex_cache_reconciled_month == Some(window.month_start)
-            || source.updated_at_ms < latest_codex_write_ms
-            || source.month_cost_nanos < self.snapshot.codex.month_cost_nanos
+    fn reconcile_codex_snapshot(&mut self, _window: DayWindow, source: CodexSnapshot) -> bool {
+        if self
+            .codex_cache_floor
+            .is_some_and(|current| current.updated_at_ms >= source.updated_at_ms)
         {
             return false;
         }
-        let codex = &mut self.snapshot.codex;
-        codex.add_month_nanos(source.month_cost_nanos - codex.month_cost_nanos);
-        codex.add_today_nanos(
-            source
-                .today_cost_nanos
-                .saturating_sub(codex.today_cost_nanos),
-        );
-        codex.month_input_tokens = codex.month_input_tokens.max(source.month_input_tokens);
-        codex.month_output_tokens = codex.month_output_tokens.max(source.month_output_tokens);
-        self.codex_cache_reconciled_month = Some(window.month_start);
-        self.checkpoint_dirty = true;
+        self.codex_cache_floor = Some(source);
         true
     }
 
@@ -3593,7 +3592,7 @@ mod tests {
     };
 
     #[test]
-    fn component_codex_cache_reconciliation_replaces_overlap_once_and_survives_restore() {
+    fn component_codex_cache_floor_is_independent_of_local_accounting() {
         let root = std::env::temp_dir().join("run-dog-codex-cache-reconcile-test");
         let mut collector =
             UsageCollector::with_dirs(root.join("claude"), root.join("codex"), false);
@@ -3625,52 +3624,45 @@ mod tests {
                 kind: SourceKind::Codex,
             },
         );
-        assert!(!collector.reconcile_codex_snapshot(window, source));
-        assert_eq!(collector.snapshot.codex.month_cost_nanos, 2_870_620_000_000);
-        collector
-            .files
-            .get_mut(&root.join("codex/session.jsonl"))
-            .unwrap()
-            .mtime_ms = source.updated_at_ms;
         assert!(collector.reconcile_codex_snapshot(window, source));
+        assert_eq!(collector.snapshot.codex.month_cost_nanos, 2_870_620_000_000);
         assert_eq!(
-            collector.snapshot.codex.month_cost_nanos,
+            collector.snapshot().codex.month_cost_nanos,
             source.month_cost_nanos
         );
         assert_eq!(
-            collector.snapshot.codex.today_cost_nanos,
+            collector.snapshot().codex.today_cost_nanos,
             source.today_cost_nanos
         );
         assert!(!collector.reconcile_codex_snapshot(window, source));
         let restored = crate::core::UsageState::decode(&collector.build_state(window).encode())
-            .expect("durable reconciliation marker");
-        assert_eq!(
-            restored.aggregate.codex_cache_reconciled_month,
-            Some(window.month_start)
-        );
+            .expect("durable local-only aggregate");
+        assert_eq!(restored.aggregate.codex_cache_reconciled_month, None);
         assert_eq!(
             restored.aggregate.snapshot.codex.month_cost_nanos,
+            2_870_620_000_000
+        );
+        collector.snapshot.codex.add_month_nanos(10_000_000_000);
+        collector.snapshot.codex.add_today_nanos(10_000_000_000);
+        assert_eq!(
+            collector.snapshot().codex.month_cost_nanos,
             source.month_cost_nanos
         );
-
-        collector.rescan_current_month();
-        assert_eq!(collector.codex_cache_reconciled_month, None);
-        assert!(collector.catch_up);
-        for _ in 0..16 {
-            if collector.tick(ptr::null_mut()) == UsageTick::Idle && !collector.catch_up {
-                break;
-            }
-        }
-        assert!(!collector.catch_up);
-        assert!(collector.reconcile_codex_snapshot(window, source));
+        let updated = CodexSnapshot {
+            updated_at_ms: source.updated_at_ms + 1,
+            month_cost_nanos: source.month_cost_nanos + 10_000_000_000,
+            today_cost_nanos: source.today_cost_nanos + 10_000_000_000,
+            ..source
+        };
+        assert!(collector.reconcile_codex_snapshot(window, updated));
         assert_eq!(
-            collector.snapshot.codex.month_cost_nanos,
-            source.month_cost_nanos
+            collector.snapshot().codex.month_cost_nanos,
+            updated.month_cost_nanos
         );
     }
 
     #[test]
-    fn component_v1_1_38_rescan_checkpoint_retains_progress_and_reimports_cache() {
+    fn component_old_imported_checkpoint_rebuilds_local_only_aggregate() {
         let root = std::env::temp_dir().join(format!(
             "run-dog-old-cache-marker-{}-{}",
             std::process::id(),
@@ -3703,9 +3695,8 @@ mod tests {
 
         collector.apply_state(window, old_state);
         assert!(collector.catch_up);
-        assert_eq!(collector.codex_cache_reconciled_month, None);
-        assert_eq!(collector.snapshot.codex.month_cost_nanos, 176_750_000_000);
-        assert_eq!(collector.file_checkpoint.len(), 1);
+        assert_eq!(collector.snapshot.codex.month_cost_nanos, 0);
+        assert!(collector.file_checkpoint.is_empty());
         assert!(collector.checkpoint_dirty);
     }
 
