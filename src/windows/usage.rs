@@ -72,9 +72,13 @@ pub use super::messages::USAGE_READY_MESSAGE;
 pub const USAGE_FIRST_INTERVAL_MS: u32 = 8_000;
 /// Steady-state JSONL discover / read / ingest interval.
 pub const USAGE_IDLE_INTERVAL_MS: u32 = 60_000;
-/// Next ingest when unread bytes remain. Same floor as idle — never a
-/// sub-minute token poll (the old 400ms catch-up loop is gone).
+/// Ordinary unread work retains the steady-state polling floor.
 pub const USAGE_CONTINUE_INTERVAL_MS: u32 = USAGE_IDLE_INTERVAL_MS;
+/// Historical catch-up advances bounded local JSONL work without waiting a
+/// minute for each batch. Network fetch and hot-file restat have independent
+/// wall-clock cooldowns below.
+pub const USAGE_CATCH_UP_INTERVAL_MS: u32 = 50;
+const CATCH_UP_CHECKPOINT_INTERVAL_MS: u64 = 5_000;
 
 const MAX_FILES_PER_TICK: usize = 3;
 const MAX_STAT_PER_TICK: usize = 12;
@@ -228,6 +232,7 @@ pub struct UsageCollector {
     cursor_reset_count: u64,
     cancelled: bool,
     checkpoint_dirty: bool,
+    last_checkpoint_attempt_ms: u64,
     persist_checkpoint: bool,
     month_rescan_notify: bool,
     store: Option<FileUsageStore>,
@@ -349,6 +354,7 @@ impl UsageCollector {
             cursor_reset_count: 0,
             cancelled: false,
             checkpoint_dirty: false,
+            last_checkpoint_attempt_ms: 0,
             persist_checkpoint,
             month_rescan_notify: false,
             store,
@@ -551,9 +557,17 @@ impl UsageCollector {
         } else {
             UsageTick::MoreWork
         };
-        // Persist after this ingest tick when totals/cursors changed.
-        // Mid-catch-up crash recovery needs that write, not a 400ms timer.
-        if self.checkpoint_dirty {
+        // Keep crash recovery while avoiding one full-state rewrite per
+        // bounded catch-up batch. A failed save is retried after the same
+        // interval; shutdown and catch-up completion always flush directly.
+        if self.checkpoint_dirty
+            && (!self.catch_up
+                || self.startup_mode != StartupMode::Production
+                || self.last_checkpoint_attempt_ms == 0
+                || now_ms.saturating_sub(self.last_checkpoint_attempt_ms)
+                    >= CATCH_UP_CHECKPOINT_INTERVAL_MS)
+        {
+            self.last_checkpoint_attempt_ms = now_ms;
             self.persist_checkpoint_if_needed(window);
         }
         self.today_recovery_ticks = self.today_recovery_ticks.saturating_sub(1);
@@ -6778,6 +6792,69 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         assert_eq!(cents, expected);
         assert!(!restored.catch_up);
+    }
+
+    #[test]
+    fn component_production_catch_up_coalesces_checkpoint_writes_and_flushes_on_exit() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-checkpoint-cadence-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let store_root = root.join("store");
+        let session = claude_session(&root);
+        let stamp = current_stamp();
+        let line_len = 4_096;
+        let count = (super::CATCH_UP_BYTES_PER_TICK as usize * 4 / line_len) + 8;
+        let mut body = String::new();
+        for index in 0..count {
+            body.push_str(&claude_usage_line_with_len(
+                &format!("m{index}"),
+                &stamp,
+                line_len,
+            ));
+            body.push('\n');
+        }
+        fs::write(&session, body).expect("many lines");
+
+        let mut collector = new_persisted_collector(&root, store_root.clone());
+        collector.startup_mode = super::StartupMode::Production;
+        let now = unix_now_ms();
+        assert_eq!(collector.tick_at(ptr::null_mut(), now), UsageTick::MoreWork);
+        let first = fs::read_to_string(store_root.join("current")).expect("first checkpoint");
+        assert_eq!(
+            collector.tick_at(ptr::null_mut(), now + 50),
+            UsageTick::MoreWork
+        );
+        assert!(collector.checkpoint_dirty);
+        assert_eq!(
+            fs::read_to_string(store_root.join("current")).unwrap(),
+            first
+        );
+
+        assert_eq!(
+            collector.tick_at(
+                ptr::null_mut(),
+                now + super::CATCH_UP_CHECKPOINT_INTERVAL_MS
+            ),
+            UsageTick::MoreWork
+        );
+        let second = fs::read_to_string(store_root.join("current")).unwrap();
+        assert_ne!(second, first, "checkpoint resumes after the rate window");
+        assert_eq!(
+            collector.tick_at(
+                ptr::null_mut(),
+                now + super::CATCH_UP_CHECKPOINT_INTERVAL_MS + 50,
+            ),
+            UsageTick::MoreWork
+        );
+        let before_flush = collector.snapshot().claude.month_cents;
+        collector.flush_checkpoint();
+        let flushed = fs::read_to_string(store_root.join("current")).unwrap();
+        assert_ne!(flushed, second, "shutdown flushes the last partial batch");
+        let restored = new_persisted_collector(&root, store_root);
+        assert_eq!(restored.snapshot().claude.month_cents, before_flush);
+        fs::remove_dir_all(root).unwrap();
     }
 
     proptest::proptest! {
