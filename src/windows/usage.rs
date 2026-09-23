@@ -1068,15 +1068,14 @@ impl UsageCollector {
             self.month_key = window.month_start;
         }
         self.month_rescan_notify = true;
-        self.codex_cache_reconciled_month = Some(window.month_start);
         self.record_diag(DiagnosticKind::RescanReason, RescanReason::User as u64, 0);
         self.begin_month_rescan(window, unix_now_ms());
     }
 
     fn begin_month_rescan(&mut self, window: DayWindow, now_ms: u64) {
-        if !self.month_rescan_notify {
-            self.codex_cache_reconciled_month = None;
-        }
+        // A rescan clears the aggregate that the cache was reconciled into.
+        // Let the refreshed local scan reconcile against the cache again.
+        self.codex_cache_reconciled_month = None;
         self.day_key = window.today;
         self.last_collected_ms = 0;
         self.file_checkpoint.clear();
@@ -3647,6 +3646,47 @@ mod tests {
             restored.aggregate.snapshot.codex.month_cost_nanos,
             source.month_cost_nanos
         );
+
+        collector.rescan_current_month();
+        assert_eq!(collector.codex_cache_reconciled_month, None);
+        assert!(collector.catch_up);
+        for _ in 0..16 {
+            if collector.tick(ptr::null_mut()) == UsageTick::Idle && !collector.catch_up {
+                break;
+            }
+        }
+        assert!(!collector.catch_up);
+        assert!(collector.reconcile_codex_snapshot(window, source));
+        assert_eq!(
+            collector.snapshot.codex.month_cost_nanos,
+            source.month_cost_nanos
+        );
+    }
+
+    #[test]
+    fn component_v1_1_38_rescan_checkpoint_rebuilds_before_cache_import() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-old-cache-marker-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let window = day_window(unix_now_ms());
+        let mut collector =
+            UsageCollector::with_dirs(root.join("claude"), root.join("codex"), false);
+        let mut old_state = collector.build_state(window);
+        old_state.schema_version = 5;
+        old_state.aggregate.catch_up_done = true;
+        old_state.aggregate.codex_cache_reconciled_month = Some(window.month_start);
+        old_state
+            .aggregate
+            .snapshot
+            .codex
+            .add_month_nanos(176_750_000_000);
+
+        collector.apply_state(window, old_state);
+        assert!(collector.catch_up);
+        assert_eq!(collector.codex_cache_reconciled_month, None);
+        assert_eq!(collector.snapshot.codex.month_cost_nanos, 0);
     }
 
     impl UsageCollector {
