@@ -733,7 +733,7 @@ impl UsageCollector {
             self.begin_month_rescan(window, unix_now_ms());
             return;
         }
-        if state.schema_version < USAGE_STATE_SCHEMA_VERSION {
+        if state.schema_version < 5 {
             self.record_diag(
                 DiagnosticKind::RestoreResult,
                 RestoreResult::Rebuilding as u64,
@@ -748,7 +748,13 @@ impl UsageCollector {
             return;
         }
         self.snapshot = state.aggregate.snapshot;
-        self.codex_cache_reconciled_month = state.aggregate.codex_cache_reconciled_month;
+        // v1.1.38 could persist this marker after clearing the aggregate for
+        // a manual rescan. Its file cursors remain valid; only the marker must
+        // be invalidated so the cache can be applied after catch-up.
+        self.codex_cache_reconciled_month = (state.schema_version >= USAGE_STATE_SCHEMA_VERSION)
+            .then_some(state.aggregate.codex_cache_reconciled_month)
+            .flatten();
+        self.checkpoint_dirty = state.schema_version < USAGE_STATE_SCHEMA_VERSION;
         self.snapshot.month_scan_in_progress = !state.aggregate.catch_up_done;
         if state.aggregate.month_start != window.month_start {
             self.snapshot.claude.clear_month_cost();
@@ -3579,7 +3585,7 @@ mod tests {
         persist_claude_credentials, read_claude_credentials, read_regular_file, unix_now_ms,
         CodexSnapshot, FileCursor, SourceKind, UsageCollector, UsageTick,
     };
-    use crate::core::{local_hms, local_ymd, CursorRebuildReason};
+    use crate::core::{local_hms, local_ymd, CursorKind, CursorRebuildReason, UsageCursor};
     use std::{
         fs,
         path::{Path, PathBuf},
@@ -3664,7 +3670,7 @@ mod tests {
     }
 
     #[test]
-    fn component_v1_1_38_rescan_checkpoint_rebuilds_before_cache_import() {
+    fn component_v1_1_38_rescan_checkpoint_retains_progress_and_reimports_cache() {
         let root = std::env::temp_dir().join(format!(
             "run-dog-old-cache-marker-{}-{}",
             std::process::id(),
@@ -3675,18 +3681,32 @@ mod tests {
             UsageCollector::with_dirs(root.join("claude"), root.join("codex"), false);
         let mut old_state = collector.build_state(window);
         old_state.schema_version = 5;
-        old_state.aggregate.catch_up_done = true;
+        old_state.aggregate.catch_up_done = false;
         old_state.aggregate.codex_cache_reconciled_month = Some(window.month_start);
         old_state
             .aggregate
             .snapshot
             .codex
             .add_month_nanos(176_750_000_000);
+        old_state.cursors.push(UsageCursor {
+            kind: CursorKind::Codex,
+            logical_id: "sessions/2026/09/23/session.jsonl".into(),
+            offset: 12,
+            size: 12,
+            file_id: Some([1, 2, 3]),
+            prefix: Some(42),
+            last_model: None,
+            seen_keys: Vec::new(),
+            claude_pending: Vec::new(),
+            active_month: Some(window.month_start),
+        });
 
         collector.apply_state(window, old_state);
         assert!(collector.catch_up);
         assert_eq!(collector.codex_cache_reconciled_month, None);
-        assert_eq!(collector.snapshot.codex.month_cost_nanos, 0);
+        assert_eq!(collector.snapshot.codex.month_cost_nanos, 176_750_000_000);
+        assert_eq!(collector.file_checkpoint.len(), 1);
+        assert!(collector.checkpoint_dirty);
     }
 
     impl UsageCollector {
