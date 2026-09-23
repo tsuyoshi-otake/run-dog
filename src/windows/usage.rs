@@ -1902,8 +1902,19 @@ impl UsageCollector {
     }
 
     fn reconcile_codex_snapshot(&mut self, window: DayWindow, source: CodexSnapshot) -> bool {
+        // A stale extension snapshot can omit records already included in the
+        // local aggregate. Wait for otak-usage to publish after the newest
+        // Codex file write before replacing that aggregate.
+        let latest_codex_write_ms = self
+            .files
+            .values()
+            .filter(|cursor| cursor.kind == SourceKind::Codex)
+            .map(|cursor| cursor.mtime_ms)
+            .max()
+            .unwrap_or(0);
         if self.catch_up
             || self.codex_cache_reconciled_month == Some(window.month_start)
+            || source.updated_at_ms < latest_codex_write_ms
             || source.month_cost_nanos < self.snapshot.codex.month_cost_nanos
         {
             return false;
@@ -3567,7 +3578,7 @@ mod tests {
         parse_claude_line, parse_claude_usage_response, parse_codex_limits_line, parse_codex_model,
         parse_codex_usage_line, parse_timestamp, parse_wham_usage_response,
         persist_claude_credentials, read_claude_credentials, read_regular_file, unix_now_ms,
-        CodexSnapshot, UsageCollector, UsageTick,
+        CodexSnapshot, FileCursor, SourceKind, UsageCollector, UsageTick,
     };
     use crate::core::{local_hms, local_ymd, CursorRebuildReason};
     use std::{
@@ -3586,11 +3597,36 @@ mod tests {
         collector.snapshot.codex.add_month_nanos(2_870_620_000_000);
         collector.snapshot.codex.add_today_nanos(42_760_000_000);
         let source = CodexSnapshot {
+            updated_at_ms: unix_now_ms(),
             month_cost_nanos: 8_206_370_000_000,
             today_cost_nanos: 49_480_000_000,
             month_input_tokens: 4_000_000_000,
             month_output_tokens: 20_000_000,
         };
+        collector.files.insert(
+            root.join("codex/session.jsonl"),
+            FileCursor {
+                active_month: window.month_start,
+                size: 1,
+                mtime_ms: source.updated_at_ms + 1,
+                offset: 1,
+                discard_offset: None,
+                last_stat_ms: 0,
+                last_model: None,
+                dedupe: Default::default(),
+                last_prefix: None,
+                last_file_id: None,
+                waiting_incomplete: false,
+                kind: SourceKind::Codex,
+            },
+        );
+        assert!(!collector.reconcile_codex_snapshot(window, source));
+        assert_eq!(collector.snapshot.codex.month_cost_nanos, 2_870_620_000_000);
+        collector
+            .files
+            .get_mut(&root.join("codex/session.jsonl"))
+            .unwrap()
+            .mtime_ms = source.updated_at_ms;
         assert!(collector.reconcile_codex_snapshot(window, source));
         assert_eq!(
             collector.snapshot.codex.month_cost_nanos,
