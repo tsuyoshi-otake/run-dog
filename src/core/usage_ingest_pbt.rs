@@ -83,6 +83,7 @@ fn arb_state() -> impl Strategy<Value = UsageState> {
                     today,
                     last_collected_ms: generation * 10,
                     catch_up_done,
+                    codex_cache_reconciled_month: None,
                     snapshot: UsageSnapshot {
                         claude: ProviderUsage {
                             today_cents: generation as u32 + 1,
@@ -464,6 +465,7 @@ fn state_at(offset: u64) -> UsageState {
             today: 20_260_905,
             last_collected_ms: 1,
             catch_up_done: true,
+            codex_cache_reconciled_month: None,
             snapshot: UsageSnapshot::default(),
         },
         cursors: vec![UsageCursor {

@@ -10,6 +10,7 @@ mod icons;
 mod memory;
 mod messages;
 mod notify_icon;
+mod otak_snapshot;
 mod process;
 pub mod registry;
 mod run_history;
