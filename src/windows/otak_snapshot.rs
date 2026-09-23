@@ -16,6 +16,7 @@ const MAX_TOKEN_FIELD: u64 = 1_000_000_000_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct CodexSnapshot {
+    pub updated_at_ms: u64,
     pub today_cost_nanos: u64,
     pub month_cost_nanos: u64,
     pub month_input_tokens: u64,
@@ -122,6 +123,7 @@ fn parse_snapshot(raw: &Value, fence: &Fence, month: u32, today: u32) -> Option<
     }
 
     let mut result = CodexSnapshot {
+        updated_at_ms,
         today_cost_nanos: 0,
         month_cost_nanos: 0,
         month_input_tokens: 0,
@@ -304,6 +306,7 @@ mod tests {
             }
         });
         let result = parse_snapshot(&snapshot, &fence, 20260901, 20260919).unwrap();
+        assert_eq!(result.updated_at_ms, 1_789_776_000_000);
         assert_eq!(result.month_input_tokens, 2_500_000);
         assert_eq!(result.month_output_tokens, 200_000);
         assert!(result.month_cost_nanos > result.today_cost_nanos);
