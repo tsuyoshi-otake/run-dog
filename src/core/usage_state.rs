@@ -3,18 +3,18 @@
 //! This is not the Registry `UsageCheckpoint` text. Extra positional columns
 //! from experimental reader/Codex patches are rejected, not merged in.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use super::{
-    display_cents, hex_decode, retain_keys_for_month, ClaudeDedupeKey, CodexTokenTotals,
-    FileCheckpointKey, ProviderUsage, UsageCheckpoint, UsageSnapshot, NANOS_PER_CENT,
+    display_cents, hex_decode, ClaudePendingUsage, FileCheckpointKey, ProviderUsage, TokenUsage,
+    UsageCheckpoint, UsageDedupeKey, UsageSnapshot, NANOS_PER_CENT, PENDING_CAP_CLAUDE,
+    SEEN_CAP_CLAUDE, SEEN_CAP_CODEX,
 };
 
 const USAGE_STATE_HEADER_V1: &str = "rundog-usage-state-1";
 pub const USAGE_STATE_HEADER: &str = "rundog-usage-state-2";
-// Version 3 distinguishes transient missing identities from the version 2
-// migration that rebuilt aggregates. The serialized field layout is unchanged.
-pub const USAGE_STATE_SCHEMA_VERSION: u32 = 3;
+// Version 5 retains per-file bounded dedupe windows and Claude supersede state.
+pub const USAGE_STATE_SCHEMA_VERSION: u32 = 5;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum CursorKind {
@@ -35,8 +35,10 @@ pub struct UsageCursor {
     pub prefix: Option<u64>,
     /// Last Codex `turn_context` model. Named line, not a `file=` column.
     pub last_model: Option<String>,
-    /// Last seen Codex `total_token_usage`. Named line, not a `file=` column.
-    pub last_codex_total: Option<CodexTokenTotals>,
+    /// Bounded, ordered event fingerprints for this source file.
+    pub seen_keys: Vec<UsageDedupeKey>,
+    /// The trailing Claude events still eligible for usage superseding.
+    pub claude_pending: Vec<ClaudePendingUsage>,
     /// Last month in which new bytes were consumed. Missing legacy values
     /// conservatively use the checkpoint's aggregate month during restore.
     pub active_month: Option<u32>,
@@ -67,7 +69,6 @@ pub struct UsageState {
     pub schema_version: u32,
     pub aggregate: UsageAggregate,
     pub cursors: Vec<UsageCursor>,
-    pub claude_keys: HashSet<ClaudeDedupeKey>,
 }
 
 impl UsageState {
@@ -90,7 +91,8 @@ impl UsageState {
                     file_id: None,
                     prefix: None,
                     last_model: None,
-                    last_codex_total: None,
+                    seen_keys: Vec::new(),
+                    claude_pending: Vec::new(),
                 }
             })
             .collect();
@@ -112,7 +114,6 @@ impl UsageState {
                 },
             },
             cursors,
-            claude_keys: HashSet::new(),
         }
     }
 
@@ -207,22 +208,44 @@ impl UsageState {
                         ));
                     }
                 }
-                if let Some(total) = cursor.last_codex_total {
-                    out.push_str(&format!(
-                        "codex_total={kind}\t{}\t{}\t{}\t{}\n",
-                        cursor.logical_id, total.input, total.cached, total.output
-                    ));
-                }
             }
-        }
-        let mut keys: Vec<ClaudeDedupeKey> = self.claude_keys.iter().copied().collect();
-        keys.sort_by(|left, right| {
-            left.digest
-                .cmp(&right.digest)
-                .then(left.month.cmp(&right.month))
-        });
-        for key in keys {
-            out.push_str(&format!("dkey={}\t{}\n", key.encode_hex(), key.month));
+            for key in &cursor.seen_keys {
+                out.push_str(&format!(
+                    "seen={kind}\t{}\t{}\t{}\n",
+                    cursor.logical_id,
+                    key.encode_hex(),
+                    key.month
+                ));
+            }
+            for event in &cursor.claude_pending {
+                if cursor.kind != CursorKind::Claude || !is_safe_model(&event.model) {
+                    continue;
+                }
+                let usage = event.usage;
+                out.push_str(&format!(
+                    concat!(
+                        "cpending={kind}\t{logical_id}\t{digest}\t{month}\t{day}\t",
+                        "{model}\t{input}\t{cached_input}\t{cache_read}\t{cache_write_5m}\t",
+                        "{cache_write_1h}\t{output}\t{long_context_input}\t",
+                        "{long_context_cached_input}\t{long_context_output}\n"
+                    ),
+                    logical_id = cursor.logical_id,
+                    kind = kind,
+                    digest = event.key.encode_hex(),
+                    month = event.key.month,
+                    day = event.day,
+                    model = event.model,
+                    input = usage.input,
+                    cached_input = usage.cached_input,
+                    cache_read = usage.cache_read,
+                    cache_write_5m = usage.cache_write_5m,
+                    cache_write_1h = usage.cache_write_1h,
+                    output = usage.output,
+                    long_context_input = usage.long_context_input,
+                    long_context_cached_input = usage.long_context_cached_input,
+                    long_context_output = usage.long_context_output,
+                ));
+            }
         }
         out
     }
@@ -258,8 +281,9 @@ impl UsageState {
         let mut file_ids = Vec::new();
         let mut active_months = HashMap::new();
         let mut models: Vec<(CursorKind, String, String)> = Vec::new();
-        let mut totals: Vec<(CursorKind, String, CodexTokenTotals)> = Vec::new();
-        let mut claude_keys = HashSet::new();
+        let mut seen_keys: HashMap<(CursorKind, String), Vec<UsageDedupeKey>> = HashMap::new();
+        let mut pending_by_cursor: HashMap<(CursorKind, String), Vec<ClaudePendingUsage>> =
+            HashMap::new();
         for line in lines {
             if line.is_empty() {
                 continue;
@@ -337,10 +361,31 @@ impl UsageState {
                 ));
             } else if let Some(value) = line.strip_prefix("codex_model=") {
                 models.push(parse_codex_model_line(value)?);
-            } else if let Some(value) = line.strip_prefix("codex_total=") {
-                totals.push(parse_codex_total_line(value)?);
-            } else if let Some(value) = line.strip_prefix("dkey=") {
-                claude_keys.insert(parse_dkey_line(value)?);
+            } else if let Some(value) = line.strip_prefix("cpending=") {
+                if value.starts_with("c\t") || value.starts_with("x\t") {
+                    let (kind, logical_id, event) = parse_claude_pending_line(value)?;
+                    let events = pending_by_cursor.entry((kind, logical_id)).or_default();
+                    if events.iter().any(|previous| previous.key == event.key)
+                        || events.len() >= PENDING_CAP_CLAUDE
+                    {
+                        return None;
+                    }
+                    events.push(event);
+                }
+            } else if let Some(value) = line.strip_prefix("seen=") {
+                let (kind, logical_id, key) = parse_seen_line(value)?;
+                let keys = seen_keys.entry((kind, logical_id)).or_default();
+                let cap = match kind {
+                    CursorKind::Claude => SEEN_CAP_CLAUDE,
+                    CursorKind::Codex => SEEN_CAP_CODEX,
+                };
+                if keys.contains(&key) || keys.len() >= cap {
+                    return None;
+                }
+                keys.push(key);
+            } else if line.starts_with("codex_total=") || line.starts_with("dkey=") {
+                // Older schema state is decoded only so apply_state can request
+                // one clean accounting rebuild; these global watermarks are unused.
             } else if line.starts_with("ckey=") {
                 // Legacy DefaultHasher u64. Not a disk contract; ignore.
             } else if line.starts_with("file=") {
@@ -377,13 +422,29 @@ impl UsageState {
                 cursor.last_model = Some(model);
             }
         }
-        for (kind, logical_id, total) in totals {
-            if let Some(cursor) = cursors
-                .iter_mut()
-                .find(|cursor| cursor.kind == kind && cursor.logical_id == logical_id)
-            {
-                cursor.last_codex_total = Some(total);
+        for cursor in &mut cursors {
+            let identity = (cursor.kind, cursor.logical_id.clone());
+            cursor.seen_keys = seen_keys.remove(&identity).unwrap_or_default();
+            cursor.claude_pending = pending_by_cursor.remove(&identity).unwrap_or_default();
+            if cursor.kind == CursorKind::Codex && !cursor.claude_pending.is_empty() {
+                return None;
             }
+            if cursor.claude_pending.iter().any(|event| {
+                !cursor.seen_keys.contains(&event.key)
+                    || event.key.month != event.day / 100 * 100 + 1
+                    || cursor
+                        .seen_keys
+                        .iter()
+                        .position(|key| *key == event.key)
+                        .is_none_or(|index| {
+                            index < cursor.seen_keys.len().saturating_sub(PENDING_CAP_CLAUDE)
+                        })
+            }) {
+                return None;
+            }
+        }
+        if !seen_keys.is_empty() || !pending_by_cursor.is_empty() {
+            return None;
         }
         let schema_version = schema_version?;
         if !(2..=USAGE_STATE_SCHEMA_VERSION).contains(&schema_version) {
@@ -418,12 +479,16 @@ impl UsageState {
                 },
             },
             cursors,
-            claude_keys,
         })
     }
 
-    pub fn prune_claude_keys_before_month(&mut self, month_start: u32) {
-        self.claude_keys = retain_keys_for_month(&self.claude_keys, month_start);
+    pub fn prune_event_keys_before_month(&mut self, month_start: u32) {
+        for cursor in &mut self.cursors {
+            cursor.seen_keys.retain(|key| key.month >= month_start);
+            cursor
+                .claude_pending
+                .retain(|event| event.key.month >= month_start);
+        }
     }
 }
 
@@ -489,7 +554,8 @@ fn parse_cursor_line(value: &str) -> Option<UsageCursor> {
         file_id: None,
         prefix: None,
         last_model: None,
-        last_codex_total: None,
+        seen_keys: Vec::new(),
+        claude_pending: Vec::new(),
     })
 }
 
@@ -521,35 +587,75 @@ fn parse_codex_model_line(value: &str) -> Option<(CursorKind, String, String)> {
     Some((kind, parts[1].to_owned(), parts[2].to_owned()))
 }
 
-fn parse_codex_total_line(value: &str) -> Option<(CursorKind, String, CodexTokenTotals)> {
+fn parse_seen_line(value: &str) -> Option<(CursorKind, String, UsageDedupeKey)> {
     let parts: Vec<&str> = value.split('\t').collect();
-    if parts.len() != 5 {
+    if parts.len() != 4 || parts[1].is_empty() {
         return None;
     }
-    let kind = match parts[0] {
-        "x" => CursorKind::Codex,
-        _ => return None,
-    };
+    let kind = parse_cursor_kind(parts[0])?;
+    let digest = hex_decode(parts[2])?;
+    let month = parts[3].parse().ok()?;
+    if !is_month_start(month) {
+        return None;
+    }
     Some((
         kind,
         parts[1].to_owned(),
-        CodexTokenTotals {
-            input: parts[2].parse().ok()?,
-            cached: parts[3].parse().ok()?,
-            output: parts[4].parse().ok()?,
+        UsageDedupeKey::new(digest, month),
+    ))
+}
+
+fn parse_claude_pending_line(value: &str) -> Option<(CursorKind, String, ClaudePendingUsage)> {
+    let parts: Vec<&str> = value.split('\t').collect();
+    if parts.len() != 15 || parts[1].is_empty() || !is_safe_model(parts[5]) {
+        return None;
+    }
+    let kind = parse_cursor_kind(parts[0])?;
+    let key = UsageDedupeKey::new(hex_decode(parts[2])?, parts[3].parse().ok()?);
+    let day = parts[4].parse().ok()?;
+    if kind != CursorKind::Claude || day / 100 * 100 + 1 != key.month {
+        return None;
+    }
+    Some((
+        kind,
+        parts[1].to_owned(),
+        ClaudePendingUsage {
+            key,
+            day,
+            model: parts[5].to_owned(),
+            usage: TokenUsage {
+                input: parts[6].parse().ok()?,
+                cached_input: parts[7].parse().ok()?,
+                cache_read: parts[8].parse().ok()?,
+                cache_write_5m: parts[9].parse().ok()?,
+                cache_write_1h: parts[10].parse().ok()?,
+                output: parts[11].parse().ok()?,
+                long_context_input: parts[12].parse().ok()?,
+                long_context_cached_input: parts[13].parse().ok()?,
+                long_context_output: parts[14].parse().ok()?,
+            },
         },
     ))
 }
 
-fn parse_dkey_line(value: &str) -> Option<ClaudeDedupeKey> {
-    let parts: Vec<&str> = value.split('\t').collect();
-    if parts.len() != 2 {
-        return None;
+fn parse_cursor_kind(value: &str) -> Option<CursorKind> {
+    match value {
+        "c" => Some(CursorKind::Claude),
+        "x" => Some(CursorKind::Codex),
+        _ => None,
     }
-    Some(ClaudeDedupeKey {
-        digest: hex_decode(parts[0])?,
-        month: parts[1].parse().ok()?,
-    })
+}
+
+fn is_month_start(month: u32) -> bool {
+    month / 10_000 > 0 && month % 100 == 1 && (1..=12).contains(&(month / 100 % 100))
+}
+
+fn is_safe_model(model: &str) -> bool {
+    !model.is_empty()
+        && model.len() <= 64
+        && model
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_'))
 }
 
 fn is_safe_codex_model(model: &str) -> bool {
@@ -578,8 +684,8 @@ mod tests {
         USAGE_STATE_HEADER_V1,
     };
     use crate::core::{
-        ClaudeDedupeKey, CodexTokenTotals, FileCheckpointCursor, FileCheckpointKey, ProviderUsage,
-        UsageCheckpoint, UsageSnapshot,
+        claude_dedupe_digest, ClaudePendingUsage, FileCheckpointCursor, FileCheckpointKey,
+        ProviderUsage, TokenUsage, UsageCheckpoint, UsageDedupeKey, UsageSnapshot,
     };
     use std::path::Path;
 
@@ -623,11 +729,12 @@ mod tests {
                 file_id: None,
                 prefix: Some(9),
                 last_model: None,
-                last_codex_total: None,
+                seen_keys: vec![UsageDedupeKey::new(
+                    claude_dedupe_digest("m", "r"),
+                    20_260_901,
+                )],
+                claude_pending: Vec::new(),
             }],
-            claude_keys: [ClaudeDedupeKey::new("m", "r", 20_260_901)]
-                .into_iter()
-                .collect(),
         }
     }
 
@@ -642,11 +749,8 @@ mod tests {
             file_id: None,
             prefix: None,
             last_model: Some("gpt-5.4".to_owned()),
-            last_codex_total: Some(CodexTokenTotals {
-                input: 80,
-                cached: 20,
-                output: 5,
-            }),
+            seen_keys: vec![UsageDedupeKey::new(42, 20_260_901)],
+            claude_pending: Vec::new(),
         });
         state
     }
@@ -692,7 +796,8 @@ mod tests {
                 file_id: None,
                 prefix: None,
                 last_model: None,
-                last_codex_total: None,
+                seen_keys: Vec::new(),
+                claude_pending: Vec::new(),
             },
             UsageCursor {
                 active_month: None,
@@ -703,7 +808,8 @@ mod tests {
                 file_id: None,
                 prefix: None,
                 last_model: None,
-                last_codex_total: None,
+                seen_keys: Vec::new(),
+                claude_pending: Vec::new(),
             },
             UsageCursor {
                 active_month: None,
@@ -714,7 +820,8 @@ mod tests {
                 file_id: None,
                 prefix: None,
                 last_model: None,
-                last_codex_total: None,
+                seen_keys: Vec::new(),
+                claude_pending: Vec::new(),
             },
         ];
         let encoded = state.encode();
@@ -746,41 +853,55 @@ mod tests {
     }
 
     #[test]
-    fn component_usage_state_named_codex_continuation_is_not_a_file_column() {
+    fn component_usage_state_persists_codex_dedupe_per_file() {
         let encoded = sample_codex_state().encode();
         assert!(encoded.contains("codex_model=x\tsessions/2026/09/a.jsonl\tgpt-5.4\n"));
-        assert!(encoded.contains("codex_total=x\tsessions/2026/09/a.jsonl\t80\t20\t5\n"));
         assert!(encoded.contains("cursor=x\tsessions/2026/09/a.jsonl\t4\t8\n"));
+        assert!(encoded.contains("seen=x\tsessions/2026/09/a.jsonl\t000000000000002a\t20260901\n"));
+        assert!(!encoded.contains("codex_total="));
         assert!(!encoded.contains("file="));
         let decoded = UsageState::decode(&encoded).expect("state");
         assert_eq!(decoded.cursors[1].last_model.as_deref(), Some("gpt-5.4"));
         assert_eq!(
-            decoded.cursors[1].last_codex_total,
-            Some(CodexTokenTotals {
-                input: 80,
-                cached: 20,
-                output: 5
-            })
+            decoded.cursors[1].seen_keys,
+            vec![UsageDedupeKey::new(42, 20_260_901)]
         );
     }
 
     #[test]
-    fn component_usage_state_rejects_positional_codex_total_on_cursor() {
-        let mut payload = sample_codex_state().encode();
-        payload = payload.replace(
-            "cursor=x\tsessions/2026/09/a.jsonl\t4\t8\n",
-            "cursor=x\tsessions/2026/09/a.jsonl\t4\t8\t80\t20\t5\tgpt-5.4\n",
-        );
-        assert!(UsageState::decode(&payload).is_none());
+    fn component_usage_state_round_trips_claude_revision_window() {
+        let mut state = sample_state(true);
+        let key = state.cursors[0].seen_keys[0];
+        let pending = ClaudePendingUsage {
+            key,
+            day: 20_260_905,
+            model: "claude-opus-5".to_owned(),
+            usage: TokenUsage {
+                input: 101,
+                cache_read: 12,
+                cache_write_5m: 4,
+                output: 99,
+                ..TokenUsage::default()
+            },
+        };
+        state.cursors[0].claude_pending.push(pending.clone());
+
+        let encoded = state.encode();
+        let decoded = UsageState::decode(&encoded).expect("state");
+
+        assert_eq!(decoded.cursors[0].claude_pending, vec![pending]);
     }
 
     #[test]
     fn component_usage_state_named_prefix_is_not_a_positional_file_column() {
         let encoded = sample_state(true).encode();
-        let key = ClaudeDedupeKey::new("m", "r", 20_260_901);
+        let key = UsageDedupeKey::new(claude_dedupe_digest("m", "r"), 20_260_901);
         assert!(encoded.contains("prefix=c\tprojects/p/session.jsonl\t9\n"));
         assert!(encoded.contains("cursor=c\tprojects/p/session.jsonl\t8\t16\n"));
-        assert!(encoded.contains(&format!("dkey={}\t20260901\n", key.encode_hex())));
+        assert!(encoded.contains(&format!(
+            "seen=c\tprojects/p/session.jsonl\t{}\t20260901\n",
+            key.encode_hex()
+        )));
         assert!(!encoded.contains("ckey="));
         assert!(!encoded.contains("file="));
         assert!(!encoded.contains("requestId"));
@@ -792,19 +913,15 @@ mod tests {
         let mut payload = sample_state(true).encode();
         payload.push_str("ckey=7\n");
         let decoded = UsageState::decode(&payload).expect("legacy ckey ignored");
-        assert!(!decoded
-            .claude_keys
-            .iter()
-            .any(|key| key.encode_hex() == "0000000000000007"));
+        assert_eq!(decoded.cursors[0].seen_keys.len(), 1);
     }
 
     #[test]
-    fn component_usage_state_rejects_positional_extra_dkey_columns() {
+    fn component_usage_state_rejects_positional_extra_seen_columns() {
         let mut payload = sample_state(true).encode();
-        let key = ClaudeDedupeKey::new("m", "r", 20_260_901);
         payload = payload.replace(
-            &format!("dkey={}\t20260901\n", key.encode_hex()),
-            &format!("dkey={}\t20260901\tm1\tr1\n", key.encode_hex()),
+            "seen=c\tprojects/p/session.jsonl\t",
+            "seen=c\tprojects/p/session.jsonl\ttoo-many\t",
         );
         assert!(UsageState::decode(&payload).is_none());
     }
@@ -812,14 +929,12 @@ mod tests {
     #[test]
     fn component_usage_state_month_rollover_keeps_current_month_dedupe() {
         let mut state = sample_state(true);
-        state
-            .claude_keys
-            .insert(ClaudeDedupeKey::new("old", "old", 20_260_801));
-        state.prune_claude_keys_before_month(20_260_901);
-        assert_eq!(state.claude_keys.len(), 1);
-        assert!(state
-            .claude_keys
-            .contains(&ClaudeDedupeKey::new("m", "r", 20_260_901)));
+        state.cursors[0]
+            .seen_keys
+            .push(UsageDedupeKey::new(123, 20_260_801));
+        state.prune_event_keys_before_month(20_260_901);
+        assert_eq!(state.cursors[0].seen_keys.len(), 1);
+        assert_eq!(state.cursors[0].seen_keys[0].month, 20_260_901);
     }
 
     #[test]

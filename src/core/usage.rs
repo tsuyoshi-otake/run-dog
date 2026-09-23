@@ -3,7 +3,7 @@
 /// Amounts are API-equivalent estimates. Subscription rate-limit windows are
 /// separate from those dollar figures.
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct TokenUsage {
     pub input: u64,
     pub cached_input: u64,
@@ -32,6 +32,13 @@ impl TokenUsage {
     #[must_use]
     pub const fn processed_output_tokens(self) -> u64 {
         self.output
+    }
+
+    /// Total raw token count used by Claude's larger-revision rule.
+    #[must_use]
+    pub const fn total_tokens(self) -> u64 {
+        self.processed_input_tokens()
+            .saturating_add(self.processed_output_tokens())
     }
 }
 
@@ -211,8 +218,18 @@ impl ProviderUsage {
         self.today_cents = display_cents(self.today_cost_nanos);
     }
 
+    pub fn subtract_today_nanos(&mut self, nanos: u64) {
+        self.today_cost_nanos = self.today_cost_nanos.saturating_sub(nanos);
+        self.today_cents = display_cents(self.today_cost_nanos);
+    }
+
     pub fn add_month_nanos(&mut self, nanos: u64) {
         self.month_cost_nanos = self.month_cost_nanos.saturating_add(nanos);
+        self.month_cents = display_cents(self.month_cost_nanos);
+    }
+
+    pub fn subtract_month_nanos(&mut self, nanos: u64) {
+        self.month_cost_nanos = self.month_cost_nanos.saturating_sub(nanos);
         self.month_cents = display_cents(self.month_cost_nanos);
     }
 
@@ -670,10 +687,22 @@ pub fn parse_rfc3339_ms(value: &str) -> Option<u64> {
         return None;
     }
     let mut idx = 19;
+    let mut millisecond = 0_u64;
     if bytes.get(idx) == Some(&b'.') {
         idx += 1;
+        let mut fraction_digits = 0;
         while idx < bytes.len() && bytes[idx].is_ascii_digit() {
+            if fraction_digits < 3 {
+                millisecond = millisecond * 10 + u64::from(bytes[idx] - b'0');
+            }
+            fraction_digits += 1;
             idx += 1;
+        }
+        if fraction_digits == 0 {
+            return None;
+        }
+        for _ in fraction_digits.min(3)..3 {
+            millisecond *= 10;
         }
     }
     let offset_minutes = parse_rfc3339_offset(value.get(idx..)?)?;
@@ -683,7 +712,8 @@ pub fn parse_rfc3339_ms(value: &str) -> Option<u64> {
         .saturating_add(u64::from(hour) * 3_600)
         .saturating_add(u64::from(minute) * 60)
         .saturating_add(u64::from(second))
-        .saturating_mul(1_000);
+        .saturating_mul(1_000)
+        .saturating_add(millisecond);
     let utc = i64::try_from(civil_ms)
         .ok()?
         .checked_sub(i64::from(offset_minutes) * 60_000)?;
@@ -1077,6 +1107,24 @@ mod tests {
         assert!(parse_rfc3339_ms("2026-08-16T01:02:03").is_none());
         assert!(parse_rfc3339_ms("not-a-timestamp-at-all!!").is_none());
         assert!(parse_rfc3339_ms("2026-08-16 01:02:03Z").is_none());
+    }
+
+    #[test]
+    fn component_rfc3339_preserves_milliseconds_like_date_parse() {
+        let whole = parse_rfc3339_ms("2026-08-16T01:02:03Z").expect("whole second");
+        assert_eq!(
+            parse_rfc3339_ms("2026-08-16T01:02:03.2Z"),
+            Some(whole + 200)
+        );
+        assert_eq!(
+            parse_rfc3339_ms("2026-08-16T01:02:03.25Z"),
+            Some(whole + 250)
+        );
+        assert_eq!(
+            parse_rfc3339_ms("2026-08-16T01:02:03.2509Z"),
+            Some(whole + 250)
+        );
+        assert!(parse_rfc3339_ms("2026-08-16T01:02:03.Z").is_none());
     }
 
     #[test]

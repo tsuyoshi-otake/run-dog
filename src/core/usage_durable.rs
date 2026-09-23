@@ -170,9 +170,9 @@ mod tests {
                 file_id: None,
                 prefix: None,
                 last_model: None,
-                last_codex_total: None,
+                seen_keys: Vec::new(),
+                claude_pending: Vec::new(),
             }],
-            claude_keys: std::collections::HashSet::new(),
         }
     }
 
