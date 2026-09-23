@@ -1,7 +1,6 @@
 //! Pure domain logic used by the application state machine.
 
 mod animation;
-mod claude_dedupe;
 mod codex_usage;
 mod cpu;
 mod display;
@@ -14,6 +13,7 @@ mod theme;
 mod tray_raster;
 mod usage;
 mod usage_checkpoint;
+mod usage_dedupe;
 mod usage_diagnostics;
 mod usage_durable;
 mod usage_fetch;
@@ -25,8 +25,7 @@ mod usage_perf;
 mod usage_state;
 
 pub use animation::{AnimationController, AnimationRateChange, FpsLimit, FrameCursor};
-pub use claude_dedupe::{claude_dedupe_digest, hex_decode, retain_keys_for_month, ClaudeDedupeKey};
-pub use codex_usage::{decide_codex_event, CodexTokenTotals, CodexUsageDecision};
+pub use codex_usage::CodexTokenTotals;
 pub use cpu::{
     breakdown_between, process_share, usage_between, CpuBreakdown, CpuLoad, CpuSampler,
     ProcessStatus, ProcessTimes, SystemTimes,
@@ -51,6 +50,11 @@ pub use usage::{
 };
 pub use usage_checkpoint::{
     FileCheckpointCursor, FileCheckpointKey, UsageCheckpoint, USAGE_CHECKPOINT_MIGRATION_VERSION,
+};
+pub use usage_dedupe::{
+    claude_anonymous_dedupe_digest, claude_dedupe_digest, codex_dedupe_digest, hex_decode,
+    ClaudePendingUsage, FileDedupeWindow, UsageDedupeKey, PENDING_CAP_CLAUDE, PENDING_RETENTION_MS,
+    SEEN_CAP_CLAUDE, SEEN_CAP_CODEX,
 };
 pub use usage_diagnostics::{
     fetch_result_code, persist_result_code, persist_result_detail, rebuild_reason_code,

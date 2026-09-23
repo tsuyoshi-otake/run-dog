@@ -6,13 +6,12 @@
 #![cfg(test)]
 
 use super::{
-    decide_codex_event, load_usage_state, persist_usage_state, retain_keys_for_month,
-    ClaudeDedupeKey, CodexTokenTotals, CodexUsageDecision, CursorKind, FileCheckpointCursor,
-    FileCheckpointKey, LoadStatus, MemoryBlobs, PersistStatus, ProviderUsage, UsageAggregate,
-    UsageCheckpoint, UsageCursor, UsageSnapshot, UsageState, USAGE_STATE_HEADER,
+    load_usage_state, persist_usage_state, CursorKind, FileCheckpointCursor, FileCheckpointKey,
+    FileDedupeWindow, LoadStatus, MemoryBlobs, PersistStatus, ProviderUsage, UsageAggregate,
+    UsageCheckpoint, UsageCursor, UsageDedupeKey, UsageSnapshot, UsageState, USAGE_STATE_HEADER,
 };
 use proptest::prelude::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 const INGEST_SEED: u64 = 0x5EED_2026_0905_0001;
 
@@ -61,27 +60,9 @@ fn arb_cursor() -> impl Strategy<Value = UsageCursor> {
                 } else {
                     None
                 },
-                last_codex_total: if codex {
-                    Some(CodexTokenTotals {
-                        input: offset,
-                        cached: 0,
-                        output: extra.min(9),
-                    })
-                } else {
-                    None
-                },
+                seen_keys: Vec::new(),
+                claude_pending: Vec::new(),
             }
-        })
-}
-
-fn arb_dkey() -> impl Strategy<Value = ClaudeDedupeKey> {
-    (
-        0_u8..8,
-        0_u8..8,
-        prop_oneof![Just(20_260_801_u32), Just(20_260_901_u32)],
-    )
-        .prop_map(|(left, right, month)| {
-            ClaudeDedupeKey::new(&left.to_string(), &right.to_string(), month)
         })
 }
 
@@ -91,11 +72,10 @@ fn arb_state() -> impl Strategy<Value = UsageState> {
         20_260_801_u32..20_261_201,
         20_260_801_u32..20_261_231,
         proptest::collection::vec(arb_cursor(), 0..3),
-        proptest::collection::vec(arb_dkey(), 0..4),
         any::<bool>(),
     )
         .prop_map(
-            |(generation, month_start, today, cursors, keys, catch_up_done)| UsageState {
+            |(generation, month_start, today, cursors, catch_up_done)| UsageState {
                 generation,
                 schema_version: crate::core::USAGE_STATE_SCHEMA_VERSION,
                 aggregate: UsageAggregate {
@@ -126,7 +106,6 @@ fn arb_state() -> impl Strategy<Value = UsageState> {
                     },
                 },
                 cursors,
-                claude_keys: keys.into_iter().collect(),
             },
         )
 }
@@ -310,7 +289,19 @@ proptest! {
             decoded.aggregate.snapshot.codex.month_cents,
             state.aggregate.snapshot.codex.month_cents
         );
-        prop_assert_eq!(decoded.claude_keys.len(), state.claude_keys.len());
+        let mut canonical_cursors = state.cursors.clone();
+        canonical_cursors.sort_by(|left, right| {
+            let left_kind = match left.kind {
+                CursorKind::Claude => 0,
+                CursorKind::Codex => 1,
+            };
+            let right_kind = match right.kind {
+                CursorKind::Claude => 0,
+                CursorKind::Codex => 1,
+            };
+            (left_kind, left.logical_id.as_str()).cmp(&(right_kind, right.logical_id.as_str()))
+        });
+        prop_assert_eq!(decoded.cursors, canonical_cursors);
     }
 
     #[test]
@@ -336,9 +327,9 @@ proptest! {
         let second = UsageState::from_registry_checkpoint(&checkpoint, generation);
         prop_assert_eq!(first.encode(), second.encode());
         prop_assert_eq!(first.generation, generation);
-        prop_assert!(first.claude_keys.is_empty());
+        prop_assert!(first.cursors.iter().all(|cursor| cursor.seen_keys.is_empty()));
         let no_continuation = first.cursors.iter().all(|cursor| {
-            cursor.last_model.is_none() && cursor.last_codex_total.is_none()
+            cursor.last_model.is_none()
         });
         prop_assert!(no_continuation);
         prop_assert!(!first.encode().contains("file="));
@@ -346,69 +337,21 @@ proptest! {
     }
 
     #[test]
-    fn pbt_month_rollover_keeps_only_current_or_newer_keys(
-        keys in proptest::collection::vec(arb_dkey(), 0..6),
-        month in prop_oneof![Just(20_260_801_u32), Just(20_260_901_u32)],
+    fn pbt_file_dedupe_replay_is_present_until_bounded_eviction(
+        values in proptest::collection::vec(0_u64..1000, 0..80),
     ) {
-        let set: HashSet<_> = keys.into_iter().collect();
-        let kept = retain_keys_for_month(&set, month);
-        prop_assert!(kept.iter().all(|key| key.month >= month));
-        let expected = set.iter().filter(|key| key.month >= month).count();
-        prop_assert_eq!(kept.len(), expected);
-        prop_assert!(set.iter().filter(|key| key.month >= month).all(|key| kept.contains(key)));
-    }
-
-    #[test]
-    fn pbt_codex_append_batching_matches_one_at_a_time(
-        first_in in 1_u64..40,
-        second_in in 1_u64..40,
-    ) {
-        let first = CodexTokenTotals { input: first_in, cached: 0, output: 1 };
-        let second = CodexTokenTotals {
-            input: first_in.saturating_add(second_in),
-            cached: 0,
-            output: 2,
-        };
-        let (a, mid) = decide_codex_event(None, first, Some(first));
-        let (b, end) = decide_codex_event(mid, CodexTokenTotals { input: second_in, cached: 0, output: 1 }, Some(second));
-        let (c, once) = decide_codex_event(None, first, Some(first));
-        let (d, once_end) = decide_codex_event(once, CodexTokenTotals { input: second_in, cached: 0, output: 1 }, Some(second));
-        prop_assert_eq!(end, once_end);
-        let counted = |decision| match decision {
-            CodexUsageDecision::Count(usage) => usage.input,
-            _ => 0,
-        };
-        prop_assert_eq!(counted(a) + counted(b), counted(c) + counted(d));
-    }
-
-    #[test]
-    fn pbt_duplicate_replay_never_adds_a_second_count(
-        input in 1_u64..80,
-    ) {
-        let total = CodexTokenTotals { input, cached: 0, output: 1 };
-        let (first, watermark) = decide_codex_event(None, total, Some(total));
-        let (again, same) = decide_codex_event(watermark, total, Some(total));
-        prop_assert!(matches!(first, CodexUsageDecision::Count(_)));
-        prop_assert_eq!(again, CodexUsageDecision::IgnoreReplay);
-        prop_assert_eq!(watermark, same);
-    }
-
-    #[test]
-    fn pbt_split_restart_equivalence(
-        first_in in 1_u64..30,
-        second_in in 1_u64..30,
-    ) {
-        let first = CodexTokenTotals { input: first_in, cached: 0, output: 1 };
-        let second = CodexTokenTotals {
-            input: first_in.saturating_add(second_in),
-            cached: 0,
-            output: 2,
-        };
-        let last = CodexTokenTotals { input: second_in, cached: 0, output: 1 };
-        let (_, mid) = decide_codex_event(None, first, Some(first));
-        let (cont, _) = decide_codex_event(mid, last, Some(second));
-        let (restart, _) = decide_codex_event(Some(first), last, Some(second));
-        prop_assert_eq!(cont, restart);
+        let mut window = FileDedupeWindow::default();
+        for value in values {
+            let key = UsageDedupeKey::new(value, 20_260_901);
+            let was_new = !window.contains(key);
+            if was_new {
+                window.remember(key, None, 32);
+            }
+            if window.contains(key) {
+                prop_assert!(was_new || window.seen_keys().contains(&key));
+            }
+            prop_assert!(window.seen_keys().len() <= 32);
+        }
     }
 
     #[test]
@@ -532,9 +475,9 @@ fn state_at(offset: u64) -> UsageState {
             file_id: None,
             prefix: None,
             last_model: None,
-            last_codex_total: None,
+            seen_keys: Vec::new(),
+            claude_pending: Vec::new(),
         }],
-        claude_keys: HashSet::new(),
     }
 }
 
