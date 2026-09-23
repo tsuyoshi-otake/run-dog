@@ -48,16 +48,17 @@ use windows_sys::Win32::{
 };
 
 use crate::core::{
-    cancel_fetch, claude_dedupe_digest, cost_nanos, decide_codex_event, fetch_result_code,
-    finish_fetch, is_long_context_request, local_ymd, parse_rfc3339_ms, persist_result_code,
-    persist_result_detail, rebuild_reason_code, record_spawn_failure, reject_late_result,
-    retain_keys_for_month, should_start_fetch, start_fetch, windows_tz_bias_minutes, ymd_iso,
-    ymd_key, CheckpointSource, ClaudeDedupeKey, CodexTokenTotals, CodexUsageDecision, CursorKind,
-    CursorRebuildReason, DiagnosticEvent, DiagnosticKind, DiagnosticRing, DiagnosticSnapshot,
-    FetchErrorKind, FetchOutcome, FileCheckpointKey, LimitWindow, LoadStatus, PersistStatus,
-    ProviderFetchKind, ProviderFetchState, ProviderUsage, RebuildState, RescanReason,
-    RestoreResult, StartupMode, TokenUsage, UsageCursor, UsageSnapshot, UsageState,
-    USAGE_STATE_SCHEMA_VERSION,
+    cancel_fetch, claude_anonymous_dedupe_digest, claude_dedupe_digest, codex_dedupe_digest,
+    cost_nanos, fetch_result_code, finish_fetch, is_long_context_request, local_ymd,
+    parse_rfc3339_ms, persist_result_code, persist_result_detail, rebuild_reason_code,
+    record_spawn_failure, reject_late_result, should_start_fetch, start_fetch,
+    windows_tz_bias_minutes, ymd_iso, ymd_key, CheckpointSource, ClaudePendingUsage,
+    CodexTokenTotals, CursorKind, CursorRebuildReason, DiagnosticEvent, DiagnosticKind,
+    DiagnosticRing, DiagnosticSnapshot, FetchErrorKind, FetchOutcome, FileCheckpointKey,
+    FileDedupeWindow, LimitWindow, LoadStatus, PersistStatus, ProviderFetchKind,
+    ProviderFetchState, ProviderUsage, RebuildState, RescanReason, RestoreResult, StartupMode,
+    TokenUsage, UsageCursor, UsageDedupeKey, UsageSnapshot, UsageState, PENDING_RETENTION_MS,
+    SEEN_CAP_CLAUDE, SEEN_CAP_CODEX, USAGE_STATE_SCHEMA_VERSION,
 };
 
 #[cfg(test)]
@@ -126,7 +127,7 @@ struct FileCursor {
     discard_offset: Option<u64>,
     last_stat_ms: u64,
     last_model: Option<String>,
-    last_codex_total: Option<CodexTokenTotals>,
+    dedupe: FileDedupeWindow,
     last_prefix: Option<u64>,
     last_file_id: Option<FileId>,
     waiting_incomplete: bool,
@@ -198,7 +199,6 @@ pub struct UsageCollector {
     fail_file_id: bool,
     #[cfg(test)]
     fail_file_id_path: Option<PathBuf>,
-    claude_keys: HashSet<ClaudeDedupeKey>,
     pending: VecDeque<PathBuf>,
     next_hot_provider: SourceKind,
     today_recovery_ticks: u8,
@@ -320,7 +320,6 @@ impl UsageCollector {
             fail_file_id: false,
             #[cfg(test)]
             fail_file_id_path: None,
-            claude_keys: HashSet::new(),
             pending: VecDeque::new(),
             next_hot_provider: SourceKind::Codex,
             today_recovery_ticks: 0,
@@ -679,12 +678,12 @@ impl UsageCollector {
     }
 
     fn apply_state(&mut self, window: DayWindow, state: UsageState) {
-        if state.schema_version < 3
+        let legacy_identity = state.schema_version < 3
             && state
                 .cursors
                 .iter()
-                .any(|cursor| cursor.offset > 0 && cursor.file_id.is_none())
-        {
+                .any(|cursor| cursor.offset > 0 && cursor.file_id.is_none());
+        if legacy_identity {
             // Legacy checkpoints cannot distinguish replacement from append.
             // Reset aggregate and cursors together to avoid double counting.
             self.record_diag(
@@ -695,6 +694,20 @@ impl UsageCollector {
             self.record_diag(
                 DiagnosticKind::RescanReason,
                 RescanReason::LegacyIdentity as u64,
+                0,
+            );
+            self.begin_month_rescan(window, unix_now_ms());
+            return;
+        }
+        if state.schema_version < USAGE_STATE_SCHEMA_VERSION {
+            self.record_diag(
+                DiagnosticKind::RestoreResult,
+                RestoreResult::Rebuilding as u64,
+                0,
+            );
+            self.record_diag(
+                DiagnosticKind::RescanReason,
+                RescanReason::UsageAccountingSchema as u64,
                 0,
             );
             self.begin_month_rescan(window, unix_now_ms());
@@ -737,8 +750,6 @@ impl UsageCollector {
                 (key, cursor)
             })
             .collect();
-        self.claude_keys = retain_keys_for_month(&state.claude_keys, window.month_start);
-        self.checkpoint_dirty |= self.claude_keys.len() != state.claude_keys.len();
         self.catch_up = !state.aggregate.catch_up_done;
         self.last_discover_ms = 0;
         self.queue_retirement();
@@ -766,7 +777,8 @@ impl UsageCollector {
                 file_id: cursor.last_file_id.map(FileId::durable),
                 prefix: cursor.last_prefix,
                 last_model: cursor.last_model.clone(),
-                last_codex_total: cursor.last_codex_total,
+                seen_keys: cursor.dedupe.seen_keys(),
+                claude_pending: cursor.dedupe.pending_values(),
             });
         }
         for (key, cursor) in &self.file_checkpoint {
@@ -794,7 +806,6 @@ impl UsageCollector {
                 },
             },
             cursors,
-            claude_keys: self.claude_keys.clone(),
         }
     }
 
@@ -875,7 +886,17 @@ impl UsageCollector {
         self.snapshot.codex.clear_month_cost();
         self.snapshot.codex.month_input_tokens = 0;
         self.snapshot.codex.month_output_tokens = 0;
-        self.claude_keys = retain_keys_for_month(&self.claude_keys, window.month_start);
+        for cursor in self.files.values_mut() {
+            cursor.dedupe.retain_month(window.month_start);
+        }
+        for cursor in self.file_checkpoint.values_mut() {
+            cursor
+                .seen_keys
+                .retain(|key| key.month >= window.month_start);
+            cursor
+                .claude_pending
+                .retain(|event| event.key.month >= window.month_start);
+        }
         // Cached directory listings and failed discovery paths must not outlive
         // their month indefinitely. Discovery repopulates these lazily.
         self.dirs = HashMap::new();
@@ -1022,7 +1043,6 @@ impl UsageCollector {
         self.retired_paths.clear();
         self.files.clear();
         self.dirs.clear();
-        self.claude_keys.clear();
         self.pending.clear();
         self.registrations.clear();
         self.registration_today_count = 0;
@@ -1380,14 +1400,23 @@ impl UsageCollector {
                     || cursor.prefix != prefix
                     || cursor.size != size
             });
-            let (last_model, last_codex_total) = if rebuild.is_some() {
-                (None, None)
+            let last_model = if rebuild.is_some() {
+                None
             } else {
-                (
-                    stored.and_then(|cursor| cursor.last_model.clone()),
-                    stored.and_then(|cursor| cursor.last_codex_total),
-                )
+                stored.and_then(|cursor| cursor.last_model.clone())
             };
+            let mut dedupe = stored.map_or_else(FileDedupeWindow::default, |cursor| {
+                FileDedupeWindow::from_parts(
+                    cursor.seen_keys.clone(),
+                    cursor.claude_pending.clone(),
+                )
+            });
+            if now_ms.saturating_sub(mtime_ms) > PENDING_RETENTION_MS
+                && offset == size
+                && dedupe.clear_pending()
+            {
+                self.checkpoint_dirty = true;
+            }
             entry.insert(FileCursor {
                 active_month: stored
                     .and_then(|cursor| cursor.active_month)
@@ -1398,7 +1427,7 @@ impl UsageCollector {
                 discard_offset: None,
                 last_stat_ms: 0,
                 last_model,
-                last_codex_total,
+                dedupe,
                 last_prefix: prefix,
                 last_file_id: file_id,
                 waiting_incomplete: false,
@@ -1450,8 +1479,13 @@ impl UsageCollector {
                 cursor.offset = 0;
                 cursor.discard_offset = None;
                 cursor.last_model = None;
-                cursor.last_codex_total = None;
                 cursor.waiting_incomplete = false;
+            }
+            if now_ms.saturating_sub(mtime_ms) > PENDING_RETENTION_MS
+                && cursor.offset == cursor.size
+                && cursor.dedupe.clear_pending()
+            {
+                self.checkpoint_dirty = true;
             }
             self.checkpoint_dirty |= cursor.last_prefix != prefix
                 || cursor.last_file_id != file_id
@@ -1507,25 +1541,27 @@ impl UsageCollector {
         self.clear_path_failure(path);
         self.files_opened += u64::from(chunk.opened);
         self.usage_parse_bytes = self.usage_parse_bytes.saturating_add(chunk.read_bytes);
-        let Some(cursor) = self.files.get_mut(path) else {
-            return chunk.consumed;
+        let mut dedupe = {
+            let Some(cursor) = self.files.get_mut(path) else {
+                return chunk.consumed;
+            };
+            let previous_model = cursor.last_model.clone();
+            self.checkpoint_dirty |= cursor.offset != chunk.new_offset || cursor.size != size;
+            cursor.offset = chunk.new_offset;
+            if chunk.new_offset != offset || chunk.consumed > 0 {
+                cursor.active_month = window.month_start;
+            }
+            cursor.discard_offset = chunk.discard_offset;
+            cursor.size = size;
+            cursor.mtime_ms = mtime_ms;
+            cursor.last_model = chunk.last_model;
+            cursor.waiting_incomplete =
+                cursor.size > cursor.offset && chunk.consumed == 0 && chunk.new_offset == offset;
+            if cursor.last_model != previous_model {
+                self.checkpoint_dirty = true;
+            }
+            std::mem::take(&mut cursor.dedupe)
         };
-        let previous_model = cursor.last_model.clone();
-        let mut previous_codex_total = cursor.last_codex_total;
-        self.checkpoint_dirty |= cursor.offset != chunk.new_offset || cursor.size != size;
-        cursor.offset = chunk.new_offset;
-        if chunk.new_offset != offset || chunk.consumed > 0 {
-            cursor.active_month = window.month_start;
-        }
-        cursor.discard_offset = chunk.discard_offset;
-        cursor.size = size;
-        cursor.mtime_ms = mtime_ms;
-        cursor.last_model = chunk.last_model;
-        cursor.waiting_incomplete =
-            cursor.size > cursor.offset && chunk.consumed == 0 && chunk.new_offset == offset;
-        if cursor.last_model != previous_model {
-            self.checkpoint_dirty = true;
-        }
         if let Some(limits) = chunk.limits {
             if kind == SourceKind::Codex
                 && !self.codex_from_remote
@@ -1534,41 +1570,61 @@ impl UsageCollector {
                 apply_provider_limits(&mut self.snapshot.codex, limits);
             }
         }
-        // Count every in-month event. A global timestamp watermark would drop
-        // older JSONL after a newer file is scanned first (Codex catch-up).
-        for (mut event, digest) in chunk.events.into_iter().zip(chunk.dedupe) {
+        for (event, digest) in chunk.events.into_iter().zip(chunk.dedupe) {
             let (year, month, day_of_month) = window.local_date(event.timestamp_ms);
             let day = ymd_key(year, month, day_of_month);
-            if let Some(digest) = digest.filter(|_| window.contains_month_day(day)) {
-                let key = ClaudeDedupeKey {
-                    digest,
-                    month: ymd_key(year, month, 1),
-                };
-                if !self.claude_keys.insert(key) {
-                    continue;
-                }
+            if !window.contains_month_day(day) {
+                continue;
             }
-            if kind == SourceKind::Codex {
-                if let Some(last) = event.codex_last {
-                    let (decision, next) =
-                        decide_codex_event(previous_codex_total, last, event.codex_total);
-                    if next != previous_codex_total {
-                        self.checkpoint_dirty = true;
+            if let Some(digest) = digest {
+                let key = UsageDedupeKey::new(digest, ymd_key(year, month, 1));
+                let seen_cap = match kind {
+                    SourceKind::Claude => SEEN_CAP_CLAUDE,
+                    SourceKind::Codex => SEEN_CAP_CODEX,
+                };
+                let revision = (kind == SourceKind::Claude).then(|| ClaudePendingUsage {
+                    key,
+                    day,
+                    model: event.model.clone(),
+                    usage: event.usage,
+                });
+                if dedupe.contains(key) {
+                    if kind != SourceKind::Claude {
+                        continue;
                     }
-                    previous_codex_total = next;
-                    match decision {
-                        CodexUsageDecision::Count(mut usage) => {
-                            if is_long_context_request(&event.model, last.input) {
-                                usage.long_context_input = usage.input;
-                                usage.long_context_cached_input = usage.cached_input;
-                                usage.long_context_output = usage.output;
-                            }
-                            event.usage = usage;
-                        }
-                        CodexUsageDecision::IgnoreReplay
-                        | CodexUsageDecision::IgnoreInheritedBaseline => continue,
+                    let Some(previous) = dedupe.pending(key).cloned() else {
+                        continue;
+                    };
+                    if event.usage.total_tokens() <= previous.usage.total_tokens() {
+                        continue;
                     }
+                    let old_day_iso = format!(
+                        "{:04}-{:02}-{:02}",
+                        previous.day / 10_000,
+                        (previous.day / 100) % 100,
+                        previous.day % 100
+                    );
+                    let old_nanos = cost_nanos(&previous.model, previous.usage, Some(&old_day_iso))
+                        .unwrap_or(0);
+                    self.snapshot.claude.subtract_month_nanos(old_nanos);
+                    self.snapshot.claude.month_input_tokens = self
+                        .snapshot
+                        .claude
+                        .month_input_tokens
+                        .saturating_sub(previous.usage.processed_input_tokens());
+                    self.snapshot.claude.month_output_tokens = self
+                        .snapshot
+                        .claude
+                        .month_output_tokens
+                        .saturating_sub(previous.usage.processed_output_tokens());
+                    if previous.day == window.today {
+                        self.snapshot.claude.subtract_today_nanos(old_nanos);
+                    }
+                } else {
+                    // Count each file-local event once. `total_token_usage` is
+                    // cumulative and intentionally has no role in this decision.
                 }
+                dedupe.remember(key, revision, seen_cap);
             }
             let day_iso = ymd_iso(year, month, day_of_month);
             // Unknown models have no API-equivalent dollars. Still count tokens
@@ -1593,8 +1649,20 @@ impl UsageCollector {
             self.last_collected_ms = self.last_collected_ms.max(event.timestamp_ms);
             self.checkpoint_dirty = true;
         }
+        if kind == SourceKind::Claude
+            && now_ms.saturating_sub(mtime_ms) > PENDING_RETENTION_MS
+            && self
+                .files
+                .get(path)
+                .is_some_and(|cursor| cursor.offset >= cursor.size)
+        {
+            // Keep revision candidates in memory while an old transcript is
+            // being caught up across read-budget ticks. Once the entire file
+            // is ingested, an idle file has no live stream left to supersede.
+            self.checkpoint_dirty |= dedupe.clear_pending();
+        }
         if let Some(cursor) = self.files.get_mut(path) {
-            cursor.last_codex_total = previous_codex_total;
+            cursor.dedupe = dedupe;
         }
         chunk.consumed
     }
@@ -2058,8 +2126,6 @@ struct ParsedEvent {
     model: String,
     timestamp_ms: u64,
     usage: TokenUsage,
-    codex_last: Option<CodexTokenTotals>,
-    codex_total: Option<CodexTokenTotals>,
 }
 
 fn is_hot(cursor: &FileCursor, now_ms: u64) -> bool {
@@ -2350,7 +2416,7 @@ struct AppendedChunk {
     discard_offset: Option<u64>,
     consumed: u64,
     events: Vec<ParsedEvent>,
-    dedupe: Vec<Option<[u8; 16]>>,
+    dedupe: Vec<Option<u64>>,
     limits: Option<ProviderUsage>,
     last_model: Option<String>,
 }
@@ -2460,7 +2526,7 @@ fn take_jsonl_line(
     line: &[u8],
     model: &mut Option<String>,
     events: &mut Vec<ParsedEvent>,
-    keys: &mut Vec<Option<[u8; 16]>>,
+    keys: &mut Vec<Option<u64>>,
     limits: &mut Option<ProviderUsage>,
 ) {
     let text = String::from_utf8_lossy(line);
@@ -2468,7 +2534,7 @@ fn take_jsonl_line(
         SourceKind::Claude => {
             if let Some((event, key)) = parse_claude_line(&text) {
                 events.push(event);
-                keys.push(Some(key));
+                keys.push(key);
             }
         }
         SourceKind::Codex => {
@@ -2480,8 +2546,8 @@ fn take_jsonl_line(
                 *limits = Some(found);
             }
             if let Some(event) = parse_codex_usage_line(&text, model.as_deref()) {
+                keys.push(Some(codex_dedupe_digest(event.timestamp_ms, event.usage)));
                 events.push(event);
-                keys.push(None);
             }
         }
     }
@@ -2555,7 +2621,7 @@ struct ClaudeCacheCreation {
     ephemeral_1h_input_tokens: Option<u64>,
 }
 
-fn parse_claude_line(line: &str) -> Option<(ParsedEvent, [u8; 16])> {
+fn parse_claude_line(line: &str) -> Option<(ParsedEvent, Option<u64>)> {
     let rec: ClaudeAssistantLine = serde_json::from_str(line).ok()?;
     if rec.kind.as_deref() != Some("assistant") {
         return None;
@@ -2563,7 +2629,8 @@ fn parse_claude_line(line: &str) -> Option<(ParsedEvent, [u8; 16])> {
     let message = rec.message?;
     let model = message.model.filter(|model| model != "<synthetic>")?;
     let usage = message.usage?;
-    let timestamp_ms = parse_timestamp(rec.timestamp.as_deref()?)?;
+    let timestamp = rec.timestamp.as_deref()?;
+    let timestamp_ms = parse_timestamp(timestamp)?;
     let cache_write_5m = usage
         .cache_creation
         .as_ref()
@@ -2580,24 +2647,27 @@ fn parse_claude_line(line: &str) -> Option<(ParsedEvent, [u8; 16])> {
     } else {
         model
     };
-    let key = claude_dedupe_digest(
-        message.id.as_deref().unwrap_or(""),
-        rec.request_id.as_deref().unwrap_or(""),
-    );
+    let token_usage = TokenUsage {
+        input: usage.input_tokens.unwrap_or(0),
+        output: usage.output_tokens.unwrap_or(0),
+        cache_read: usage.cache_read_input_tokens.unwrap_or(0),
+        cache_write_5m,
+        cache_write_1h,
+        ..TokenUsage::default()
+    };
+    let key = match (message.id.as_deref(), rec.request_id.as_deref()) {
+        (Some(message_id), Some(request_id)) => Some(claude_dedupe_digest(message_id, request_id)),
+        _ => Some(claude_anonymous_dedupe_digest(
+            timestamp,
+            &model,
+            token_usage,
+        )),
+    };
     Some((
         ParsedEvent {
             model,
             timestamp_ms,
-            usage: TokenUsage {
-                input: usage.input_tokens.unwrap_or(0),
-                output: usage.output_tokens.unwrap_or(0),
-                cache_read: usage.cache_read_input_tokens.unwrap_or(0),
-                cache_write_5m,
-                cache_write_1h,
-                ..TokenUsage::default()
-            },
-            codex_last: None,
-            codex_total: None,
+            usage: token_usage,
         },
         key,
     ))
@@ -2623,7 +2693,6 @@ struct CodexPayload {
 #[derive(Deserialize)]
 struct CodexInfo {
     last_token_usage: Option<CodexTokens>,
-    total_token_usage: Option<CodexTokens>,
 }
 
 #[derive(Deserialize)]
@@ -2673,7 +2742,6 @@ fn parse_codex_usage_line(line: &str, model: Option<&str>) -> Option<ParsedEvent
     let info = payload.info?;
     let last_tokens = info.last_token_usage?;
     let last = codex_tokens_to_totals(&last_tokens);
-    let total = info.total_token_usage.as_ref().map(codex_tokens_to_totals);
     let mut usage = last.to_usage();
     if is_long_context_request(model, last.input) {
         usage.long_context_input = usage.input;
@@ -2684,8 +2752,6 @@ fn parse_codex_usage_line(line: &str, model: Option<&str>) -> Option<ParsedEvent
         model: model.to_owned(),
         timestamp_ms: parse_timestamp(rec.timestamp.as_deref()?)?,
         usage,
-        codex_last: Some(last),
-        codex_total: total,
     })
 }
 
@@ -3443,12 +3509,11 @@ mod tests {
                 .and_then(|cursor| cursor.last_model.clone())
         }
 
-        fn test_codex_total(&self, path: &Path) -> Option<(u64, u64, u64)> {
-            self.files.get(path).and_then(|cursor| {
-                cursor
-                    .last_codex_total
-                    .map(|total| (total.input, total.cached, total.output))
-            })
+        fn test_seen_keys(&self, path: &Path) -> Vec<crate::core::UsageDedupeKey> {
+            self.files
+                .get(path)
+                .map(|cursor| cursor.dedupe.seen_keys())
+                .unwrap_or_default()
         }
 
         fn test_mark_file_cold(&mut self, path: &Path) {
@@ -3522,7 +3587,8 @@ mod tests {
                     size: 0,
                     prefix: None,
                     last_model: None,
-                    last_codex_total: None,
+                    seen_keys: Vec::new(),
+                    claude_pending: Vec::new(),
                 },
             );
         }
@@ -3752,7 +3818,7 @@ mod tests {
         collector.scan_file(&path, window, unix_now_ms());
         assert_eq!(collector.snapshot.codex.month_input_tokens, 50);
         assert_eq!(collector.snapshot.codex.month_output_tokens, 5);
-        assert_eq!(collector.test_codex_total(&path), Some((150, 0, 15)));
+        assert_eq!(collector.test_seen_keys(&path).len(), 1);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -3854,8 +3920,80 @@ mod tests {
         .unwrap();
         let mut collector = new_claude_collector(&root);
         tick_idle(&mut collector);
-        assert_eq!(collector.claude_keys.len(), 1);
+        assert_eq!(collector.test_seen_keys(&path).len(), 1);
         assert_eq!(collector.snapshot.claude.month_input_tokens, 1_000_000);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn component_claude_larger_same_request_replaces_partial_usage() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-claude-revision-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let path = claude_session(&root);
+        let stamp = current_stamp();
+        let line = |output| {
+            format!(
+                r#"{{"type":"assistant","timestamp":"{stamp}","requestId":"req-1","message":{{"id":"msg-1","model":"claude-opus-5","usage":{{"input_tokens":10,"output_tokens":{output}}}}}}}"#
+            )
+        };
+        fs::write(&path, format!("{}\n{}\n", line(2), line(5))).unwrap();
+
+        let mut collector = new_claude_collector(&root);
+        assert_eq!(tick_idle(&mut collector), UsageTick::Idle);
+
+        assert_eq!(collector.snapshot.claude.month_input_tokens, 10);
+        assert_eq!(collector.snapshot.claude.month_output_tokens, 5);
+        assert_eq!(collector.test_seen_keys(&path).len(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn component_stale_claude_revisions_survive_multitick_catch_up_and_restart() {
+        use std::time::{Duration, SystemTime};
+
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-stale-claude-revision-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let store_root = root.join("store");
+        let path = claude_session(&root);
+        let stamp = current_stamp();
+        let line = |output| {
+            format!(
+                r#"{{"type":"assistant","timestamp":"{stamp}","requestId":"req-1","message":{{"id":"msg-1","model":"claude-opus-5","usage":{{"input_tokens":100,"output_tokens":{output},"cache_read_input_tokens":200}}}}}}"#
+            )
+        };
+        let padding = "{\"type\":\"user\"}\n".repeat(80_000);
+        fs::write(&path, format!("{}\n{padding}{}\n", line(2), line(500))).unwrap();
+        assert!(
+            fs::metadata(&path).unwrap().len() > super::CATCH_UP_BYTES_PER_TICK * 2,
+            "fixture must cross multiple read-budget ticks"
+        );
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(
+                fs::FileTimes::new()
+                    .set_modified(SystemTime::now() - Duration::from_secs(2 * 60 * 60)),
+            )
+            .unwrap();
+
+        let mut first = new_persisted_collector(&root, store_root.clone());
+        assert_eq!(first.tick(ptr::null_mut()), UsageTick::MoreWork);
+        assert_eq!(first.snapshot.claude.month_output_tokens, 2);
+        assert!(first.files[&path].offset < first.files[&path].size);
+
+        let mut restored = new_persisted_collector(&root, store_root);
+        assert_eq!(restored.snapshot.claude.month_output_tokens, 2);
+        assert_eq!(tick_idle(&mut restored), UsageTick::Idle);
+        assert_eq!(restored.snapshot.claude.month_input_tokens, 300);
+        assert_eq!(restored.snapshot.claude.month_output_tokens, 500);
+        assert!(restored.files[&path].dedupe.pending_values().is_empty());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -4276,6 +4414,39 @@ mod tests {
     }
 
     #[test]
+    fn component_claude_without_both_native_ids_uses_anonymous_dedupe_key() {
+        let line = r#"{"type":"assistant","timestamp":"2026-08-16T01:02:03Z","message":{"model":"claude-opus-5","usage":{"input_tokens":10,"output_tokens":4}}}"#;
+        let (_, first_key) = parse_claude_line(line).expect("assistant usage line");
+        let (_, replay_key) = parse_claude_line(line).expect("replayed usage line");
+        let changed = line.replace("\"output_tokens\":4", "\"output_tokens\":5");
+        let (_, changed_key) = parse_claude_line(&changed).expect("changed usage line");
+
+        assert_eq!(first_key, replay_key);
+        assert_ne!(first_key, changed_key);
+    }
+
+    #[test]
+    fn component_duplicate_idless_claude_rows_are_deduped() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-claude-idless-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let path = claude_session(&root);
+        let line = format!(
+            r#"{{"type":"assistant","timestamp":"{}","message":{{"model":"claude-opus-5","usage":{{"input_tokens":1000000,"output_tokens":0}}}}}}"#,
+            current_stamp()
+        );
+        fs::write(&path, format!("{line}\n{line}\n")).expect("id-less Claude rows");
+
+        let mut collector = new_claude_collector(&root);
+        assert_eq!(tick_idle(&mut collector), UsageTick::Idle);
+        assert_eq!(collector.snapshot().claude.month_input_tokens, 1_000_000);
+        assert_eq!(collector.test_seen_keys(&path).len(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn c2_header_values_reject_crlf_and_empty_tokens() {
         assert!(is_safe_header_value("eyJhbGciOiJIUzI1NiJ9.payload.sig"));
         assert!(!is_safe_header_value(""));
@@ -4465,30 +4636,49 @@ mod tests {
             unix_now_ms()
         ));
         let store_root = root.join("store");
-        let stamp = current_stamp();
+        let window = super::day_window(unix_now_ms());
+        let year = window.month_start / 10_000;
+        let month = (window.month_start / 100) % 100;
+        // Keep the synthetic events in the current local month regardless of
+        // the machine's UTC offset or the time this test happens to run.
+        let stamp = format!("{year:04}-{month:02}-02");
         let first_lines = (1..=10_000)
-            .map(|total| token_count_line(&stamp, 1, 0, 0, total, 0, 0))
+            .map(|total| {
+                let timestamp = format!(
+                    "{stamp}T{:02}:{:02}:{:02}Z",
+                    total / 3_600,
+                    total / 60 % 60,
+                    total % 60
+                );
+                token_count_line(&timestamp, 1, 0, 0, total, 0, 0)
+            })
             .collect::<Vec<_>>();
         let session = write_codex_session(&root, "split-cost.jsonl", &first_lines);
 
         let mut first = new_persisted_collector(&root, store_root.clone());
         assert_eq!(tick_idle(&mut first), UsageTick::Idle);
-        assert_eq!(first.snapshot().codex.today_cost_nanos, 25_000_000);
-        assert_eq!(first.snapshot().codex.today_cents, 3);
+        assert_eq!(first.snapshot().codex.month_cost_nanos, 25_000_000);
+        assert_eq!(first.snapshot().codex.month_cents, 3);
 
         let second_lines = (10_001..=20_000)
-            .map(|total| token_count_line(&stamp, 1, 0, 0, total, 0, 0))
+            .map(|total| {
+                let timestamp = format!(
+                    "{stamp}T{:02}:{:02}:{:02}Z",
+                    total / 3_600,
+                    total / 60 % 60,
+                    total % 60
+                );
+                token_count_line(&timestamp, 1, 0, 0, total, 0, 0)
+            })
             .collect::<Vec<_>>();
         append_codex_lines(&session, &second_lines);
         let mut restored = new_persisted_collector(&root, store_root);
-        assert_eq!(restored.snapshot().codex.today_cost_nanos, 25_000_000);
+        assert_eq!(restored.snapshot().codex.month_cost_nanos, 25_000_000);
         assert_eq!(tick_idle(&mut restored), UsageTick::Idle);
 
         let usage = restored.snapshot().codex;
         fs::remove_dir_all(root).unwrap();
-        assert_eq!(usage.today_cost_nanos, 50_000_000);
         assert_eq!(usage.month_cost_nanos, 50_000_000);
-        assert_eq!(usage.today_cents, 5);
         assert_eq!(usage.month_cents, 5);
     }
 
@@ -4601,7 +4791,7 @@ mod tests {
     }
 
     #[test]
-    fn component_codex_fork_inherited_snapshot_is_baseline_only() {
+    fn component_codex_fork_counts_last_usage_events_without_total_inference() {
         let root = std::env::temp_dir().join(format!(
             "run-dog-codex-fork-{}-{}",
             std::process::id(),
@@ -4618,8 +4808,8 @@ mod tests {
         );
         let usage = collect_codex(&root);
         let _ = fs::remove_dir_all(&root);
-        assert_eq!(usage.month_input_tokens, 40);
-        assert_eq!(usage.month_output_tokens, 3);
+        assert_eq!(usage.month_input_tokens, 120);
+        assert_eq!(usage.month_output_tokens, 8);
     }
 
     #[test]
@@ -4645,7 +4835,32 @@ mod tests {
     }
 
     #[test]
-    fn component_codex_process_restart_keeps_watermark() {
+    fn component_codex_same_second_distinct_milliseconds_are_separate_events() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-codex-subsecond-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let second = current_stamp();
+        let second = second.strip_suffix('Z').expect("UTC suffix");
+        let first = format!("{second}.250Z");
+        let later = format!("{second}.750Z");
+        write_codex_session(
+            &root,
+            "rollout.jsonl",
+            &[
+                token_count_line(&first, 80, 20, 5, 80, 20, 5),
+                token_count_line(&later, 80, 20, 5, 160, 40, 10),
+            ],
+        );
+        let usage = collect_codex(&root);
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(usage.month_input_tokens, 160);
+        assert_eq!(usage.month_output_tokens, 10);
+    }
+
+    #[test]
+    fn component_codex_process_restart_keeps_event_dedupe_key() {
         let root = std::env::temp_dir().join(format!(
             "run-dog-codex-restart-{}-{}",
             std::process::id(),
@@ -4662,7 +4877,7 @@ mod tests {
         assert_eq!(tick_idle(&mut first), UsageTick::Idle);
         assert_eq!(first.snapshot().codex.month_input_tokens, 80);
         assert_eq!(first.test_last_model(&session).as_deref(), Some("gpt-5.4"));
-        assert_eq!(first.test_codex_total(&session), Some((80, 20, 5)));
+        assert_eq!(first.test_seen_keys(&session).len(), 1);
         append_codex_lines(&session, &[token_count_line(&stamp, 40, 10, 2, 120, 30, 7)]);
         let mut restored = new_persisted_collector(&root, store_root);
         assert_eq!(restored.snapshot().codex.month_input_tokens, 80);
@@ -4700,7 +4915,7 @@ mod tests {
     }
 
     #[test]
-    fn component_codex_out_of_order_snapshot_is_treated_as_reset_not_a_defect() {
+    fn component_codex_repeated_tuple_stays_deduped_after_other_usage() {
         let root = std::env::temp_dir().join(format!(
             "run-dog-codex-ooo-{}-{}",
             std::process::id(),
@@ -4718,9 +4933,8 @@ mod tests {
         );
         let usage = collect_codex(&root);
         let _ = fs::remove_dir_all(&root);
-        // Smaller total after a larger one cannot be distinguished from a reset.
-        assert_eq!(usage.month_input_tokens, 200);
-        assert_eq!(usage.month_output_tokens, 12);
+        assert_eq!(usage.month_input_tokens, 120);
+        assert_eq!(usage.month_output_tokens, 7);
     }
 
     #[test]
@@ -4746,7 +4960,7 @@ mod tests {
     }
 
     #[test]
-    fn component_codex_same_tuple_different_request_counts_twice() {
+    fn component_codex_duplicate_tuple_ignores_cumulative_total() {
         let root = std::env::temp_dir().join(format!(
             "run-dog-codex-tuple-{}-{}",
             std::process::id(),
@@ -4763,12 +4977,36 @@ mod tests {
         );
         let usage = collect_codex(&root);
         let _ = fs::remove_dir_all(&root);
+        assert_eq!(usage.month_input_tokens, 80);
+        assert_eq!(usage.month_output_tokens, 5);
+    }
+
+    #[test]
+    fn component_codex_same_tuple_at_a_different_timestamp_is_new_usage() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-codex-timestamp-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let stamp = current_stamp();
+        let next_stamp = stamp.replace(":00Z", ":01Z");
+        write_codex_session(
+            &root,
+            "rollout.jsonl",
+            &[
+                token_count_line(&stamp, 80, 20, 5, 80, 20, 5),
+                token_count_line(&next_stamp, 80, 20, 5, 160, 40, 10),
+            ],
+        );
+
+        let usage = collect_codex(&root);
+        let _ = fs::remove_dir_all(&root);
         assert_eq!(usage.month_input_tokens, 160);
         assert_eq!(usage.month_output_tokens, 10);
     }
 
     #[test]
-    fn component_codex_missing_total_counts_each_last_without_replay_claim() {
+    fn component_codex_replay_without_total_is_deduped() {
         let root = std::env::temp_dir().join(format!(
             "run-dog-codex-nototal-{}-{}",
             std::process::id(),
@@ -4785,8 +5023,8 @@ mod tests {
         );
         let usage = collect_codex(&root);
         let _ = fs::remove_dir_all(&root);
-        assert_eq!(usage.month_input_tokens, 160);
-        assert_eq!(usage.month_output_tokens, 10);
+        assert_eq!(usage.month_input_tokens, 80);
+        assert_eq!(usage.month_output_tokens, 5);
     }
 
     #[test]
@@ -4872,7 +5110,8 @@ mod tests {
                     prefix: None,
                     file_id: None,
                     last_model: None,
-                    last_codex_total: None,
+                    seen_keys: Vec::new(),
+                    claude_pending: Vec::new(),
                 },
             );
         }
@@ -5809,11 +6048,22 @@ mod tests {
         let mut collector = UsageCollector::with_dirs(claude_dir, codex_home, false);
         let baseline = run_until_scan_idle(&mut collector, 20_000);
         eprintln!(
-            "baseline: claude_month={}c codex_month={}c scan={}",
+            "baseline: claude_month={}c codex_month={}c claude_in={} claude_out={} codex_in={} codex_out={} scan={}",
             baseline.claude.month_cents,
             baseline.codex.month_cents,
+            baseline.claude.month_input_tokens,
+            baseline.claude.month_output_tokens,
+            baseline.codex.month_input_tokens,
+            baseline.codex.month_output_tokens,
             baseline.month_scan_in_progress
         );
+        if std::env::var_os("RUNDOG_AUDIT_ONCE").is_some() {
+            assert!(
+                !baseline.month_scan_in_progress,
+                "scan did not finish within tick budget"
+            );
+            return;
+        }
 
         collector.rescan_current_month();
         let reset = collector.snapshot();
@@ -6460,7 +6710,7 @@ mod tests {
     }
 
     #[test]
-    fn component_store_restart_rename_same_id_does_not_double() {
+    fn component_store_restart_rename_keeps_per_file_dedupe_scope() {
         let root = std::env::temp_dir().join(format!(
             "run-dog-jsonl-dedupe-{}-{}",
             std::process::id(),
@@ -6474,7 +6724,8 @@ mod tests {
         assert_eq!(tick_idle(&mut first), UsageTick::Idle);
         assert_eq!(first.snapshot().claude.month_cents, 500);
         let blob = store_blob_text(&store_root);
-        assert!(blob.contains("dkey="));
+        assert!(blob.contains("seen=c\t"));
+        assert!(!blob.contains("dkey="));
         assert!(!blob.contains("ckey="));
         assert!(!blob.contains("requestId"));
         assert!(!blob.contains("message\":"));
@@ -6485,7 +6736,9 @@ mod tests {
         assert_eq!(tick_idle(&mut restored), UsageTick::Idle);
         let cents = restored.snapshot().claude.month_cents;
         let _ = fs::remove_dir_all(&root);
-        assert_eq!(cents, 500);
+        // The renamed archive and recreated path are separate source files;
+        // otak-usage retains a dedupe window per file, not globally per ID.
+        assert_eq!(cents, 1_000);
     }
 
     #[test]
