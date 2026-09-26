@@ -2,7 +2,7 @@
 ; The release workflow invokes ISCC with /DAppVersion=X.Y.Z.
 
 #ifndef AppVersion
-  #define AppVersion "1.1.40"
+  #define AppVersion "1.1.41"
 #endif
 
 #ifndef UpdateRepository
@@ -39,10 +39,7 @@ Source: "..\target\release\{#AppExeName}"; DestDir: "{app}"; Flags: ignoreversio
 
 [Icons]
 Name: "{autoprograms}\RunDog"; Filename: "{app}\{#AppExeName}"
-Name: "{autodesktop}\RunDog"; Filename: "{app}\{#AppExeName}"; Tasks: desktopicon
-
-[Tasks]
-Name: "desktopicon"; Description: "Create a desktop shortcut"; Flags: unchecked
+Name: "{autodesktop}\RunDog"; Filename: "{app}\{#AppExeName}"
 
 [Run]
 ; Always start the resident application after installation, including a silent

@@ -5,6 +5,10 @@ updating it does not require elevation. Authenticode signing via SignPath
 Foundation is pending; see [CODE_SIGNING.md](../CODE_SIGNING.md). Until then
 release assets remain unsigned.
 
+Every installation creates RunDog shortcuts in the current user's Start Menu
+and on their desktop, including silent installs and upgrades. No optional task
+selection is required. Uninstall removes both shortcuts.
+
 The updater accepts only the latest published stable GitHub Release containing
 these exact assets:
 

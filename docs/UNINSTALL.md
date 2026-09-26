@@ -15,7 +15,7 @@ download an update cache installer → exit → uninstall from Windows Apps.
 | --- | --- | --- |
 | Program files | `%LOCALAPPDATA%\Programs\RunDog` | **DELETE** (Inno default `{app}`) |
 | Start Menu shortcut | per-user Start Menu | **DELETE** |
-| Desktop shortcut | per-user Desktop (if the task was selected) | **DELETE** |
+| Desktop shortcut | per-user Desktop (created on every install and upgrade) | **DELETE** |
 | Uninstaller / Apps entry | Windows Settings → Apps | **DELETE** |
 | Launch at startup | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` value `RunDog` | **DELETE** |
 | Settings | `HKCU\Software\SystemExe\RunDog` (including subkeys) | **DELETE** |
