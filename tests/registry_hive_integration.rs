@@ -1,6 +1,6 @@
 //! Live HKCU hive integration tests for the durable settings protocol.
 //!
-//! Each test uses an isolated key under `Software\SystemExe\RunDog\.test\...`
+//! Each test uses an isolated key under `Software\SystemExe\RunDogTests\...`
 //! and cleans up afterwards. These tests exercise real Registry APIs but never
 //! touch the production settings key or the user's RunDog Run value.
 
@@ -11,7 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use run_dog::{
     application::{CommitRequest, CommitStatus, DurableStore},
     core::{AppSettings, FpsLimit, PendingJournal, SettingsRecord, ThemePreference},
-    windows::registry::RegistryStore,
+    windows::registry::{test_hive_path, RegistryStore},
 };
 
 fn unique_suffix(label: &str) -> String {
@@ -29,7 +29,7 @@ struct HiveGuard {
 impl HiveGuard {
     fn new(label: &str) -> Self {
         let suffix = unique_suffix(label);
-        let path = format!("Software\\SystemExe\\RunDog\\.test\\{suffix}");
+        let path = test_hive_path(&suffix);
         let run_value = format!("RunDogTest-{suffix}");
         let mut store = RegistryStore::for_test(path, run_value);
         store.gate_mut().set_now(0);
