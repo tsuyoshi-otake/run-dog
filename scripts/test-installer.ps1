@@ -276,7 +276,11 @@ public static class RunDogInstallerHarnessWindow {
         do {
             $process.Refresh()
             if ($process.HasExited) { throw "RunDog PID $residentId exited before its window was ready." }
-            $candidate = [RunDogInstallerHarnessWindow]::FindWindow('SystemExe.RunDog.MessageWindow', $null)
+            # PowerShell converts $null to an empty .NET string here, which
+            # means "empty title", not "any title". The app uses its class name
+            # as the window title in CreateWindowExW; match both explicitly.
+            $candidate = [RunDogInstallerHarnessWindow]::FindWindow(
+                'SystemExe.RunDog.MessageWindow', 'SystemExe.RunDog.MessageWindow')
             if ($candidate -ne [IntPtr]::Zero) {
                 [uint32]$windowProcessId = 0
                 [void][RunDogInstallerHarnessWindow]::GetWindowThreadProcessId($candidate, [ref]$windowProcessId)
