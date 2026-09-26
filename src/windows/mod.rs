@@ -99,7 +99,7 @@ pub fn run() -> Result<(), String> {
     };
 
     let session = run_history::RunSession::start_production();
-    let result = run_single_instance();
+    let result = run_single_instance(&session);
     match &result {
         Ok(()) => session.finish_clean(),
         Err(error) => session.finish_error(error),
@@ -107,7 +107,7 @@ pub fn run() -> Result<(), String> {
     result
 }
 
-fn run_single_instance() -> Result<(), String> {
+fn run_single_instance(session: &run_history::RunSession) -> Result<(), String> {
     let mut store = registry::RegistryStore::production();
     let _ = store.clear_tombstone();
     let recovered = store.recover();
@@ -174,6 +174,7 @@ fn run_single_instance() -> Result<(), String> {
     if context.app.snapshot().running {
         context.dispatch(Event::ExitRequested);
     }
+    session.record_usage_diagnostics(context.usage.diagnostics());
     unsafe {
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
         let _ = DestroyWindow(hwnd);

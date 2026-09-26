@@ -4,7 +4,10 @@ param(
     [string]$Mode = 'list',
 
     [ValidateRange(2, 180)]
-    [int]$SmokeSeconds = 15
+    [int]$SmokeSeconds = 15,
+
+    [ValidateRange(1, 2147483647)]
+    [int]$ProcessId
 )
 
 $ErrorActionPreference = 'Stop'
@@ -38,16 +41,22 @@ if ($Mode -ne 'smoke') {
     return
 }
 
+if (-not $PSBoundParameters.ContainsKey('ProcessId')) {
+    throw 'Smoke mode requires -ProcessId for the running RunDog.exe.'
+}
+
+$measure = Join-Path $repo 'scripts\measure.ps1'
+$identity = & $measure -ProcessId $ProcessId -ValidateTargetOnly
 Write-Output ''
-Write-Output "Smoke: cargo test usage_perf + measure.ps1 against PID $PID for ${SmokeSeconds}s"
+Write-Output "Smoke: cargo test usage_perf + measure.ps1 against RunDog PID $ProcessId for ${SmokeSeconds}s"
+Write-Output "Validated executable: $($identity.ExecutablePath) (version $($identity.FileVersion))"
 Push-Location $repo
 try {
     cargo test --offline --lib usage_perf
     if ($LASTEXITCODE -ne 0) {
         throw 'usage_perf tests failed'
     }
-    $measure = Join-Path $repo 'scripts\measure.ps1'
-    & $measure -ProcessId $PID -DurationSeconds $SmokeSeconds -IntervalMilliseconds 1000 | Out-Host
+    & $measure -ProcessId $ProcessId -DurationSeconds $SmokeSeconds -IntervalMilliseconds 1000 | Out-Host
 } finally {
     Pop-Location
 }

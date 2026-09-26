@@ -11,16 +11,22 @@ Do not treat `PLAN.md` as the current build spec.
   maintainer machine is currently 1.97.1; GitHub `stable` may be newer.
   Keep both green. Do **not** add `rust-toolchain.toml` that forces CI
   onto an older pin and fights `stable`.
-- Inno Setup **6** via `choco install innosetup` on `windows-latest`.
-  Exact Chocolatey version pins are **deferred**: a disappearing package
-  version turns Release red without helping users. The script contract is
-  Inno 6 + `scripts/build-installer.ps1`.
+- Verify and Release both use Inno Setup **6.7.1** (released 2026-02-17)
+  through Chocolatey. The lifecycle gate and published package therefore
+  use the same compiler version and `scripts/build-installer.ps1`.
+- CI pins `cargo-audit` **0.22.2**. Only its executable is cached, under an
+  exact OS/architecture/Rust-toolchain/tool-version key. Pull requests may
+  restore that cache; only trusted push/manual runs may save it. Every run
+  verifies the executable version, fetches current advisories, and audits
+  `Cargo.lock`; neither advisory data nor audit results are cached.
+- New cache/artifact actions are pinned by commit to releases older than
+  seven days. Changing dependency or tooling pins requires the same minimum
+  release age; the lockfile remains mandatory.
 
 ## What is deliberately not in CI
 
-- `cargo-deny` / `cargo audit` / advisory deny lists. Adding them now
-  would create a second red path on unrelated crate advisories. Revisit
-  after SignPath, as a non-blocking report job first.
+- `cargo-deny` and a separate advisory deny list. `cargo audit` already runs
+  as a blocking check in Verify, including the reusable Release gate.
 - Authenticode verification. SignPath Foundation approval is still
   pending, so current Release assets are unsigned. A hard
   `Get-AuthenticodeSignature` gate would fail every tag.
@@ -39,8 +45,8 @@ Do not treat `PLAN.md` as the current build spec.
 ## How to reproduce an unsigned installer locally
 
 ```powershell
-cargo build --release
-.\scripts\build-installer.ps1 -Version 1.1.21
+cargo build --locked --release
+.\scripts\build-installer.ps1 -Version 1.1.41
 ```
 
 Inputs: this repo at a known commit, `Cargo.lock`, Inno Setup 6, MSVC

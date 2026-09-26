@@ -213,6 +213,21 @@ pub struct DiagnosticSnapshot {
     pub codex_fetch: u64,
     pub pending_files: u64,
     pub oldest_pending_age_ms: u64,
+    /// Current collector state; these gauges are read directly, not replayed from the ring.
+    pub retained_dirs: u64,
+    pub queued_discover_dirs: u64,
+    pub queued_pending_files: u64,
+    pub queued_registrations: u64,
+    pub queued_deferred_files: u64,
+    pub queued_retirements: u64,
+    pub deduped_registration_paths: u64,
+    pub deduped_retired_paths: u64,
+    pub tracked_path_retries: u64,
+    pub stored_file_checkpoints: u64,
+    /// Whether the provider worker is currently running (0 or 1).
+    pub claude_fetch_in_flight: u64,
+    /// Whether the provider worker is currently running (0 or 1).
+    pub codex_fetch_in_flight: u64,
 }
 
 impl DiagnosticSnapshot {

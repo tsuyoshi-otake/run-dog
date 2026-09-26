@@ -8,8 +8,13 @@ param(
     [int]$DurationSeconds = 60,
 
     [ValidateRange(100, 10000)]
-    [int]$IntervalMilliseconds = 1000
+    [int]$IntervalMilliseconds = 1000,
+
+    # Used by perf-scenarios.ps1 before it starts the Cargo smoke tests.
+    [switch]$ValidateTargetOnly
 )
+
+$ErrorActionPreference = 'Stop'
 
 Add-Type -TypeDefinition @"
 using System;
@@ -38,7 +43,120 @@ function Get-Summary([double[]]$values) {
     }
 }
 
-$targetProcess = Get-Process -Id $ProcessId -ErrorAction Stop
+function Assert-RunDogTarget([int]$TargetId) {
+    $repo = Split-Path -Parent $PSScriptRoot
+    $manifest = Join-Path $repo 'Cargo.toml'
+    $versionMatch = Select-String -LiteralPath $manifest -Pattern '^\s*version\s*=\s*"(\d+\.\d+\.\d+)"' |
+        Select-Object -First 1
+    if ($null -eq $versionMatch) {
+        throw "Could not read the RunDog version from $manifest."
+    }
+    $expectedVersion = $versionMatch.Matches[0].Groups[1].Value
+
+    $targetRoot = if ($env:CARGO_TARGET_DIR) {
+        $configuredTarget = if ([System.IO.Path]::IsPathRooted($env:CARGO_TARGET_DIR)) {
+            $env:CARGO_TARGET_DIR
+        } else {
+            Join-Path $repo $env:CARGO_TARGET_DIR
+        }
+        [System.IO.Path]::GetFullPath($configuredTarget)
+    } else {
+        Join-Path $repo 'target'
+    }
+    $expectedPaths = @(
+        Join-Path $targetRoot 'debug\RunDog.exe'
+        Join-Path $targetRoot 'release\RunDog.exe'
+    )
+    $localAppData = [Environment]::GetFolderPath('LocalApplicationData')
+    if ($localAppData) {
+        $expectedPaths += Join-Path $localAppData 'Programs\RunDog\RunDog.exe'
+    }
+
+    $process = $null
+    $validated = $false
+    try {
+        try {
+            $process = Get-Process -Id $TargetId -ErrorAction Stop
+            if ($process.HasExited) {
+                throw 'The process has exited.'
+            }
+            $startTime = $process.StartTime
+            $actualPath = [System.IO.Path]::GetFullPath($process.Path)
+        } catch {
+            throw "RunDog PID $TargetId is missing, exited, or its executable path is unavailable: $_"
+        }
+
+        $pathMatches = $false
+        foreach ($expectedPath in $expectedPaths) {
+            if ([string]::Equals($actualPath, [System.IO.Path]::GetFullPath($expectedPath),
+                    [System.StringComparison]::OrdinalIgnoreCase)) {
+                $pathMatches = $true
+                break
+            }
+        }
+        if (-not $pathMatches) {
+            throw "PID $TargetId runs '$actualPath'; expected a RunDog executable at one of: $($expectedPaths -join ', ')."
+        }
+
+        $fileVersion = (Get-Item -LiteralPath $actualPath -ErrorAction Stop).VersionInfo
+        if ($fileVersion.ProductName -ne 'RunDog' -or
+            $fileVersion.InternalName -ne 'RunDog' -or
+            $fileVersion.OriginalFilename -ne 'RunDog.exe' -or
+            $fileVersion.FileVersion -ne $expectedVersion -or
+            $fileVersion.ProductVersion -ne $expectedVersion) {
+            throw "PID $TargetId runs '$actualPath' with product '$($fileVersion.ProductName)', file version '$($fileVersion.FileVersion)', product version '$($fileVersion.ProductVersion)'; expected RunDog $expectedVersion."
+        }
+
+        $process.Refresh()
+        if ($process.HasExited -or $process.StartTime -ne $startTime) {
+            throw "RunDog PID $TargetId exited during identity validation."
+        }
+
+        $validated = $true
+        return [PSCustomObject]@{
+            Process = $process
+            ProcessId = $TargetId
+            StartTime = $startTime
+            ExecutablePath = $actualPath
+            FileVersion = $fileVersion.FileVersion
+            ProductVersion = $fileVersion.ProductVersion
+        }
+    } finally {
+        if (-not $validated -and $null -ne $process) {
+            $process.Dispose()
+        }
+    }
+}
+
+function Assert-SameRunDogProcess([int]$TargetId, [datetime]$StartTime) {
+    $probe = $null
+    try {
+        $probe = Get-Process -Id $TargetId -ErrorAction Stop
+        if ($probe.HasExited -or $probe.StartTime -ne $StartTime) {
+            throw 'PID was reused or process exited.'
+        }
+    } catch {
+        throw "RunDog PID $TargetId exited or was reused during measurement: $_"
+    } finally {
+        if ($null -ne $probe) {
+            $probe.Dispose()
+        }
+    }
+}
+
+$identity = Assert-RunDogTarget $ProcessId
+try {
+if ($ValidateTargetOnly) {
+    [PSCustomObject]@{
+        ProcessId = $identity.ProcessId
+        ExecutablePath = $identity.ExecutablePath
+        FileVersion = $identity.FileVersion
+        ProductVersion = $identity.ProductVersion
+    }
+    return
+}
+
+$targetProcess = $identity.Process
 $logicalProcessors = [Environment]::ProcessorCount
 $samples = [System.Collections.Generic.List[object]]::new()
 $deadline = (Get-Date).AddSeconds($DurationSeconds)
@@ -49,6 +167,10 @@ $started = Get-Date
 while ((Get-Date) -lt $deadline) {
     Start-Sleep -Milliseconds $IntervalMilliseconds
     $targetProcess.Refresh()
+    if ($targetProcess.HasExited) {
+        throw "RunDog PID $ProcessId exited during measurement."
+    }
+    Assert-SameRunDogProcess $ProcessId $identity.StartTime
     $timestamp = Get-Date
     $elapsedMilliseconds = ($timestamp - $previousTimestamp).TotalMilliseconds
     $cpuMilliseconds = ($targetProcess.TotalProcessorTime - $previousCpu).TotalMilliseconds
@@ -59,6 +181,7 @@ while ((Get-Date) -lt $deadline) {
     }
 
     $cim = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId=$ProcessId" -ErrorAction SilentlyContinue
+    Assert-SameRunDogProcess $ProcessId $identity.StartTime
     $gdi = 0
     $user = 0
     try {
@@ -92,6 +215,9 @@ while ((Get-Date) -lt $deadline) {
 $report = [PSCustomObject]@{
     ProcessId = $ProcessId
     ProcessName = $targetProcess.ProcessName
+    ExecutablePath = $identity.ExecutablePath
+    FileVersion = $identity.FileVersion
+    ProductVersion = $identity.ProductVersion
     DurationSeconds = $DurationSeconds
     SampleCount = $samples.Count
     ElapsedMs = [int]((Get-Date) - $started).TotalMilliseconds
@@ -120,3 +246,6 @@ $report = [PSCustomObject]@{
 }
 
 $report | ConvertTo-Json -Depth 5
+} finally {
+    $identity.Process.Dispose()
+}

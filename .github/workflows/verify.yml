@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
   workflow_call:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -12,10 +13,15 @@ permissions:
 jobs:
   verify:
     runs-on: windows-latest
+    timeout-minutes: 25
+    env:
+      CARGO_AUDIT_VERSION: "0.22.2"
+      RUN_DOG_UPDATE_REPOSITORY: ${{ github.repository }}
     steps:
       - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
+        id: toolchain
         with:
           components: rustfmt, clippy
 
@@ -27,17 +33,67 @@ jobs:
         run: cargo fmt --check
 
       - name: clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: measurement target contract
+        run: .\scripts\tests\measure-target.Tests.ps1
 
       - name: test
-        run: cargo test --all-targets
+        run: cargo test --locked --all-targets
+
+      # Exact keys only. PRs may restore, but only trusted push/manual runs save.
+      - name: Restore cargo-audit executable
+        id: audit-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0, 2026-06-26
+        with:
+          path: ~/tmp/rundog-audit/bin/cargo-audit.exe
+          key: cargo-audit-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.cachekey }}-${{ env.CARGO_AUDIT_VERSION }}
 
       - name: dependency audit
-        run: |
-          cargo install cargo-audit --locked --version 0.22.2
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo audit
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        run: .\scripts\invoke-dependency-audit.ps1 -ToolRoot "$env:USERPROFILE/tmp/rundog-audit" -Version $env:CARGO_AUDIT_VERSION
+
+      - name: Save cargo-audit executable
+        if: steps.audit-cache.outputs.cache-hit != 'true' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0, 2026-06-26
+        with:
+          path: ~/tmp/rundog-audit/bin/cargo-audit.exe
+          key: ${{ steps.audit-cache.outputs.cache-primary-key }}
 
       - name: release build
-        run: cargo build --release
+        run: cargo build --locked --release
+
+      - name: Install Inno Setup
+        run: choco install innosetup --version=6.7.1 --yes --no-progress
+
+      - name: Build current installer
+        run: |
+          $version = (Select-String -LiteralPath Cargo.toml -Pattern '^version = "([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          .\scripts\build-installer.ps1 -Version $version
+
+      - name: Fetch pinned upgrade baseline
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $baseline = "$env:USERPROFILE/tmp/run-dog-installer/baseline"
+          New-Item -ItemType Directory -Path $baseline -Force | Out-Null
+          gh release download v1.1.40 --repo $env:GITHUB_REPOSITORY --pattern RunDog-Setup-x64.exe --pattern RunDog-Setup-x64.exe.sha256 --dir $baseline
+          $expected = 'dd65370200c1fadcf67e60595b873a8d8a751a5e99a27d58944e5ba34c310aa2'
+          $checksum = Get-Content -LiteralPath "$baseline/RunDog-Setup-x64.exe.sha256" -Raw
+          if ($checksum -notmatch "^$expected  RunDog-Setup-x64\.exe\r?\n$" -or
+              (Get-FileHash -LiteralPath "$baseline/RunDog-Setup-x64.exe" -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) {
+            throw 'The upgrade baseline does not match the pinned v1.1.40 release digest.'
+          }
+
+      - name: Installer lifecycle on disposable Windows profile
+        run: |
+          $version = (Select-String -LiteralPath Cargo.toml -Pattern '^version = "([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          .\scripts\test-installer.ps1 -CurrentInstaller .\dist\RunDog-Setup-x64.exe -CurrentVersion $version -BaselineInstaller "$env:USERPROFILE/tmp/run-dog-installer/baseline/RunDog-Setup-x64.exe" -BaselineVersion 1.1.40 -EvidenceDirectory "$env:USERPROFILE/tmp/run-dog-installer/evidence"
+
+      - name: Upload installer lifecycle evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1, 2026-04-10
+        with:
+          name: installer-lifecycle-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ~/tmp/run-dog-installer/evidence
+          retention-days: 7

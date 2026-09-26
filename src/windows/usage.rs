@@ -503,6 +503,20 @@ impl UsageCollector {
         };
         snapshot.pending_files = (self.pending.len() + self.registrations.len()) as u64;
         snapshot.oldest_pending_age_ms = oldest_pending_age_ms(&self.pending, &self.files);
+        snapshot.retained_dirs = self.dirs.len() as u64;
+        snapshot.queued_discover_dirs = self.discover.len() as u64;
+        snapshot.queued_pending_files = self.pending.len() as u64;
+        snapshot.queued_registrations = self.registrations.len() as u64;
+        snapshot.queued_deferred_files = self.deferred.len() as u64;
+        snapshot.queued_retirements = self.retirement.len() as u64;
+        snapshot.deduped_registration_paths = self.registration_paths.len() as u64;
+        snapshot.deduped_retired_paths = self.retired_paths.len() as u64;
+        snapshot.tracked_path_retries = self.path_retries.len() as u64;
+        snapshot.stored_file_checkpoints = self.file_checkpoint.len() as u64;
+        snapshot.claude_fetch_in_flight =
+            u64::from(self.claude_fetch.in_flight.load(Ordering::SeqCst));
+        snapshot.codex_fetch_in_flight =
+            u64::from(self.codex_fetch.in_flight.load(Ordering::SeqCst));
         snapshot.claude_fetch = fetch_result_code(
             self.claude_fetch.state.last_error,
             self.claude_fetch.state.freshness,
@@ -5635,6 +5649,97 @@ mod tests {
         assert!(!rendered.contains("sk-"));
         assert!(!rendered.contains("prompt"));
         assert!(!rendered.contains("refresh_token"));
+    }
+
+    #[test]
+    fn component_diagnostics_report_live_queues_and_provider_work_without_mutation() {
+        use super::{DirListing, Ordering, PathRetryState};
+
+        let root = std::env::temp_dir().join("run-dog-diagnostic-gauges");
+        let mut collector =
+            UsageCollector::with_dirs(root.join("claude"), root.join("codex"), false);
+        let empty = collector.diagnostics();
+        assert_eq!(empty.retained_dirs, 0);
+        assert_eq!(empty.queued_discover_dirs, 0);
+        assert_eq!(empty.queued_pending_files, 0);
+        assert_eq!(empty.queued_registrations, 0);
+        assert_eq!(empty.queued_deferred_files, 0);
+        assert_eq!(empty.queued_retirements, 0);
+        assert_eq!(empty.deduped_registration_paths, 0);
+        assert_eq!(empty.deduped_retired_paths, 0);
+        assert_eq!(empty.tracked_path_retries, 0);
+        assert_eq!(empty.stored_file_checkpoints, 0);
+        assert_eq!(empty.claude_fetch_in_flight, 0);
+        assert_eq!(empty.codex_fetch_in_flight, 0);
+
+        let dir = root.join("sessions");
+        let file = dir.join("session.jsonl");
+        collector.dirs.insert(
+            dir.clone(),
+            DirListing {
+                mtime_ms: 0,
+                dirs: Vec::new(),
+            },
+        );
+        collector.discover.push_back(dir.clone());
+        collector.discover.push_back(root.join("other"));
+        collector.pending.push_back(file.clone());
+        collector.registrations.push_back((file.clone(), true));
+        collector.deferred.push_back(file.clone());
+        collector
+            .retirement
+            .push_back((file.clone(), SourceKind::Codex));
+        collector.registration_paths.insert(file.clone());
+        collector.retired_paths.insert(file.clone());
+        collector.path_retries.insert(
+            file,
+            PathRetryState {
+                attempts: 1,
+                terminal: false,
+                retry_after_ms: 0,
+            },
+        );
+        collector.test_remember_codex("sessions/2026/09/26/session.jsonl");
+        collector
+            .claude_fetch
+            .in_flight
+            .store(true, Ordering::SeqCst);
+
+        let first = collector.diagnostics();
+        assert_eq!(first.retained_dirs, 1);
+        assert_eq!(first.queued_discover_dirs, 2);
+        assert_eq!(first.queued_pending_files, 1);
+        assert_eq!(first.queued_registrations, 1);
+        assert_eq!(
+            first.pending_files, 2,
+            "existing combined gauge is unchanged"
+        );
+        assert_eq!(first.queued_deferred_files, 1);
+        assert_eq!(first.queued_retirements, 1);
+        assert_eq!(first.deduped_registration_paths, 1);
+        assert_eq!(first.deduped_retired_paths, 1);
+        assert_eq!(first.tracked_path_retries, 1);
+        assert_eq!(first.stored_file_checkpoints, 1);
+        assert_eq!(first.claude_fetch_in_flight, 1);
+        assert_eq!(first.codex_fetch_in_flight, 0);
+        assert_eq!(collector.diagnostics(), first, "diagnostics is read-only");
+        assert_eq!(collector.discover.len(), 2);
+        assert_eq!(collector.file_checkpoint.len(), 1);
+
+        collector
+            .claude_fetch
+            .in_flight
+            .store(false, Ordering::SeqCst);
+        collector
+            .codex_fetch
+            .in_flight
+            .store(true, Ordering::SeqCst);
+        collector.registrations.clear();
+        let changed = collector.diagnostics();
+        assert_eq!(changed.pending_files, 1);
+        assert_eq!(changed.queued_registrations, 0);
+        assert_eq!(changed.claude_fetch_in_flight, 0);
+        assert_eq!(changed.codex_fetch_in_flight, 1);
     }
 
     #[test]

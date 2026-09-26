@@ -45,5 +45,36 @@ Uninstall (Windows Settings → Apps → RunDog) removes `{app}`, shortcuts, the
 HKCU Run value `RunDog`, `HKCU\Software\SystemExe\RunDog`,
 `%LOCALAPPDATA%\RunDog`, and `%LOCALAPPDATA%\SystemExe\RunDog`. It must not name
 or touch Claude or Codex homes. The table is
-[docs/UNINSTALL.md](../docs/UNINSTALL.md). Live uninstall was not run for this
-contract revision.
+[docs/UNINSTALL.md](../docs/UNINSTALL.md).
+
+## Hosted lifecycle verification
+
+`scripts/test-installer.ps1` runs only under the disposable `runneradmin` account
+on a GitHub-hosted Windows Actions runner. It refuses a profile with any existing
+RunDog installation, process, data, shortcuts, startup value, or uninstall entry.
+The workflow must supply two already-built installer files: the current build and
+an older published baseline. For example, with the current build in `dist` and
+the verified baseline under the runner's `~/tmp`:
+
+```powershell
+./scripts/test-installer.ps1 `
+  -CurrentInstaller ./dist/RunDog-Setup-x64.exe -CurrentVersion 1.1.41 `
+  -BaselineInstaller (Join-Path $env:USERPROFILE 'tmp/run-dog-installer/baseline/RunDog-Setup-x64.exe') -BaselineVersion 1.1.40 `
+  -EvidenceDirectory (Join-Path $env:USERPROFILE 'tmp/run-dog-installer/evidence')
+```
+
+The caller must authenticate the baseline installer before invoking the harness
+(release sidecar checksum and GitHub asset digest). The harness never downloads
+an installer. It performs clean-current install, duplicate shortcut launch,
+resident reinstall, uninstall, clean-baseline install with tasks deselected and
+no desktop shortcut, resident upgrade that adds the desktop shortcut, and a
+second uninstall. It requests normal RunDog exit before each uninstall and saves
+the resulting `usage_diagnostics` and `clean_exit` records. Each stage has a
+deadline; Inno logs, termination logs, `lifecycle.log`, and `summary.json` are
+saved under the runner account's `~/tmp/run-dog-installer`. The runner job should
+upload the evidence directory even when the harness fails.
+
+The harness seeds the application's documented `SettingsRecord` with automatic
+update **installation** off in the disposable HKCU hive. RunDog still makes its
+normal one-shot release check at startup; there is no production setting that
+disables that fetch. No provider credentials or real usage data are required.

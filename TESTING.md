@@ -1,6 +1,6 @@
 # テスト戦略
 
-RunDog は実アプリケーションを常駐させずに検証できるよう、`core`、`application`、`windows` adapter を分離している。テスト実行時に HKCU、タスクトレイ、Task Manager、実 CPU カウンター、実時計、ネットワークへ触れるテストはない。
+RunDog は実アプリケーションを常駐させずに検証できるよう、`core`、`application`、`windows` adapter を分離している。通常の Rust テストは Fake と一時ファイルを使う。インストーラーの実行試験は独立した `scripts/test-installer.ps1` で行い、クリーンな GitHub-hosted Windows runner に限定する。
 
 ## ISTQB コンポーネントテスト
 
@@ -91,3 +91,31 @@ cargo build --release
 GitHub Actions の Verify は上記を **独立した step** として実行する。1 つの `pwsh` ブロックへ連結すると、後続 `cargo` が成功したとき先行失敗が `$LASTEXITCODE = 0` に上書きされ得る。ローカル一括実行は `.\scripts\run-verification.ps1 -Stage baseline`（各コマンド後に `Assert-LastExitCode`）を使う。Release は Verify job の成功を `needs` してから publish する。
 
 実機の CPU / memory 測定はテストではなく、Release artifact を対象にした別の手動性能評価として扱う。
+
+## 測定対象・診断・インストーラーの確認
+
+`scripts/measure.ps1` は RunDog の PID を明示的に受け取り、標準の導入先または
+このリポジトリの build 出力、製品情報、Cargo.toml と同じバージョンを確認する。
+終了した PID、別製品、古い版は測定を開始しない。実行中も終了・PID の再利用を検出する。
+`perf-scenarios.ps1 -Mode smoke` の `$PID` は PowerShell 自身を指していたため、
+現在は `-ProcessId` が必須。`-Mode list` は常駐プロセスなしで使える。
+
+```powershell
+.\scripts\tests\measure-target.Tests.ps1
+.\scripts\measure.ps1 -ProcessId <RunDogのPID> -ValidateTargetOnly
+.\scripts\perf-scenarios.ps1 -Mode smoke -ProcessId <RunDogのPID> -SmokeSeconds 15
+```
+
+UsageCollector が所有するディレクトリ、キュー、重複排除集合、再試行、checkpoint、
+provider worker の処理中状態は `DiagnosticSnapshot` の数値として参照できる。
+正常なメッセージループ終了時に一度、既存の上限 64 KiB の
+`%LOCALAPPDATA%\RunDog\diagnostics\termination.log` へ
+`event=usage_diagnostics` として記録する。run ID と PID で終了履歴と照合でき、
+セッション本文、パス、認証情報は追加しない。強制終了時の記録は保証しない。
+
+Verify は Rust の静的解析・回帰テスト・依存監査に加え、測定対象の契約と
+実インストーラーの新規導入、常駐中の再導入、v1.1.40 からの更新、
+ショートカット、二重起動、削除時の所有データと他製品データの境界を確認する。
+実行ログは CI artifact に 7 日保存する。詳しい環境制約と手順は
+[`installer/README.md`](installer/README.md) を参照。8 時間の常駐試験や実ユーザーの
+設定を使う手動試験の代わりにはならない。
