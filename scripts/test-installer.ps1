@@ -267,15 +267,26 @@ public static class RunDogInstallerHarnessWindow {
     }
     $resident = Wait-ForInstance 5
     $residentId = [int]$resident.ProcessId
-    $window = [RunDogInstallerHarnessWindow]::FindWindow('SystemExe.RunDog.MessageWindow', $null)
-    if ($window -eq [IntPtr]::Zero) { throw 'RunDog message window was not found for graceful exit.' }
-    [uint32]$windowProcessId = 0
-    [void][RunDogInstallerHarnessWindow]::GetWindowThreadProcessId($window, [ref]$windowProcessId)
-    if ($windowProcessId -ne $residentId) {
-        throw "RunDog window PID $windowProcessId does not match owned PID $residentId."
-    }
     $process = [Diagnostics.Process]::GetProcessById($residentId)
     try {
+        # Inno returns after spawning the resident. The process and its mutex
+        # exist before icon loading and window creation finish.
+        $readyDeadline = [DateTime]::UtcNow.AddSeconds(20)
+        $window = [IntPtr]::Zero
+        do {
+            $process.Refresh()
+            if ($process.HasExited) { throw "RunDog PID $residentId exited before its window was ready." }
+            $candidate = [RunDogInstallerHarnessWindow]::FindWindow('SystemExe.RunDog.MessageWindow', $null)
+            if ($candidate -ne [IntPtr]::Zero) {
+                [uint32]$windowProcessId = 0
+                [void][RunDogInstallerHarnessWindow]::GetWindowThreadProcessId($candidate, [ref]$windowProcessId)
+                if ($windowProcessId -eq $residentId) { $window = $candidate; break }
+            }
+            Start-Sleep -Milliseconds 200
+        } while ([DateTime]::UtcNow -lt $readyDeadline)
+        if ($window -eq [IntPtr]::Zero) {
+            throw "RunDog PID $residentId had no ready message window within 20 seconds (app session=$($process.SessionId), harness session=$([Diagnostics.Process]::GetCurrentProcess().SessionId))."
+        }
         if (-not [RunDogInstallerHarnessWindow]::PostMessage(
                 $window, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)) {
             throw "Could not post WM_CLOSE to owned RunDog PID $residentId."
@@ -424,6 +435,11 @@ try {
     $summary.status = 'failed'
     $summary.error = $_.Exception.Message
     Add-Evidence 'failure' $_.Exception.Message
+    # Preserve only bounded RunDog diagnostics before failure cleanup removes it.
+    $failedLog = Join-Path $ownedData 'diagnostics\termination.log'
+    if (Test-Path -LiteralPath $failedLog -PathType Leaf) {
+        Copy-Item -LiteralPath $failedLog -Destination (Join-Path $evidenceDir 'termination-failure.log') -ErrorAction SilentlyContinue
+    }
     throw
 } finally {
     try {
