@@ -64,10 +64,11 @@ fn inno_script_deletes_rundog_owned_paths_only() {
 }
 
 #[test]
-fn contract_document_states_delete_preserve_and_not_run() {
+fn contract_document_states_delete_preserve_and_live_test_boundary() {
     assert!(CONTRACT.contains("DELETE"));
     assert!(CONTRACT.contains("PRESERVE"));
-    assert!(CONTRACT.contains("NOT RUN"));
+    assert!(CONTRACT.contains("GitHub-hosted Windows"));
+    assert!(CONTRACT.contains("must never run in a developer's live account"));
     assert!(CONTRACT.contains(".claude"));
     assert!(CONTRACT.contains(".codex"));
     assert!(CONTRACT.contains("%LOCALAPPDATA%\\RunDog\\usage"));

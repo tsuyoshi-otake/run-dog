@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 
 use windows_sys::Win32::{Foundation::SYSTEMTIME, System::SystemInformation::GetSystemTime};
 
+use crate::core::DiagnosticSnapshot;
+
 use super::usage_store_path::PinnedDirectory;
 
 const MARKER_HEADER: &str = "rundog-active-run-1";
@@ -167,6 +169,27 @@ impl RunSession {
         self.finish("error_exit", Some(error));
     }
 
+    /// Capture the numeric collector state once at message-loop exit.
+    /// A missing diagnostics directory or failed write must not affect shutdown.
+    pub(super) fn record_usage_diagnostics(&self, snapshot: DiagnosticSnapshot) {
+        let Some(root) = self.root.as_deref() else {
+            return;
+        };
+        let Some(directory) = PinnedDirectory::open(root, false, &[], false) else {
+            return;
+        };
+        append_log(
+            &directory,
+            root,
+            &format!(
+                "{} event=usage_diagnostics run={} pid={} snapshot={snapshot:?}",
+                utc_now(),
+                self.marker.run_id,
+                self.marker.pid
+            ),
+        );
+    }
+
     fn finish(self, event: &str, detail: Option<&str>) {
         let Some(root) = self.root.as_deref() else {
             return;
@@ -267,6 +290,7 @@ fn utc_now() -> String {
 #[cfg(test)]
 mod tests {
     use super::{bounded_log, RunMarker, RunSession, LOG_NAME, MARKER_NAME, MAX_LOG_BYTES};
+    use crate::core::DiagnosticSnapshot;
     use std::{fs, path::PathBuf};
 
     struct TestDirectory(PathBuf);
@@ -365,5 +389,60 @@ mod tests {
 
         let production = bounded_log(&vec![b'x'; MAX_LOG_BYTES], b"last", MAX_LOG_BYTES);
         assert!(production.len() <= MAX_LOG_BYTES);
+    }
+
+    #[test]
+    fn component_exit_usage_diagnostics_are_numeric_correlated_and_bounded() {
+        let root = TestDirectory::new("fake-secret-path");
+        let session = RunSession::start(
+            Some(root.0.clone()),
+            marker("2026-09-20T00:00:00.000Z", 106),
+        );
+        let old = (0..10_000)
+            .map(|index| format!("old-{index:05}\n"))
+            .collect::<String>();
+        fs::write(root.0.join(LOG_NAME), old).expect("prefill diagnostics log");
+
+        session.record_usage_diagnostics(DiagnosticSnapshot {
+            retained_dirs: 8,
+            queued_discover_dirs: 3,
+            queued_pending_files: 4,
+            queued_registrations: 5,
+            queued_deferred_files: 6,
+            queued_retirements: 7,
+            deduped_registration_paths: 9,
+            deduped_retired_paths: 10,
+            tracked_path_retries: 11,
+            stored_file_checkpoints: 12,
+            claude_fetch_in_flight: 1,
+            codex_fetch_in_flight: 0,
+            usage_parse_bytes: u64::MAX,
+            ..DiagnosticSnapshot::default()
+        });
+
+        let log = fs::read_to_string(root.0.join(LOG_NAME)).expect("diagnostics log");
+        assert!(log.len() <= MAX_LOG_BYTES);
+        assert_eq!(log.matches("event=usage_diagnostics").count(), 1);
+        assert!(log.contains("run=2026-09-20T00:00:00.000Z-106 pid=106"));
+        for gauge in [
+            "retained_dirs: 8",
+            "queued_discover_dirs: 3",
+            "queued_pending_files: 4",
+            "queued_registrations: 5",
+            "queued_deferred_files: 6",
+            "queued_retirements: 7",
+            "deduped_registration_paths: 9",
+            "deduped_retired_paths: 10",
+            "tracked_path_retries: 11",
+            "stored_file_checkpoints: 12",
+            "claude_fetch_in_flight: 1",
+            "codex_fetch_in_flight: 0",
+        ] {
+            assert!(log.contains(gauge), "missing {gauge}");
+        }
+        assert!(log.contains(&format!("usage_parse_bytes: {}", u64::MAX)));
+        assert!(!log.contains("fake-secret-path"));
+        assert!(!log.contains("Bearer"));
+        assert!(!log.contains("Authorization"));
     }
 }

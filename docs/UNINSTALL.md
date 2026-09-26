@@ -2,9 +2,12 @@
 
 This is the current uninstall specification. `PLAN.md` is not the current spec.
 
-Real-machine uninstall was **NOT RUN** for this revision. The installer script
-and this document are the contract. Fail-first live uninstall remains a
-follow-up.
+The disposable GitHub-hosted Windows lifecycle harness is
+[`scripts/test-installer.ps1`](../scripts/test-installer.ps1). It verifies the
+installer and uninstaller with isolated provider and other-product sentinels;
+the harness must never run in a developer's live account.
+It saves the normal-exit diagnostics log under the disposable runner account's
+`~/tmp/run-dog-installer` before uninstall removes RunDog-owned state.
 
 ## Scenario
 
@@ -44,8 +47,8 @@ removed. Other products under `SystemExe` are not this contract.
   `HKCU\Software\SystemExe\RunDog`.
 - The script must not name Claude or Codex homes, logs, or credential files.
 
-`tests/uninstall_contract.rs` statically checks those rules. It does not run
-Inno and does not uninstall a live copy.
+`tests/uninstall_contract.rs` statically checks those rules. The hosted lifecycle
+harness checks their live behavior after both a clean install and an upgrade.
 
 ## What uninstall must never do
 

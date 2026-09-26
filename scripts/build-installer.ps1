@@ -37,9 +37,9 @@ if ($updateRepository -notmatch '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$') {
 
 Push-Location $repoRoot
 try {
-    cargo build --release
+    cargo build --locked --release
     if ($LASTEXITCODE -ne 0) {
-        throw "cargo build --release failed with exit code $LASTEXITCODE."
+        throw "cargo build --locked --release failed with exit code $LASTEXITCODE."
     }
 }
 finally {
