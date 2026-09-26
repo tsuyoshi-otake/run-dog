@@ -39,26 +39,21 @@ function Get-RunDogProcesses {
 }
 
 function Get-UninstallEntries {
+    # Inno's default DisplayName includes a version label. Match the stable
+    # package identity instead of assuming that localized display text is exact.
+    $identity = Select-String -LiteralPath (Join-Path $PSScriptRoot '../installer/RunDog.iss') `
+        -Pattern '^AppId=\{(\{[0-9A-Fa-f-]{36}\})$'
+    if ($null -eq $identity) { throw 'Installer AppId was not found.' }
+    $entryName = "$($identity.Matches[0].Groups[1].Value)_is1"
     $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey(
-        'Software\Microsoft\Windows\CurrentVersion\Uninstall')
+        "Software\Microsoft\Windows\CurrentVersion\Uninstall\$entryName")
     if ($null -eq $key) { return @() }
     try {
-        $matches = @()
-        foreach ($name in $key.GetSubKeyNames()) {
-            $entry = $key.OpenSubKey($name)
-            if ($null -ne $entry) {
-                try {
-                    if ($entry.GetValue('DisplayName') -eq 'RunDog') {
-                        $matches += [pscustomobject]@{
-                            Key = $name
-                            Version = [string]$entry.GetValue('DisplayVersion')
-                            Location = [string]$entry.GetValue('InstallLocation')
-                        }
-                    }
-                } finally { $entry.Dispose() }
-            }
-        }
-        return $matches
+        return @([pscustomobject]@{
+            Key = $entryName
+            Version = [string]$key.GetValue('DisplayVersion')
+            Location = [string]$key.GetValue('InstallLocation')
+        })
     } finally { $key.Dispose() }
 }
 
