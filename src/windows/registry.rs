@@ -656,15 +656,22 @@ fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(Some(0)).collect()
 }
 
-/// Test helper: unique HKCU path for live hive integration tests.
+/// Test helper: unique HKCU path outside the production settings subtree.
 #[must_use]
 pub fn test_hive_path(suffix: &str) -> String {
-    format!("Software\\SystemExe\\RunDog\\.test\\{suffix}")
+    format!("Software\\SystemExe\\RunDogTests\\{suffix}")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::wide;
+    use super::{test_hive_path, wide, DEFAULT_SETTINGS_KEY};
+
+    #[test]
+    fn component_live_test_hive_is_outside_production_settings() {
+        let path = test_hive_path("isolated");
+        assert_ne!(path, DEFAULT_SETTINGS_KEY);
+        assert!(!path.starts_with(&format!("{DEFAULT_SETTINGS_KEY}\\")));
+    }
 
     #[test]
     fn component_utf16_encoder_is_nul_terminated_and_preserves_non_ascii() {

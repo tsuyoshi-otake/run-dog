@@ -119,3 +119,8 @@ Verify は Rust の静的解析・回帰テスト・依存監査に加え、測�
 実行ログは CI artifact に 7 日保存する。詳しい環境制約と手順は
 [`installer/README.md`](installer/README.md) を参照。8 時間の常駐試験や実ユーザーの
 設定を使う手動試験の代わりにはならない。
+
+HKCU 結合テストは `Software\SystemExe\RunDogTests` を使用する。
+製品キー配下の `.test` では、子キーだけを操作しても製品の親キーが作られ、
+新規導入の前提を壊す。`test_hive_path` にテスト保存先を集約し、
+製品キーの外にあることと、Rust テスト後も新規導入できることを検証する。

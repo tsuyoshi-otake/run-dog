@@ -41,24 +41,6 @@ jobs:
       - name: test
         run: cargo test --locked --all-targets
 
-      # Exact keys only. PRs may restore, but only trusted push/manual runs save.
-      - name: Restore cargo-audit executable
-        id: audit-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0, 2026-06-26
-        with:
-          path: ~/tmp/rundog-audit/bin/cargo-audit.exe
-          key: cargo-audit-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.cachekey }}-${{ env.CARGO_AUDIT_VERSION }}
-
-      - name: dependency audit
-        run: .\scripts\invoke-dependency-audit.ps1 -ToolRoot "$env:USERPROFILE/tmp/rundog-audit" -Version $env:CARGO_AUDIT_VERSION
-
-      - name: Save cargo-audit executable
-        if: steps.audit-cache.outputs.cache-hit != 'true' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0, 2026-06-26
-        with:
-          path: ~/tmp/rundog-audit/bin/cargo-audit.exe
-          key: ${{ steps.audit-cache.outputs.cache-primary-key }}
-
       - name: release build
         run: cargo build --locked --release
 
@@ -97,3 +79,21 @@ jobs:
           name: installer-lifecycle-${{ github.run_id }}-${{ github.run_attempt }}
           path: ~/tmp/run-dog-installer/evidence
           retention-days: 7
+
+      # Exact keys only. PRs may restore, but only trusted push/manual runs save.
+      - name: Restore cargo-audit executable
+        id: audit-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0, 2026-06-26
+        with:
+          path: ~/tmp/rundog-audit/bin/cargo-audit.exe
+          key: cargo-audit-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.cachekey }}-${{ env.CARGO_AUDIT_VERSION }}
+
+      - name: dependency audit
+        run: .\scripts\invoke-dependency-audit.ps1 -ToolRoot "$env:USERPROFILE/tmp/rundog-audit" -Version $env:CARGO_AUDIT_VERSION
+
+      - name: Save cargo-audit executable
+        if: steps.audit-cache.outputs.cache-hit != 'true' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0, 2026-06-26
+        with:
+          path: ~/tmp/rundog-audit/bin/cargo-audit.exe
+          key: ${{ steps.audit-cache.outputs.cache-primary-key }}
