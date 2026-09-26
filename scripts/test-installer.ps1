@@ -269,6 +269,9 @@ public static class RunDogInstallerHarnessWindow {
     $residentId = [int]$resident.ProcessId
     $process = [Diagnostics.Process]::GetProcessById($residentId)
     try {
+        # An attached Process must open and retain its handle before exit;
+        # otherwise WaitForExit can succeed while ExitCode is unavailable.
+        [void]$process.Handle
         # Inno returns after spawning the resident. The process and its mutex
         # exist before icon loading and window creation finish.
         $readyDeadline = [DateTime]::UtcNow.AddSeconds(20)
