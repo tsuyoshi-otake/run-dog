@@ -6294,7 +6294,6 @@ mod tests {
     #[test]
     fn component_older_jsonl_still_counts_after_newer_file() {
         use super::{unix_now_ms, UsageCollector, UsageTick};
-        use crate::core::local_ymd;
 
         let root = std::env::temp_dir().join(format!(
             "run-dog-usage-order-{}-{}",
@@ -6304,11 +6303,7 @@ mod tests {
         let claude_dir = root.join("claude");
         let project = claude_dir.join("projects").join("p1");
         fs::create_dir_all(&project).expect("temp project");
-        let now = unix_now_ms();
-        let (year, month, day) = local_ymd(now, 0);
-        let older_day = if day > 1 { day - 1 } else { day };
-        let older_stamp = format!("{year:04}-{month:02}-{older_day:02}T01:00:00Z");
-        let newer_stamp = format!("{year:04}-{month:02}-{day:02}T23:00:00Z");
+        let stamp = stamp_at(stable_test_now());
         let event = |id: &str, stamp: &str| {
             format!(
                 r#"{{"type":"assistant","timestamp":"{stamp}","requestId":"{id}","message":{{"id":"{id}","model":"claude-opus-5","usage":{{"input_tokens":1000000,"output_tokens":0}}}}}}"#
@@ -6316,13 +6311,13 @@ mod tests {
         };
         fs::write(
             project.join("older.jsonl"),
-            format!("{}\n", event("old", &older_stamp)),
+            format!("{}\n", event("old", &stamp)),
         )
         .expect("older jsonl");
         std::thread::sleep(std::time::Duration::from_millis(20));
         fs::write(
             project.join("newer.jsonl"),
-            format!("{}\n", event("new", &newer_stamp)),
+            format!("{}\n", event("new", &stamp)),
         )
         .expect("newer jsonl");
 
