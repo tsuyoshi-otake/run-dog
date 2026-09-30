@@ -474,7 +474,7 @@ fn entry_long_context(key: &'static str, input: f64, cached: f64, output: f64) -
     pricing
 }
 
-fn pricing_table() -> [ModelPricing; 63] {
+fn pricing_table() -> [ModelPricing; 65] {
     [
         entry_cache_read("claude-fable-5-1", 10.0, 0.25, 50.0),
         entry_cache_read("claude-mythos-5-1", 10.0, 0.25, 50.0),
@@ -495,6 +495,7 @@ fn pricing_table() -> [ModelPricing; 63] {
         entry("claude-opus-4-8-fast", 10.0, 50.0),
         entry("claude-opus-4-7-fast", 30.0, 150.0),
         entry("claude-opus-4-6-fast", 30.0, 150.0),
+        entry("claude-sonnet-5-5", 2.0, 10.0),
         entry("claude-sonnet-5", 2.0, 10.0),
         entry("claude-sonnet-4-6", 3.0, 15.0),
         entry("claude-sonnet-4-5", 3.0, 15.0),
@@ -507,6 +508,7 @@ fn pricing_table() -> [ModelPricing; 63] {
         entry("claude-3-sonnet", 3.0, 15.0),
         entry("claude-3-haiku", 0.25, 1.25),
         entry_long_context("gpt-6-astra", 10.0, 1.0, 50.0),
+        entry_long_context("gpt-6.1-sol", 2.0, 0.1, 10.0),
         entry_long_context("gpt-6-sol", 2.0, 0.2, 10.0),
         entry_long_context("gpt-6-luna", 0.1, 0.01, 0.5),
         entry_long_context("gpt-5.6-sol", 5.0, 0.5, 30.0),
@@ -562,11 +564,6 @@ fn apply_revisions(pricing: &mut ModelPricing, effective_day: Option<&str>) {
         return;
     };
     match pricing.key {
-        "claude-sonnet-5" if day >= "2026-09-01" => {
-            pricing.input = 3.0;
-            pricing.output = 15.0;
-            refresh_cache_from_input(pricing);
-        }
         "gpt-5.6-terra" if day >= "2026-07-30" => {
             pricing.input = 2.0;
             pricing.cached_input = 0.2;
@@ -959,7 +956,25 @@ mod tests {
         assert_eq!(cost_cents("claude-sonnet-5", usage, None), Some(1_200));
         assert_eq!(
             cost_cents("claude-sonnet-5", usage, Some("2026-09-01")),
-            Some(1_800)
+            Some(1_200)
+        );
+        assert_eq!(
+            cost_cents("claude-sonnet-5-5", usage, Some("2026-09-30")),
+            Some(1_200)
+        );
+        assert_eq!(
+            cost_cents("claude-sonnet-5-5-20260928", usage, Some("2026-09-30")),
+            Some(1_200)
+        );
+        let sonnet_cache = TokenUsage {
+            cache_read: 1_000_000,
+            cache_write_5m: 1_000_000,
+            cache_write_1h: 1_000_000,
+            ..TokenUsage::default()
+        };
+        assert_eq!(
+            cost_cents("claude-sonnet-5-5", sonnet_cache, Some("2026-09-30")),
+            Some(670)
         );
         assert_eq!(cost_cents("gpt-5.6-sol", usage, None), Some(3_500));
         assert_eq!(
@@ -1110,6 +1125,43 @@ mod tests {
     }
 
     #[test]
+    fn component_gpt61_sol_and_existing_models_match_published_rates() {
+        let standard = TokenUsage {
+            input: 1_000_000,
+            output: 1_000_000,
+            ..TokenUsage::default()
+        };
+        assert_eq!(cost_cents("gpt-6.1-sol", standard, None), Some(1_200));
+        assert_eq!(
+            cost_cents("gpt-6.1-sol-20260930", standard, None),
+            Some(1_200)
+        );
+        assert_eq!(cost_cents("gpt-6-sol", standard, None), Some(1_200));
+        assert_eq!(cost_cents("gpt-6-luna", standard, None), Some(60));
+        assert_eq!(cost_cents("claude-opus-5-5", standard, None), Some(2_400));
+        assert_eq!(
+            cost_cents("claude-opus-5-5-fast", standard, None),
+            Some(4_800)
+        );
+
+        let cached = TokenUsage {
+            cached_input: 1_000_000,
+            ..TokenUsage::default()
+        };
+        assert_eq!(cost_cents("gpt-6.1-sol", cached, None), Some(10));
+        assert_eq!(cost_cents("gpt-6-sol", cached, None), Some(20));
+
+        let long = TokenUsage {
+            long_context_input: standard.input,
+            long_context_output: standard.output,
+            ..standard
+        };
+        assert_eq!(cost_cents("gpt-6.1-sol", long, None), Some(1_900));
+        assert!(!is_long_context_request("gpt-6.1-sol", 272_000));
+        assert!(is_long_context_request("gpt-6.1-sol", 272_001));
+    }
+
+    #[test]
     fn component_rfc3339_preserves_milliseconds_like_date_parse() {
         let whole = parse_rfc3339_ms("2026-08-16T01:02:03Z").expect("whole second");
         assert_eq!(
@@ -1143,7 +1195,7 @@ mod tests {
         );
         assert_eq!(
             cost_cents("claude-sonnet-5", usage, Some(&ymd_iso(2026, 9, 1))),
-            Some(1_800)
+            Some(1_200)
         );
     }
 
