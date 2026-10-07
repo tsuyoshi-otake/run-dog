@@ -1751,13 +1751,56 @@ impl UsageCollector {
 
     fn scan_pending_and_hot(&mut self, window: DayWindow, now_ms: u64) -> (usize, bool) {
         let mut bytes = 0_u64;
+        let mut pending_bytes = 0_u64;
         let mut opens = 0_usize;
         let file_budget = self.file_budget();
         let byte_budget = self.byte_budget();
+        // A long pending backlog can spend the entire normal read budget on
+        // old files. Reserve one bounded read for a recently active, caught-up
+        // file, while pending files retain their own byte budget. This lets
+        // both a new append and the backlog advance on the same tick.
+        let hot_restat = {
+            let pending: HashSet<&PathBuf> = self.pending.iter().collect();
+            self.files
+                .iter()
+                .filter(|(path, cursor)| {
+                    !pending.contains(path)
+                        && (cursor.size == cursor.offset
+                            || cursor.waiting_incomplete
+                            || self.path_retry_terminal(path))
+                        && self.path_retry_due(path, now_ms)
+                        && is_hot(cursor, now_ms)
+                        && now_ms.saturating_sub(cursor.last_stat_ms) >= STAT_COOLDOWN_MS
+                })
+                .min_by_key(|(_, cursor)| {
+                    (
+                        window.day(cursor.mtime_ms) != window.today,
+                        cursor.last_stat_ms,
+                        std::cmp::Reverse(cursor.mtime_ms),
+                    )
+                })
+                .map(|(path, _)| path.clone())
+        };
+        if self.file_work_remaining > usize::from(!self.pending.is_empty()) {
+            if let Some(path) = hot_restat {
+                self.file_work_remaining -= 1;
+                let consumed = self.scan_file(&path, window, now_ms);
+                if consumed > 0 {
+                    opens += 1;
+                    bytes += consumed;
+                }
+                if self.files.get(&path).is_some_and(|cursor| {
+                    cursor.size != cursor.offset && !cursor.waiting_incomplete
+                }) && !self.path_retry_terminal(&path)
+                {
+                    self.pending.push_back(path);
+                }
+            }
+        }
         let mut queued = self.pending.len();
         while queued > 0
             && opens < file_budget
-            && bytes < byte_budget
+            && pending_bytes < byte_budget
             && self.file_work_remaining > 0
         {
             queued -= 1;
@@ -1769,6 +1812,7 @@ impl UsageCollector {
             if consumed > 0 {
                 opens += 1;
                 bytes += consumed;
+                pending_bytes += consumed;
             }
             let retry_pending = self.path_retries.contains_key(&path);
             if (retry_pending
@@ -1881,7 +1925,7 @@ impl UsageCollector {
                 SourceKind::Codex => SourceKind::Claude,
             },
         ] {
-            if let Some(index) = self.pending.iter().take(64).position(|path| {
+            if let Some(index) = self.pending.iter().position(|path| {
                 self.files.get(path).is_some_and(|cursor| {
                     cursor.kind == kind && window.day(cursor.mtime_ms) == window.today
                 })
@@ -5286,6 +5330,137 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         assert_eq!(usage.month_input_tokens, 80);
         assert_eq!(usage.month_output_tokens, 5);
+    }
+
+    #[test]
+    fn component_today_usage_beyond_first_64_pending_files_is_collected() {
+        use std::time::{Duration, SystemTime};
+
+        let root = PathBuf::from(std::env::var_os("USERPROFILE").unwrap())
+            .join("tmp")
+            .join(format!(
+                "rundog-today-pending-{}-{}",
+                std::process::id(),
+                unix_now_ms()
+            ));
+        let now = stable_test_now();
+        let window = day_window(now);
+        let current = write_codex_session(
+            &root,
+            "today.jsonl",
+            &[token_count_line(
+                &stamp_at(now),
+                1_000_000,
+                0,
+                0,
+                1_000_000,
+                0,
+                0,
+            )],
+        );
+        let mut collector = new_claude_collector(&root);
+        collector.catch_up = false;
+        collector.register_jsonl_file(&current, window, true, now);
+
+        let old_dir = root.join("claude").join("projects").join("old");
+        fs::create_dir_all(&old_dir).unwrap();
+        for index in 0..65 {
+            let path = old_dir.join(format!("{index}.jsonl"));
+            fs::write(&path, b"{}\n").unwrap();
+            fs::File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_times(
+                    fs::FileTimes::new()
+                        .set_modified(SystemTime::now() - Duration::from_secs(86_400)),
+                )
+                .unwrap();
+            collector.register_jsonl_file(&path, window, true, now);
+        }
+        collector.pending.retain(|path| path != &current);
+        collector.pending.push_back(current);
+        collector.last_discover_ms = now;
+
+        collector.tick_at(ptr::null_mut(), now);
+        let today = collector.snapshot().codex.today_cents;
+        let old_progress = collector.files[&old_dir.join("0.jsonl")].offset;
+        fs::remove_dir_all(root).unwrap();
+        assert!(today > 0, "today's usage must win over the old backlog");
+        assert!(old_progress > 0, "the old backlog must also advance");
+    }
+
+    #[test]
+    fn component_today_append_is_restatted_while_old_file_uses_read_budget() {
+        use std::time::{Duration, SystemTime};
+
+        let root = PathBuf::from(std::env::var_os("USERPROFILE").unwrap())
+            .join("tmp")
+            .join(format!(
+                "rundog-today-restat-{}-{}",
+                std::process::id(),
+                unix_now_ms()
+            ));
+        let now = stable_test_now();
+        let window = day_window(now);
+        let current = write_codex_session(
+            &root,
+            "today.jsonl",
+            &[token_count_line(
+                &stamp_at(now),
+                1_000_000,
+                0,
+                0,
+                1_000_000,
+                0,
+                0,
+            )],
+        );
+        let mut collector = new_claude_collector(&root);
+        collector.catch_up = false;
+        collector.register_jsonl_file(&current, window, true, now);
+        collector.last_discover_ms = now;
+        collector.tick_at(ptr::null_mut(), now);
+        let before = collector.snapshot().codex.today_cents;
+        assert!(before > 0);
+
+        append_codex_lines(
+            &current,
+            &[token_count_line(
+                &stamp_at(now + 60_000),
+                1_000_000,
+                0,
+                0,
+                2_000_000,
+                0,
+                0,
+            )],
+        );
+        let old = current_codex_session(&root, "old.jsonl");
+        fs::write(
+            &old,
+            format!("{{\"pad\":\"{}\"}}\n", "x".repeat(128 * 1_024)),
+        )
+        .unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&old)
+            .unwrap()
+            .set_times(
+                fs::FileTimes::new().set_modified(SystemTime::now() - Duration::from_secs(86_400)),
+            )
+            .unwrap();
+        collector.register_jsonl_file(&old, window, true, now);
+        collector.last_discover_ms = now + super::STAT_COOLDOWN_MS;
+        collector.tick_at(ptr::null_mut(), now + super::STAT_COOLDOWN_MS);
+        let after = collector.snapshot().codex.today_cents;
+        let old_progress = collector.files[&old].offset;
+        fs::remove_dir_all(root).unwrap();
+        assert!(
+            after > before,
+            "a live append must be visible despite old unread bytes"
+        );
+        assert!(old_progress > 0, "the old backlog must also advance");
     }
 
     #[test]
