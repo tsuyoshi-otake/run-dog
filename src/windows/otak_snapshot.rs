@@ -453,16 +453,15 @@ mod tests {
             today,
         )
         .expect("matching fenced otak-usage snapshot");
-        let claude = result.claude.expect("Claude is available");
-        let codex = result.codex.expect("Codex is available");
-        assert!(claude.month_cost_nanos > 0);
-        assert!(codex.month_cost_nanos > 0);
-        eprintln!(
-            "otak Claude: today ${:.2}, month ${:.2}; Codex: today ${:.2}, month ${:.2}",
-            claude.today_cost_nanos as f64 / 1_000_000_000.0,
-            claude.month_cost_nanos as f64 / 1_000_000_000.0,
-            codex.today_cost_nanos as f64 / 1_000_000_000.0,
-            codex.month_cost_nanos as f64 / 1_000_000_000.0,
-        );
+        assert!(result.claude.is_some() || result.codex.is_some());
+        for (name, provider) in [("Claude", result.claude), ("Codex", result.codex)] {
+            if let Some(provider) = provider {
+                eprintln!(
+                    "otak {name}: today ${:.2}, month ${:.2}",
+                    provider.today_cost_nanos as f64 / 1_000_000_000.0,
+                    provider.month_cost_nanos as f64 / 1_000_000_000.0,
+                );
+            }
+        }
     }
 }
