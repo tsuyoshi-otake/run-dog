@@ -14,13 +14,19 @@ use crate::core::{cost_nanos, local_ymd, ymd_key, TokenUsage};
 const MAX_JSON_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_TOKEN_FIELD: u64 = 1_000_000_000_000;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct CodexSnapshot {
-    pub updated_at_ms: u64,
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) struct ProviderSnapshot {
     pub today_cost_nanos: u64,
     pub month_cost_nanos: u64,
     pub month_input_tokens: u64,
     pub month_output_tokens: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct OtakSnapshot {
+    pub updated_at_ms: u64,
+    pub claude: Option<ProviderSnapshot>,
+    pub codex: Option<ProviderSnapshot>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -32,13 +38,13 @@ struct Fence {
 
 /// `month` is YYYYMM01 and `today` is YYYYMMDD in the machine's local time.
 /// A missing, stale-month, changed, or malformed extension snapshot is ignored.
-pub(super) fn read_codex_snapshot(
+pub(super) fn read_usage_snapshot(
     storage_dir: &Path,
     claude_dir: &Path,
     codex_home: &Path,
     month: u32,
     today: u32,
-) -> Option<CodexSnapshot> {
+) -> Option<OtakSnapshot> {
     if month % 100 != 1 || today / 100 != month / 100 || today < month {
         return None;
     }
@@ -103,13 +109,16 @@ fn read_bounded_json(path: &Path) -> Option<Value> {
     serde_json::from_slice(&bytes).ok()
 }
 
-fn parse_snapshot(raw: &Value, fence: &Fence, month: u32, today: u32) -> Option<CodexSnapshot> {
+fn parse_snapshot(raw: &Value, fence: &Fence, month: u32, today: u32) -> Option<OtakSnapshot> {
     if raw.get("version")?.as_u64()? != 1
         || raw.get("fence").and_then(parse_fence).as_ref()? != fence
         || raw.get("leader")?.as_str()?.is_empty()
-        || !raw.get("claudeAvailable")?.is_boolean()
-        || !raw.get("codexAvailable")?.as_bool()?
     {
+        return None;
+    }
+    let claude_available = raw.get("claudeAvailable")?.as_bool()?;
+    let codex_available = raw.get("codexAvailable")?.as_bool()?;
+    if !claude_available && !codex_available {
         return None;
     }
     let updated_at_ms = raw.get("updatedAtMs")?.as_u64()?;
@@ -122,12 +131,10 @@ fn parse_snapshot(raw: &Value, fence: &Fence, month: u32, today: u32) -> Option<
         return None;
     }
 
-    let mut result = CodexSnapshot {
+    let mut result = OtakSnapshot {
         updated_at_ms,
-        today_cost_nanos: 0,
-        month_cost_nanos: 0,
-        month_input_tokens: 0,
-        month_output_tokens: 0,
+        claude: claude_available.then(ProviderSnapshot::default),
+        codex: codex_available.then(ProviderSnapshot::default),
     };
     let days = raw.get("days")?.as_object()?;
     if days.is_empty() || days.len() > 31 {
@@ -144,24 +151,27 @@ fn parse_snapshot(raw: &Value, fence: &Fence, month: u32, today: u32) -> Option<
         }
         for (key, raw_usage) in models {
             let usage = parse_usage(raw_usage)?;
-            let Some(model) = key.strip_prefix("codex/") else {
-                if key.starts_with("claude/") {
-                    continue;
-                }
-                return None;
+            let (model, provider) = if let Some(model) = key.strip_prefix("claude/") {
+                (model, &mut result.claude)
+            } else {
+                (key.strip_prefix("codex/")?, &mut result.codex)
             };
             if model.is_empty() || model.len() > 256 {
                 return None;
             }
+            let Some(provider) = provider.as_mut() else {
+                continue;
+            };
             // otak-usage counts unknown models as $0, but retains their tokens.
             let cost = cost_nanos(model, usage, Some(day_key)).unwrap_or(0);
-            result.month_cost_nanos = result.month_cost_nanos.checked_add(cost)?;
-            result.month_input_tokens = result
+            provider.month_cost_nanos = provider.month_cost_nanos.checked_add(cost)?;
+            provider.month_input_tokens = provider
                 .month_input_tokens
                 .checked_add(usage.processed_input_tokens())?;
-            result.month_output_tokens = result.month_output_tokens.checked_add(usage.output)?;
+            provider.month_output_tokens =
+                provider.month_output_tokens.checked_add(usage.output)?;
             if day == today {
-                result.today_cost_nanos = result.today_cost_nanos.checked_add(cost)?;
+                provider.today_cost_nanos = provider.today_cost_nanos.checked_add(cost)?;
             }
         }
     }
@@ -275,7 +285,7 @@ fn to_base36(mut value: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{group_key, parse_snapshot, read_codex_snapshot, Fence};
+    use super::{group_key, parse_snapshot, read_usage_snapshot, Fence};
     use serde_json::json;
     use std::{
         path::{Path, PathBuf},
@@ -291,7 +301,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_prices_day_buckets_and_includes_cached_input_tokens() {
+    fn snapshot_prices_both_providers_and_includes_cached_input_tokens() {
         let fence = fence();
         let snapshot = json!({
             "version": 1,
@@ -302,15 +312,24 @@ mod tests {
             "fence": {"epoch": 7, "holder": "window-1", "leaseToken": fence.token},
             "days": {
                 "2026-09-18": {"codex/gpt-6-luna": {"input": 1000000, "cachedInput": 500000, "cacheRead": 0, "cacheWrite5m": 0, "cacheWrite1h": 0, "output": 100000}},
-                "2026-09-19": {"codex/gpt-6-luna": {"input": 1000000, "cachedInput": 0, "cacheRead": 0, "cacheWrite5m": 0, "cacheWrite1h": 0, "output": 100000}}
+                "2026-09-19": {
+                    "codex/gpt-6-luna": {"input": 1000000, "cachedInput": 0, "cacheRead": 0, "cacheWrite5m": 0, "cacheWrite1h": 0, "output": 100000},
+                    "claude/claude-sonnet-5-5": {"input": 100, "cachedInput": 0, "cacheRead": 1000000, "cacheWrite5m": 0, "cacheWrite1h": 0, "output": 100000}
+                }
             }
         });
         let result = parse_snapshot(&snapshot, &fence, 20260901, 20260919).unwrap();
         assert_eq!(result.updated_at_ms, 1_789_776_000_000);
-        assert_eq!(result.month_input_tokens, 2_500_000);
-        assert_eq!(result.month_output_tokens, 200_000);
-        assert!(result.month_cost_nanos > result.today_cost_nanos);
-        assert!(result.today_cost_nanos > 0);
+        let codex = result.codex.unwrap();
+        let claude = result.claude.unwrap();
+        assert_eq!(codex.month_input_tokens, 2_500_000);
+        assert_eq!(codex.month_output_tokens, 200_000);
+        assert!(codex.month_cost_nanos > codex.today_cost_nanos);
+        assert!(codex.today_cost_nanos > 0);
+        assert_eq!(claude.month_input_tokens, 1_000_100);
+        assert_eq!(claude.month_output_tokens, 100_000);
+        assert_eq!(claude.month_cost_nanos, claude.today_cost_nanos);
+        assert!(claude.today_cost_nanos > 0);
     }
 
     #[test]
@@ -332,6 +351,16 @@ mod tests {
         assert!(parse_snapshot(&raw, &fence, 20260901, 20260919).is_none());
         raw["days"]["2026-09-19"]["codex/gpt-6-luna"]["input"] = json!(100);
         assert!(parse_snapshot(&raw, &fence, 20261001, 20261019).is_none());
+
+        raw["claudeAvailable"] = json!(false);
+        let codex_only = parse_snapshot(&raw, &fence, 20260901, 20260919).unwrap();
+        assert!(codex_only.claude.is_none());
+        assert!(codex_only.codex.is_some());
+        raw["claudeAvailable"] = json!(true);
+        raw["codexAvailable"] = json!(false);
+        let claude_only = parse_snapshot(&raw, &fence, 20260901, 20260919).unwrap();
+        assert!(claude_only.claude.is_some());
+        assert!(claude_only.codex.is_none());
     }
 
     #[test]
@@ -387,7 +416,9 @@ mod tests {
         std::fs::write(&lock_path, lock.to_string()).unwrap();
         std::fs::write(&artifact_path, snapshot.to_string()).unwrap();
         assert!(
-            read_codex_snapshot(&storage, claude, codex, 20260901, 20260919)
+            read_usage_snapshot(&storage, claude, codex, 20260901, 20260919)
+                .unwrap()
+                .codex
                 .unwrap()
                 .month_cost_nanos
                 > 0
@@ -395,14 +426,14 @@ mod tests {
         let replacement = json!({"version": 2, "epoch": 8, "holder": "window-2",
             "leaseToken": "11111111111111111111111111111111", "heartbeatMs": 0});
         std::fs::write(&lock_path, replacement.to_string()).unwrap();
-        assert!(read_codex_snapshot(&storage, claude, codex, 20260901, 20260919).is_none());
+        assert!(read_usage_snapshot(&storage, claude, codex, 20260901, 20260919).is_none());
         std::fs::remove_dir_all(storage).unwrap();
     }
 
     /// Run manually on a workstation with the otak-usage VS Code extension.
     #[test]
     #[ignore]
-    fn live_extension_snapshot_has_a_current_month_codex_total() {
+    fn live_extension_snapshot_has_current_month_provider_totals() {
         let profile = PathBuf::from(std::env::var_os("USERPROFILE").unwrap());
         let storage = PathBuf::from(std::env::var_os("APPDATA").unwrap())
             .join("Code/User/globalStorage/odangoo.otak-usage");
@@ -414,7 +445,7 @@ mod tests {
             crate::core::local_ymd(now_ms, super::super::usage::timezone_bias_minutes());
         let today = crate::core::ymd_key(year, month, day);
         let month_start = crate::core::ymd_key(year, month, 1);
-        let result = read_codex_snapshot(
+        let result = read_usage_snapshot(
             &storage,
             &profile.join(".claude"),
             &profile.join(".codex"),
@@ -422,13 +453,16 @@ mod tests {
             today,
         )
         .expect("matching fenced otak-usage snapshot");
-        assert!(result.month_cost_nanos > 0);
+        let claude = result.claude.expect("Claude is available");
+        let codex = result.codex.expect("Codex is available");
+        assert!(claude.month_cost_nanos > 0);
+        assert!(codex.month_cost_nanos > 0);
         eprintln!(
-            "otak Codex: today ${:.2}, month ${:.2}, input {}, output {}",
-            result.today_cost_nanos as f64 / 1_000_000_000.0,
-            result.month_cost_nanos as f64 / 1_000_000_000.0,
-            result.month_input_tokens,
-            result.month_output_tokens,
+            "otak Claude: today ${:.2}, month ${:.2}; Codex: today ${:.2}, month ${:.2}",
+            claude.today_cost_nanos as f64 / 1_000_000_000.0,
+            claude.month_cost_nanos as f64 / 1_000_000_000.0,
+            codex.today_cost_nanos as f64 / 1_000_000_000.0,
+            codex.month_cost_nanos as f64 / 1_000_000_000.0,
         );
     }
 }

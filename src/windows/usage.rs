@@ -64,7 +64,7 @@ use crate::core::{
 #[cfg(test)]
 use crate::core::UsageCheckpoint;
 
-use super::otak_snapshot::{read_codex_snapshot, CodexSnapshot};
+use super::otak_snapshot::{read_usage_snapshot, OtakSnapshot, ProviderSnapshot};
 use super::usage_store::FileUsageStore;
 
 pub const USAGE_TIMER_ID: usize = 4;
@@ -233,8 +233,8 @@ pub struct UsageCollector {
     cursor_reset_count: u64,
     cancelled: bool,
     checkpoint_dirty: bool,
-    codex_cache_floor: Option<CodexSnapshot>,
-    last_codex_cache_attempt_ms: u64,
+    otak_cache_floor: Option<OtakSnapshot>,
+    last_otak_cache_attempt_ms: u64,
     last_checkpoint_attempt_ms: u64,
     persist_checkpoint: bool,
     month_rescan_notify: bool,
@@ -278,6 +278,21 @@ impl ProviderRemoteSlot {
         self.generation
             .store(self.state.request_generation, Ordering::SeqCst);
     }
+}
+
+fn apply_cache_floor(usage: &mut ProviderUsage, floor: ProviderSnapshot) {
+    usage.add_month_nanos(
+        floor
+            .month_cost_nanos
+            .saturating_sub(usage.month_cost_nanos),
+    );
+    usage.add_today_nanos(
+        floor
+            .today_cost_nanos
+            .saturating_sub(usage.today_cost_nanos),
+    );
+    usage.month_input_tokens = usage.month_input_tokens.max(floor.month_input_tokens);
+    usage.month_output_tokens = usage.month_output_tokens.max(floor.month_output_tokens);
 }
 
 impl UsageCollector {
@@ -357,8 +372,8 @@ impl UsageCollector {
             cursor_reset_count: 0,
             cancelled: false,
             checkpoint_dirty: false,
-            codex_cache_floor: None,
-            last_codex_cache_attempt_ms: 0,
+            otak_cache_floor: None,
+            last_otak_cache_attempt_ms: 0,
             last_checkpoint_attempt_ms: 0,
             persist_checkpoint,
             month_rescan_notify: false,
@@ -414,25 +429,13 @@ impl UsageCollector {
             month_scan_in_progress: self.catch_up,
             ..self.snapshot
         };
-        if let Some(cache) = self.codex_cache_floor {
-            snapshot.codex.add_month_nanos(
-                cache
-                    .month_cost_nanos
-                    .saturating_sub(snapshot.codex.month_cost_nanos),
-            );
-            snapshot.codex.add_today_nanos(
-                cache
-                    .today_cost_nanos
-                    .saturating_sub(snapshot.codex.today_cost_nanos),
-            );
-            snapshot.codex.month_input_tokens = snapshot
-                .codex
-                .month_input_tokens
-                .max(cache.month_input_tokens);
-            snapshot.codex.month_output_tokens = snapshot
-                .codex
-                .month_output_tokens
-                .max(cache.month_output_tokens);
+        if let Some(cache) = self.otak_cache_floor {
+            if let Some(claude) = cache.claude {
+                apply_cache_floor(&mut snapshot.claude, claude);
+            }
+            if let Some(codex) = cache.codex {
+                apply_cache_floor(&mut snapshot.codex, codex);
+            }
         }
         snapshot
     }
@@ -590,11 +593,11 @@ impl UsageCollector {
         // Keep the extension's complete month as a display floor. The local
         // aggregate and cursors remain independent, so rediscovered files
         // cannot count an already cached record twice.
-        if self.last_codex_cache_attempt_ms == 0
-            || now_ms.saturating_sub(self.last_codex_cache_attempt_ms) >= 60_000
+        if self.last_otak_cache_attempt_ms == 0
+            || now_ms.saturating_sub(self.last_otak_cache_attempt_ms) >= 60_000
         {
-            self.last_codex_cache_attempt_ms = now_ms;
-            self.try_reconcile_codex_cache(window);
+            self.last_otak_cache_attempt_ms = now_ms;
+            self.try_reconcile_otak_cache(window);
         }
 
         let tick = if self.discover.is_empty()
@@ -943,7 +946,7 @@ impl UsageCollector {
             return;
         }
         self.day_key = window.today;
-        self.codex_cache_floor = None;
+        self.otak_cache_floor = None;
         self.snapshot.claude.clear_today_cost();
         self.snapshot.codex.clear_today_cost();
         self.checkpoint_dirty = true;
@@ -958,7 +961,7 @@ impl UsageCollector {
             return;
         }
         self.month_key = window.month_start;
-        self.codex_cache_floor = None;
+        self.otak_cache_floor = None;
         self.snapshot.claude.clear_today_cost();
         self.snapshot.claude.clear_month_cost();
         self.snapshot.claude.month_input_tokens = 0;
@@ -1960,7 +1963,7 @@ impl UsageCollector {
         self.persist_checkpoint_if_needed(window);
     }
 
-    fn try_reconcile_codex_cache(&mut self, window: DayWindow) {
+    fn try_reconcile_otak_cache(&mut self, window: DayWindow) {
         if !self.store_is_production() {
             return;
         }
@@ -1972,7 +1975,7 @@ impl UsageCollector {
             .join("User")
             .join("globalStorage")
             .join("odangoo.otak-usage");
-        let Some(source) = read_codex_snapshot(
+        let Some(source) = read_usage_snapshot(
             &storage_dir,
             &self.claude_dir,
             &self.codex_home,
@@ -1981,17 +1984,17 @@ impl UsageCollector {
         ) else {
             return;
         };
-        self.reconcile_codex_snapshot(window, source);
+        self.reconcile_otak_snapshot(source);
     }
 
-    fn reconcile_codex_snapshot(&mut self, _window: DayWindow, source: CodexSnapshot) -> bool {
+    fn reconcile_otak_snapshot(&mut self, source: OtakSnapshot) -> bool {
         if self
-            .codex_cache_floor
+            .otak_cache_floor
             .is_some_and(|current| current.updated_at_ms >= source.updated_at_ms)
         {
             return false;
         }
-        self.codex_cache_floor = Some(source);
+        self.otak_cache_floor = Some(source);
         true
     }
 
@@ -3640,7 +3643,7 @@ mod tests {
         parse_claude_line, parse_claude_usage_response, parse_codex_limits_line, parse_codex_model,
         parse_codex_usage_line, parse_timestamp, parse_wham_usage_response,
         persist_claude_credentials, read_claude_credentials, read_regular_file, unix_now_ms,
-        CodexSnapshot, FileCursor, SourceKind, UsageCollector, UsageTick,
+        FileCursor, OtakSnapshot, ProviderSnapshot, SourceKind, UsageCollector, UsageTick,
     };
     use crate::core::{local_hms, local_ymd, CursorKind, CursorRebuildReason, UsageCursor};
     use std::{
@@ -3650,20 +3653,30 @@ mod tests {
     };
 
     #[test]
-    fn component_codex_cache_floor_is_independent_of_local_accounting() {
-        let root = std::env::temp_dir().join("run-dog-codex-cache-reconcile-test");
+    fn component_otak_cache_floors_are_independent_of_local_accounting() {
+        let root = std::env::temp_dir().join("run-dog-otak-cache-reconcile-test");
         let mut collector =
             UsageCollector::with_dirs(root.join("claude"), root.join("codex"), false);
         let window = day_window(unix_now_ms());
         collector.catch_up = false;
+        collector.snapshot.claude.add_month_nanos(1_500_000_000_000);
+        collector.snapshot.claude.add_today_nanos(4_880_000_000);
         collector.snapshot.codex.add_month_nanos(2_870_620_000_000);
         collector.snapshot.codex.add_today_nanos(42_760_000_000);
-        let source = CodexSnapshot {
+        let source = OtakSnapshot {
             updated_at_ms: unix_now_ms(),
-            month_cost_nanos: 8_206_370_000_000,
-            today_cost_nanos: 49_480_000_000,
-            month_input_tokens: 4_000_000_000,
-            month_output_tokens: 20_000_000,
+            claude: Some(ProviderSnapshot {
+                month_cost_nanos: 3_000_000_000_000,
+                today_cost_nanos: 106_000_000_000,
+                month_input_tokens: 5_000_000_000,
+                month_output_tokens: 30_000_000,
+            }),
+            codex: Some(ProviderSnapshot {
+                month_cost_nanos: 8_206_370_000_000,
+                today_cost_nanos: 49_480_000_000,
+                month_input_tokens: 4_000_000_000,
+                month_output_tokens: 20_000_000,
+            }),
         };
         collector.files.insert(
             root.join("codex/session.jsonl"),
@@ -3682,17 +3695,22 @@ mod tests {
                 kind: SourceKind::Codex,
             },
         );
-        assert!(collector.reconcile_codex_snapshot(window, source));
+        assert!(collector.reconcile_otak_snapshot(source));
+        assert_eq!(collector.snapshot.claude.today_cost_nanos, 4_880_000_000);
         assert_eq!(collector.snapshot.codex.month_cost_nanos, 2_870_620_000_000);
         assert_eq!(
+            collector.snapshot().claude.today_cost_nanos,
+            source.claude.unwrap().today_cost_nanos
+        );
+        assert_eq!(
             collector.snapshot().codex.month_cost_nanos,
-            source.month_cost_nanos
+            source.codex.unwrap().month_cost_nanos
         );
         assert_eq!(
             collector.snapshot().codex.today_cost_nanos,
-            source.today_cost_nanos
+            source.codex.unwrap().today_cost_nanos
         );
-        assert!(!collector.reconcile_codex_snapshot(window, source));
+        assert!(!collector.reconcile_otak_snapshot(source));
         let restored = crate::core::UsageState::decode(&collector.build_state(window).encode())
             .expect("durable local-only aggregate");
         assert_eq!(restored.aggregate.codex_cache_reconciled_month, None);
@@ -3700,22 +3718,40 @@ mod tests {
             restored.aggregate.snapshot.codex.month_cost_nanos,
             2_870_620_000_000
         );
+        assert_eq!(
+            restored.aggregate.snapshot.claude.today_cost_nanos,
+            4_880_000_000
+        );
         collector.snapshot.codex.add_month_nanos(10_000_000_000);
         collector.snapshot.codex.add_today_nanos(10_000_000_000);
+        collector.snapshot.claude.add_today_nanos(10_000_000_000);
         assert_eq!(
             collector.snapshot().codex.month_cost_nanos,
-            source.month_cost_nanos
+            source.codex.unwrap().month_cost_nanos
         );
-        let updated = CodexSnapshot {
+        assert_eq!(
+            collector.snapshot().claude.today_cost_nanos,
+            source.claude.unwrap().today_cost_nanos
+        );
+        let updated = OtakSnapshot {
             updated_at_ms: source.updated_at_ms + 1,
-            month_cost_nanos: source.month_cost_nanos + 10_000_000_000,
-            today_cost_nanos: source.today_cost_nanos + 10_000_000_000,
+            codex: Some(ProviderSnapshot {
+                month_cost_nanos: source.codex.unwrap().month_cost_nanos + 10_000_000_000,
+                today_cost_nanos: source.codex.unwrap().today_cost_nanos + 10_000_000_000,
+                ..source.codex.unwrap()
+            }),
             ..source
         };
-        assert!(collector.reconcile_codex_snapshot(window, updated));
+        assert!(collector.reconcile_otak_snapshot(updated));
         assert_eq!(
             collector.snapshot().codex.month_cost_nanos,
-            updated.month_cost_nanos
+            updated.codex.unwrap().month_cost_nanos
+        );
+        collector.snapshot.claude.add_today_nanos(110_000_000_000);
+        assert_eq!(
+            collector.snapshot().claude.today_cost_nanos,
+            collector.snapshot.claude.today_cost_nanos,
+            "local usage above the floor wins"
         );
     }
 
