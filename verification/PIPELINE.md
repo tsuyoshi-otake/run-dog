@@ -27,4 +27,6 @@ $env:RUN_DOG_TLA2TOOLS = 'C:\\path\\to\\tla2tools.jar'
 
 `pbt-counterexample` は現行実装の適合テストではない。最小反例が現れることを確認して 0 で終わる負の検証 stage であり、反例が消えた場合は「修正された」か「probe が壊れた」かを人が判別する。修正後には期待値を反転し、通常の green PBT に昇格させる。
 
+使用量の追加・再読込・再起動 PBT は同じ日の中で実行する。イベント時刻と仮想時計を `stable_test_now()` に揃え、restat を強制する tick では 1 ms だけ進め、終了時に日付が変わっていないことも確認する。#99 の UTC 23 時台の CI では、旧 fixture が tick ごとに 1 分進めて日付をまたぎ、正常な Today リセットを取り込み失敗と誤判定した。失敗 seed は `verification/evidence/usage-ingest-pbt.regressions` に保持し、日付変更の動作は別の rollover regression で確認する。
+
 TLC の 3 actor 全探索、全 `RunDogCurrent*.cfg` の反例探索、及び全 mutation は探索量・実行時間が大きいため release candidate で必須、通常 pull request では scheduled job とする。現行プロトコル model の FAIL は既知 finding の再現であって、参照仕様の PASS と混同してはならない。

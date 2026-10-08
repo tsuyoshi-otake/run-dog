@@ -7434,11 +7434,15 @@ mod tests {
             let store_root = root.join("store");
             let session = claude_session(&root);
             fs::write(&session, "").expect("empty session");
-            let stamp = current_stamp();
+            // This property models ingestion within one day; rollover has separate
+            // regressions. Restats are forced below, so ticks need not consume a
+            // real cooldown minute and accidentally cross midnight on CI.
+            let mut logical_now = stable_test_now();
+            let test_day = day_window(logical_now).today;
+            let stamp = stamp_at(logical_now);
             let mut collector = new_persisted_collector(&root, store_root.clone());
             let mut unique_events = 0_u64;
             let mut last_line = None;
-            let mut logical_now = unix_now_ms();
 
             for action in actions {
                 match action {
@@ -7468,15 +7472,13 @@ mod tests {
                     }
                     2 => {
                         collector.test_force_restat();
-                        logical_now =
-                            logical_now.saturating_add(super::STAT_COOLDOWN_MS + 1);
+                        logical_now = logical_now.saturating_add(1);
                         let _ = collector.tick_at(ptr::null_mut(), logical_now);
                     }
                     3 => {
                         for _ in 0..16 {
                             collector.test_force_restat();
-                            logical_now =
-                                logical_now.saturating_add(super::STAT_COOLDOWN_MS + 1);
+                            logical_now = logical_now.saturating_add(1);
                             if collector.tick_at(ptr::null_mut(), logical_now) == UsageTick::Idle
                                 && !collector.catch_up
                             {
@@ -7494,7 +7496,7 @@ mod tests {
 
             for _ in 0..64 {
                 collector.test_force_restat();
-                logical_now = logical_now.saturating_add(super::STAT_COOLDOWN_MS + 1);
+                logical_now = logical_now.saturating_add(1);
                 if collector.tick_at(ptr::null_mut(), logical_now) == UsageTick::Idle
                     && !collector.catch_up
                 {
@@ -7504,6 +7506,7 @@ mod tests {
             let expected = unique_events.saturating_mul(1_000_000);
             let usage = collector.snapshot().claude;
             let _ = fs::remove_dir_all(&root);
+            proptest::prop_assert_eq!(day_window(logical_now).today, test_day);
             proptest::prop_assert_eq!(usage.month_input_tokens, expected);
             proptest::prop_assert_eq!(
                 usage.today_cost_nanos,
