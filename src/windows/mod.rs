@@ -18,6 +18,7 @@ mod storage;
 mod tray;
 mod update;
 mod usage;
+mod usage_status;
 pub mod usage_store;
 mod usage_store_path;
 
@@ -76,6 +77,7 @@ use self::{
         UsageCollector, UsageTick, USAGE_CATCH_UP_INTERVAL_MS, USAGE_CONTINUE_INTERVAL_MS,
         USAGE_FIRST_INTERVAL_MS, USAGE_IDLE_INTERVAL_MS, USAGE_TIMER_ID,
     },
+    usage_status::UsageStatusWriter,
 };
 
 const WINDOW_CLASS_NAME: &str = "SystemExe.RunDog.MessageWindow";
@@ -207,6 +209,7 @@ struct WindowContext {
     platform: WindowsPlatform,
     updater: UpdateController,
     usage: UsageCollector,
+    usage_status: UsageStatusWriter,
     taskbar_recreated_message: u32,
     startup_update: StartupUpdateGate,
 }
@@ -233,6 +236,7 @@ impl WindowContext {
             platform: WindowsPlatform::new(icons, settings, store),
             updater: UpdateController::new(),
             usage: UsageCollector::new(),
+            usage_status: UsageStatusWriter::production(),
             taskbar_recreated_message: 0,
             startup_update: StartupUpdateGate::default(),
         }
@@ -258,6 +262,11 @@ impl WindowContext {
     fn tick_usage(&mut self) {
         let more = self.usage.tick(self.platform.hwnd);
         self.dispatch(Event::UsageSample(self.usage.snapshot()));
+        self.usage_status.record(
+            self.usage.diagnostic_source(),
+            self.app.snapshot().usage,
+            more,
+        );
         if self.usage.take_month_rescan_finished() {
             self.platform.tray.notify_month_rescan_finished();
         }

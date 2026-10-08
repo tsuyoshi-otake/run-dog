@@ -18,7 +18,7 @@ workers. There is no GUI framework and no resident poller thread.
 | Settings | `HKCU\Software\SystemExe\RunDog` |
 | Startup | `HKCU\...\Run` value `RunDog` |
 | Usage state | `%LOCALAPPDATA%\RunDog\usage` (`rundog-usage-state-2`) |
-| Process diagnostics | `%LOCALAPPDATA%\RunDog\diagnostics` (64 KiB bounded termination log + active-run marker) |
+| Process diagnostics | `%LOCALAPPDATA%\RunDog\diagnostics` (64 KiB bounded termination log, active-run marker, and bounded live usage status) |
 | Update cache | `%LOCALAPPDATA%\SystemExe\RunDog\updates` |
 
 Claude and Codex homes are read-only inputs except Claude

@@ -242,6 +242,17 @@ pub struct UsageCollector {
     last_rebuild_reason: Option<CursorRebuildReason>,
 }
 
+/// Inputs used to explain the exact usage snapshot sent to the tray.
+/// The cached floor is kept separate from local JSONL accounting.
+pub(super) struct UsageDiagnosticSource {
+    pub local: UsageSnapshot,
+    pub cache_floor: Option<OtakSnapshot>,
+    pub day: u32,
+    pub month: u32,
+    pub last_collected_ms: u64,
+    pub pending_files: usize,
+}
+
 struct SlotOutcome {
     generation: u64,
     usage: Option<ProviderUsage>,
@@ -438,6 +449,18 @@ impl UsageCollector {
             }
         }
         snapshot
+    }
+
+    #[must_use]
+    pub(super) fn diagnostic_source(&self) -> UsageDiagnosticSource {
+        UsageDiagnosticSource {
+            local: self.snapshot,
+            cache_floor: self.otak_cache_floor,
+            day: self.day_key,
+            month: self.month_key,
+            last_collected_ms: self.last_collected_ms,
+            pending_files: self.pending.len() + self.registrations.len(),
+        }
     }
 
     #[must_use]
