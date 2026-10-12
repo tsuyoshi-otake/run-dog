@@ -48,9 +48,9 @@ use windows_sys::Win32::{
 };
 
 use crate::core::{
-    cancel_fetch, claude_anonymous_dedupe_digest, claude_dedupe_digest, codex_dedupe_digest,
-    cost_nanos, fetch_result_code, finish_fetch, is_long_context_request, local_ymd,
-    parse_rfc3339_ms, persist_result_code, persist_result_detail, rebuild_reason_code,
+    cancel_fetch, claude_anonymous_dedupe_digest, claude_dedupe_digest, claude_pricing_model,
+    codex_dedupe_digest, cost_nanos, fetch_result_code, finish_fetch, is_long_context_request,
+    local_ymd, parse_rfc3339_ms, persist_result_code, persist_result_detail, rebuild_reason_code,
     record_spawn_failure, reject_late_result, should_start_fetch, start_fetch,
     windows_tz_bias_minutes, ymd_iso, ymd_key, CheckpointSource, ClaudePendingUsage,
     CodexTokenTotals, CursorKind, CursorRebuildReason, DiagnosticEvent, DiagnosticKind,
@@ -2850,6 +2850,8 @@ fn parse_claude_line(line: &str) -> Option<(ParsedEvent, Option<u64>)> {
             token_usage,
         )),
     };
+    // After the dedupe key, so the pricing tier never changes request identity.
+    let model = claude_pricing_model(model, token_usage.processed_input_tokens());
     Some((
         ParsedEvent {
             model,
@@ -4740,6 +4742,22 @@ mod tests {
         assert_eq!(event.usage.input, 10);
         assert_eq!(event.usage.output, 4);
         assert_eq!(event.usage.cache_read, 2);
+    }
+
+    #[test]
+    fn component_claude_haiku_55_prompt_over_threshold_selects_long_context_tier() {
+        let line = |input: u64| {
+            format!(
+                r#"{{"type":"assistant","timestamp":"2026-10-12T01:02:03Z","requestId":"r1","message":{{"id":"m1","model":"claude-haiku-5-5","usage":{{"input_tokens":{input},"output_tokens":4,"cache_read_input_tokens":60000,"cache_creation":{{"ephemeral_5m_input_tokens":30000,"ephemeral_1h_input_tokens":5000}}}}}}}}"#
+            )
+        };
+        // Prompt length counts input plus cache reads and writes.
+        let (at_threshold, _) = parse_claude_line(&line(5_000)).expect("usage line");
+        assert_eq!(at_threshold.model, "claude-haiku-5-5");
+        let (over_threshold, _) = parse_claude_line(&line(5_001)).expect("usage line");
+        assert_eq!(over_threshold.model, "claude-haiku-5-5-long-context");
+        assert_eq!(over_threshold.usage.input, 5_001);
+        assert_eq!(over_threshold.usage.cache_read, 60_000);
     }
 
     #[test]

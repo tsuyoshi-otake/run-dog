@@ -474,7 +474,16 @@ fn entry_long_context(key: &'static str, input: f64, cached: f64, output: f64) -
     pricing
 }
 
-fn pricing_table() -> [ModelPricing; 65] {
+/// Claude Haiku 5.5 prices a request by prompt length: input plus cache reads
+/// and writes. Over the threshold, every token class uses the
+/// `-long-context` entry.
+fn entry_prompt_tier(key: &'static str, input: f64, output: f64, threshold: u64) -> ModelPricing {
+    let mut pricing = entry(key, input, output);
+    pricing.long_context_threshold = Some(threshold);
+    pricing
+}
+
+fn pricing_table() -> [ModelPricing; 67] {
     [
         entry_cache_read("claude-fable-5-1", 10.0, 0.25, 50.0),
         entry_cache_read("claude-mythos-5-1", 10.0, 0.25, 50.0),
@@ -500,6 +509,8 @@ fn pricing_table() -> [ModelPricing; 65] {
         entry("claude-sonnet-4-6", 3.0, 15.0),
         entry("claude-sonnet-4-5", 3.0, 15.0),
         entry("claude-sonnet-4", 3.0, 15.0),
+        entry("claude-haiku-5-5-long-context", 0.5, 2.5),
+        entry_prompt_tier("claude-haiku-5-5", 0.1, 0.5, 100_000),
         entry("claude-haiku-4-5", 1.0, 5.0),
         entry("claude-3-7-sonnet", 3.0, 15.0),
         entry("claude-3-5-sonnet", 3.0, 15.0),
@@ -612,6 +623,17 @@ pub fn is_long_context_request(model: &str, input_tokens: u64) -> bool {
         .is_some_and(|threshold| input_tokens > threshold)
 }
 
+/// Pricing model for one Claude request. A prompt over the model's threshold
+/// (input plus cache reads and writes) selects its `-long-context` tier.
+#[must_use]
+pub fn claude_pricing_model(model: String, prompt_tokens: u64) -> String {
+    if is_long_context_request(&model, prompt_tokens) {
+        format!("{model}{LONG_CONTEXT_SUFFIX}")
+    } else {
+        model
+    }
+}
+
 #[must_use]
 pub fn resolve_codex_model(model: &str) -> &str {
     if model == "codex-auto-review" {
@@ -626,14 +648,18 @@ pub fn ymd_iso(year: i32, month: u8, day: u8) -> String {
     format!("{year:04}-{month:02}-{day:02}")
 }
 
+const LONG_CONTEXT_SUFFIX: &str = "-long-context";
+
+/// Prefix match; a SKU suffix also matches a dated model carrying it.
 fn model_matches(model: &str, key: &str) -> bool {
     if model.starts_with(key) {
         return true;
     }
-    const FAST: &str = "-fast";
-    key.ends_with(FAST)
-        && model.ends_with(FAST)
-        && model[..model.len() - FAST.len()].starts_with(&key[..key.len() - FAST.len()])
+    ["-fast", LONG_CONTEXT_SUFFIX].iter().any(|suffix| {
+        key.ends_with(suffix)
+            && model.ends_with(suffix)
+            && model[..model.len() - suffix.len()].starts_with(&key[..key.len() - suffix.len()])
+    })
 }
 
 /// Windows `TIME_ZONE_INFORMATION` composition.
@@ -802,11 +828,11 @@ pub fn days_to_ymd(days: i64) -> (i32, u8, u8) {
 #[cfg(test)]
 mod tests {
     use super::{
-        cost_cents, cost_nanos, days_to_ymd, display_cents, format_banked_reset_label,
-        format_chatgpt_plan_label, format_compact_token_count, format_fable_limit_label,
-        format_limit_label, format_plan_label, format_usage_heading, is_long_context_request,
-        local_ymd, parse_rfc3339_ms, resolve_codex_model, windows_tz_bias_minutes, ymd_iso,
-        ymd_key, LimitWindow, ProviderUsage, TokenUsage,
+        claude_pricing_model, cost_cents, cost_nanos, days_to_ymd, display_cents,
+        format_banked_reset_label, format_chatgpt_plan_label, format_compact_token_count,
+        format_fable_limit_label, format_limit_label, format_plan_label, format_usage_heading,
+        is_long_context_request, local_ymd, parse_rfc3339_ms, resolve_codex_model,
+        windows_tz_bias_minutes, ymd_iso, ymd_key, LimitWindow, ProviderUsage, TokenUsage,
     };
 
     #[test]
@@ -993,6 +1019,57 @@ mod tests {
         assert_eq!(resolve_codex_model("codex-auto-review"), "gpt-5.4");
         assert!(is_long_context_request("gpt-5.4", 272_001));
         assert!(!is_long_context_request("gpt-5.4", 272_000));
+    }
+
+    #[test]
+    fn component_haiku_55_prices_both_prompt_tiers_for_every_token_class() {
+        let usage = TokenUsage {
+            input: 1_000_000,
+            cache_read: 1_000_000,
+            cache_write_5m: 1_000_000,
+            cache_write_1h: 1_000_000,
+            output: 1_000_000,
+            ..TokenUsage::default()
+        };
+        // $0.10 + $0.01 + $0.125 + $0.20 + $0.50 per MTok.
+        assert_eq!(
+            cost_nanos("claude-haiku-5-5", usage, Some("2026-10-12")),
+            Some(935_000_000)
+        );
+        assert_eq!(
+            cost_nanos("claude-haiku-5-5-20261001", usage, None),
+            Some(935_000_000)
+        );
+        // Over 100,000 prompt tokens: $0.50 + $0.05 + $0.625 + $1.00 + $2.50.
+        assert_eq!(
+            cost_nanos("claude-haiku-5-5-long-context", usage, None),
+            Some(4_675_000_000)
+        );
+        assert_eq!(
+            cost_nanos("claude-haiku-5-5-20261001-long-context", usage, None),
+            Some(4_675_000_000)
+        );
+        assert_eq!(
+            claude_pricing_model("claude-haiku-5-5".to_owned(), 100_000),
+            "claude-haiku-5-5"
+        );
+        assert_eq!(
+            claude_pricing_model("claude-haiku-5-5".to_owned(), 100_001),
+            "claude-haiku-5-5-long-context"
+        );
+        assert_eq!(
+            claude_pricing_model("claude-haiku-5-5-20261001".to_owned(), 100_001),
+            "claude-haiku-5-5-20261001-long-context"
+        );
+        // Other Claude models keep one tier at any prompt length.
+        assert_eq!(
+            claude_pricing_model("claude-haiku-4-5".to_owned(), 900_000),
+            "claude-haiku-4-5"
+        );
+        assert_eq!(
+            claude_pricing_model("claude-opus-5-5".to_owned(), 900_000),
+            "claude-opus-5-5"
+        );
     }
 
     #[test]
