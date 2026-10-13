@@ -64,7 +64,9 @@ use crate::core::{
 #[cfg(test)]
 use crate::core::UsageCheckpoint;
 
-use super::otak_snapshot::{read_usage_snapshot, OtakSnapshot, ProviderSnapshot};
+use super::otak_snapshot::{
+    read_usage_snapshot, OtakSnapshot, ProviderSnapshot, SnapshotRejection,
+};
 use super::usage_store::FileUsageStore;
 
 pub const USAGE_TIMER_ID: usize = 4;
@@ -234,6 +236,7 @@ pub struct UsageCollector {
     cancelled: bool,
     checkpoint_dirty: bool,
     otak_cache_floor: Option<OtakSnapshot>,
+    otak_cache_status: CacheSnapshotStatus,
     last_otak_cache_attempt_ms: u64,
     last_checkpoint_attempt_ms: u64,
     persist_checkpoint: bool,
@@ -247,10 +250,44 @@ pub struct UsageCollector {
 pub(super) struct UsageDiagnosticSource {
     pub local: UsageSnapshot,
     pub cache_floor: Option<OtakSnapshot>,
+    pub cache_snapshot: CacheSnapshotStatus,
     pub day: u32,
     pub month: u32,
     pub last_collected_ms: u64,
     pub pending_files: usize,
+}
+
+/// Outcome of the latest otak-usage snapshot read. Diagnostics only: the
+/// floor itself stays whatever was last accepted.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum CacheSnapshotStatus {
+    /// No read attempted yet, or this collector does not use the production
+    /// store.
+    Unchecked,
+    /// The read replaced the floor with a newer snapshot.
+    Accepted,
+    /// The read succeeded but was no newer than the floor held.
+    Unchanged,
+    /// The read failed; the previous floor, if any, is kept.
+    Rejected(SnapshotRejection),
+}
+
+impl CacheSnapshotStatus {
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Self::Unchecked => "unchecked",
+            Self::Accepted => "accepted",
+            Self::Unchanged => "unchanged",
+            Self::Rejected(_) => "rejected",
+        }
+    }
+
+    pub(super) fn reason(self) -> Option<&'static str> {
+        match self {
+            Self::Rejected(reason) => Some(reason.as_str()),
+            _ => None,
+        }
+    }
 }
 
 struct SlotOutcome {
@@ -384,6 +421,7 @@ impl UsageCollector {
             cancelled: false,
             checkpoint_dirty: false,
             otak_cache_floor: None,
+            otak_cache_status: CacheSnapshotStatus::Unchecked,
             last_otak_cache_attempt_ms: 0,
             last_checkpoint_attempt_ms: 0,
             persist_checkpoint,
@@ -456,6 +494,7 @@ impl UsageCollector {
         UsageDiagnosticSource {
             local: self.snapshot,
             cache_floor: self.otak_cache_floor,
+            cache_snapshot: self.otak_cache_status,
             day: self.day_key,
             month: self.month_key,
             last_collected_ms: self.last_collected_ms,
@@ -1991,6 +2030,7 @@ impl UsageCollector {
             return;
         }
         let Some(appdata) = std::env::var_os("APPDATA") else {
+            self.record_otak_read(Err(SnapshotRejection::Storage));
             return;
         };
         let storage_dir = PathBuf::from(appdata)
@@ -1998,16 +2038,29 @@ impl UsageCollector {
             .join("User")
             .join("globalStorage")
             .join("odangoo.otak-usage");
-        let Some(source) = read_usage_snapshot(
+        let read = read_usage_snapshot(
             &storage_dir,
             &self.claude_dir,
             &self.codex_home,
             window.month_start,
             window.today,
-        ) else {
-            return;
+        );
+        self.record_otak_read(read);
+    }
+
+    /// A rejected read keeps the current floor; the status says why the floor
+    /// is not newer.
+    fn record_otak_read(&mut self, read: Result<OtakSnapshot, SnapshotRejection>) {
+        self.otak_cache_status = match read {
+            Ok(source) => {
+                if self.reconcile_otak_snapshot(source) {
+                    CacheSnapshotStatus::Accepted
+                } else {
+                    CacheSnapshotStatus::Unchanged
+                }
+            }
+            Err(reason) => CacheSnapshotStatus::Rejected(reason),
         };
-        self.reconcile_otak_snapshot(source);
     }
 
     fn reconcile_otak_snapshot(&mut self, source: OtakSnapshot) -> bool {
@@ -3678,6 +3731,53 @@ mod tests {
     };
 
     #[test]
+    fn component_cache_snapshot_status_reports_the_last_read_outcome() {
+        use super::CacheSnapshotStatus;
+        use crate::windows::otak_snapshot::SnapshotRejection;
+        let root = std::env::temp_dir().join("run-dog-otak-cache-status-test");
+        let mut collector =
+            UsageCollector::with_dirs(root.join("claude"), root.join("codex"), false);
+        assert_eq!(collector.otak_cache_status, CacheSnapshotStatus::Unchecked);
+        assert_eq!(
+            collector.diagnostic_source().cache_snapshot.as_str(),
+            "unchecked"
+        );
+        collector.record_otak_read(Err(SnapshotRejection::Usage));
+        assert_eq!(
+            collector.otak_cache_status,
+            CacheSnapshotStatus::Rejected(SnapshotRejection::Usage)
+        );
+        assert_eq!(
+            collector.diagnostic_source().cache_snapshot.reason(),
+            Some("usage")
+        );
+        assert!(collector.otak_cache_floor.is_none());
+
+        let source = OtakSnapshot {
+            updated_at_ms: unix_now_ms(),
+            claude: Some(ProviderSnapshot {
+                today_cost_nanos: 1_000_000_000,
+                ..ProviderSnapshot::default()
+            }),
+            codex: None,
+            unknown_usage_fields: 3,
+        };
+        collector.record_otak_read(Ok(source));
+        assert_eq!(collector.otak_cache_status, CacheSnapshotStatus::Accepted);
+        assert_eq!(collector.diagnostic_source().cache_floor, Some(source));
+        collector.record_otak_read(Ok(source));
+        assert_eq!(collector.otak_cache_status, CacheSnapshotStatus::Unchanged);
+        assert_eq!(collector.diagnostic_source().cache_snapshot.reason(), None);
+
+        // A later rejection keeps the floor and says why it is not newer.
+        collector.record_otak_read(Err(SnapshotRejection::FenceChanged));
+        let diagnostics = collector.diagnostic_source();
+        assert_eq!(diagnostics.cache_snapshot.as_str(), "rejected");
+        assert_eq!(diagnostics.cache_snapshot.reason(), Some("fence-changed"));
+        assert_eq!(diagnostics.cache_floor, Some(source));
+    }
+
+    #[test]
     fn component_otak_cache_floors_are_independent_of_local_accounting() {
         let root = std::env::temp_dir().join("run-dog-otak-cache-reconcile-test");
         let mut collector =
@@ -3702,6 +3802,7 @@ mod tests {
                 month_input_tokens: 4_000_000_000,
                 month_output_tokens: 20_000_000,
             }),
+            unknown_usage_fields: 0,
         };
         collector.files.insert(
             root.join("codex/session.jsonl"),

@@ -14,6 +14,11 @@ pub struct TokenUsage {
     pub long_context_input: u64,
     pub long_context_cached_input: u64,
     pub long_context_output: u64,
+    /// Long-context subsets of the cache classes. otak-usage snapshots report
+    /// them; the local Claude reader selects a `-long-context` SKU instead.
+    pub long_context_cache_read: u64,
+    pub long_context_cache_write_5m: u64,
+    pub long_context_cache_write_1h: u64,
 }
 
 impl TokenUsage {
@@ -393,6 +398,18 @@ pub fn cost_nanos(model: &str, usage: TokenUsage, effective_day: Option<&str>) -
             pricing.cached_input * long_input_premium,
         ),
         (
+            usage.long_context_cache_read,
+            pricing.cache_read * long_input_premium,
+        ),
+        (
+            usage.long_context_cache_write_5m,
+            pricing.cache_write_5m * long_input_premium,
+        ),
+        (
+            usage.long_context_cache_write_1h,
+            pricing.cache_write_1h * long_input_premium,
+        ),
+        (
             usage.long_context_output,
             pricing.output * long_output_premium,
         ),
@@ -475,11 +492,21 @@ fn entry_long_context(key: &'static str, input: f64, cached: f64, output: f64) -
 }
 
 /// Claude Haiku 5.5 prices a request by prompt length: input plus cache reads
-/// and writes. Over the threshold, every token class uses the
-/// `-long-context` entry.
-fn entry_prompt_tier(key: &'static str, input: f64, output: f64, threshold: u64) -> ModelPricing {
+/// and writes. Over the threshold, every token class costs `multiplier` times
+/// its base rate. The local reader expresses this as the `-long-context`
+/// entry; otak-usage snapshots instead report over-threshold tokens as
+/// `long_context_*` subsets, which the multipliers price identically.
+fn entry_prompt_tier(
+    key: &'static str,
+    input: f64,
+    output: f64,
+    threshold: u64,
+    multiplier: f64,
+) -> ModelPricing {
     let mut pricing = entry(key, input, output);
     pricing.long_context_threshold = Some(threshold);
+    pricing.long_context_input_multiplier = Some(multiplier);
+    pricing.long_context_output_multiplier = Some(multiplier);
     pricing
 }
 
@@ -510,7 +537,7 @@ fn pricing_table() -> [ModelPricing; 67] {
         entry("claude-sonnet-4-5", 3.0, 15.0),
         entry("claude-sonnet-4", 3.0, 15.0),
         entry("claude-haiku-5-5-long-context", 0.5, 2.5),
-        entry_prompt_tier("claude-haiku-5-5", 0.1, 0.5, 100_000),
+        entry_prompt_tier("claude-haiku-5-5", 0.1, 0.5, 100_000, 5.0),
         entry("claude-haiku-4-5", 1.0, 5.0),
         entry("claude-3-7-sonnet", 3.0, 15.0),
         entry("claude-3-5-sonnet", 3.0, 15.0),
@@ -910,6 +937,9 @@ mod tests {
             long_context_input: 10,
             long_context_cached_input: 2,
             long_context_output: 7,
+            long_context_cache_read: 3,
+            long_context_cache_write_5m: 4,
+            long_context_cache_write_1h: 5,
         };
         assert_eq!(usage.processed_input_tokens(), 24);
         assert_eq!(usage.processed_output_tokens(), 7);
@@ -1436,5 +1466,56 @@ mod tests {
         garbage.set_chatgpt_plan("not a plan!!");
         assert!(!garbage.shows_chatgpt_card(NOW));
         assert_eq!(garbage.plan_len, 0);
+    }
+
+    #[test]
+    fn component_long_context_cache_classes_price_like_otak_usage() {
+        // otak-usage: each cache class pays its own rate times the input
+        // premium. The subset fields never add measured tokens.
+        let usage = TokenUsage {
+            cache_read: 1_000_000,
+            cache_write_5m: 1_000_000,
+            cache_write_1h: 1_000_000,
+            long_context_cache_read: 1_000_000,
+            long_context_cache_write_5m: 1_000_000,
+            long_context_cache_write_1h: 1_000_000,
+            ..TokenUsage::default()
+        };
+        // gpt-6-luna: cache read $0.01, write 5m $0.125, write 1h $0.2 per
+        // MTok, long-context input multiplier 2.0.
+        assert_eq!(cost_nanos("gpt-6-luna", usage, None), Some(670_000_000));
+        assert_eq!(usage.processed_input_tokens(), 3_000_000);
+        let short = TokenUsage {
+            long_context_cache_read: 0,
+            long_context_cache_write_5m: 0,
+            long_context_cache_write_1h: 0,
+            ..usage
+        };
+        assert_eq!(cost_nanos("gpt-6-luna", short, None), Some(335_000_000));
+    }
+
+    #[test]
+    fn component_haiku_snapshot_subsets_match_local_long_context_sku() {
+        let measured = TokenUsage {
+            input: 50_000,
+            cache_read: 60_000,
+            cache_write_5m: 10_000,
+            cache_write_1h: 2_000,
+            output: 5_000,
+            ..TokenUsage::default()
+        };
+        let classified = TokenUsage {
+            long_context_input: measured.input,
+            long_context_cache_read: measured.cache_read,
+            long_context_cache_write_5m: measured.cache_write_5m,
+            long_context_cache_write_1h: measured.cache_write_1h,
+            long_context_output: measured.output,
+            ..measured
+        };
+        let local = cost_nanos("claude-haiku-5-5-long-context", measured, None).expect("sku");
+        let snapshot = cost_nanos("claude-haiku-5-5", classified, None).expect("subsets");
+        assert_eq!(local, snapshot);
+        assert_eq!(local, 48_750_000);
+        assert!(local > cost_nanos("claude-haiku-5-5", measured, None).expect("base"));
     }
 }

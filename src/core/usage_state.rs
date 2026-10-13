@@ -228,6 +228,10 @@ impl UsageState {
                 if cursor.kind != CursorKind::Claude || !is_safe_model(&event.model) {
                     continue;
                 }
+                // The long-context cache subsets exist only in otak-usage
+                // snapshots, which are never persisted; the local Claude reader
+                // prices an over-threshold request through its `-long-context`
+                // entry instead. The line therefore keeps its 15 columns.
                 let usage = event.usage;
                 out.push_str(&format!(
                     concat!(
@@ -648,6 +652,9 @@ fn parse_claude_pending_line(value: &str) -> Option<(CursorKind, String, ClaudeP
                 long_context_input: parts[12].parse().ok()?,
                 long_context_cached_input: parts[13].parse().ok()?,
                 long_context_output: parts[14].parse().ok()?,
+                long_context_cache_read: 0,
+                long_context_cache_write_5m: 0,
+                long_context_cache_write_1h: 0,
             },
         },
     ))
