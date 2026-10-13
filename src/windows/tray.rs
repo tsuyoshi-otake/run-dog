@@ -1,4 +1,8 @@
-use std::{mem::size_of, ptr, time::Instant};
+use std::{
+    mem::size_of,
+    ptr,
+    time::{Duration, Instant},
+};
 
 use windows_sys::Win32::{
     Foundation::{HWND, POINT, RECT},
@@ -125,7 +129,7 @@ pub struct TrayAdapter {
     startup_enabled: bool,
     auto_update_enabled: bool,
     flyout_pinned: bool,
-    added: bool,
+    registration: IconRegistration,
     promote_attempts: u8,
     hover_started: Option<Instant>,
     flyout: HoverFlyout,
@@ -153,7 +157,7 @@ impl TrayAdapter {
             startup_enabled: startup,
             auto_update_enabled: auto_update,
             flyout_pinned: super::registry::load_pinned_flyout(),
-            added: false,
+            registration: IconRegistration::new(),
             hover_started: None,
             promote_attempts: 0,
             flyout: HoverFlyout::new(),
@@ -532,7 +536,7 @@ impl TrayAdapter {
     }
 
     fn promote_once(&mut self) {
-        if self.promote_attempts == 0 || !self.added {
+        if self.promote_attempts == 0 || !self.registration.is_added() {
             self.stop_promote();
             return;
         }
@@ -564,30 +568,24 @@ impl TrayAdapter {
     fn add(&mut self, icon: &TrayIcon) {
         self.remember(icon);
         let data = self.notification_data(icon);
-        if unsafe { Shell_NotifyIconW(NIM_ADD, &data) } == 0 {
-            self.added = false;
-            return;
-        }
-        let mut version_data = data;
-        version_data.Anonymous.uVersion = NOTIFYICON_VERSION_4;
-        let _ = unsafe { Shell_NotifyIconW(NIM_SETVERSION, &version_data) };
-        self.added = true;
+        let mut notify = |message: u32| shell_notify_icon(message, &data);
+        self.registration.add(Instant::now(), &mut notify);
     }
 
     fn modify(&mut self, icon: &TrayIcon) {
         self.remember(icon);
-        if !self.added {
-            self.add(icon);
-            return;
-        }
         let data = self.notification_data(icon);
-        if unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) } == 0 {
-            self.add(icon);
+        let mut notify = |message: u32| shell_notify_icon(message, &data);
+        let was_added = self.registration.is_added();
+        self.registration.modify(Instant::now(), &mut notify);
+        if !was_added && self.registration.is_added() {
+            self.begin_promote();
         }
     }
 
     fn remove(&mut self) {
-        if !self.added {
+        if !self.registration.is_added() {
+            self.registration = IconRegistration::new();
             return;
         }
         let data = self.notification_data(&TrayIcon {
@@ -605,8 +603,8 @@ impl TrayAdapter {
             usage: crate::core::UsageSnapshot::default(),
             process: None,
         });
-        let _ = unsafe { Shell_NotifyIconW(NIM_DELETE, &data) };
-        self.added = false;
+        let mut notify = |message: u32| shell_notify_icon(message, &data);
+        self.registration.remove(&mut notify);
     }
 
     fn icon_handle(&mut self, icon: &TrayIcon) -> HICON {
@@ -676,7 +674,7 @@ impl TrayAdapter {
     }
 
     fn show_balloon(&mut self, title: &str, body: &str) {
-        if !self.added {
+        if !self.registration.is_added() {
             return;
         }
         let Some(icon) = self.last_icon.clone() else {
@@ -816,8 +814,213 @@ fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(Some(0)).collect()
 }
 
+/// One `Shell_NotifyIconW` call. `NIM_SETVERSION` needs the version member
+/// set; every other message sends `data` as built.
+fn shell_notify_icon(message: u32, data: &NOTIFYICONDATAW) -> bool {
+    if message == NIM_SETVERSION {
+        let mut version_data = *data;
+        version_data.Anonymous.uVersion = NOTIFYICON_VERSION_4;
+        return unsafe { Shell_NotifyIconW(NIM_SETVERSION, &version_data) } != 0;
+    }
+    unsafe { Shell_NotifyIconW(message, data) != 0 }
+}
+
+const ICON_RETRY_INITIAL: Duration = Duration::from_millis(500);
+const ICON_RETRY_MAX: Duration = Duration::from_secs(8);
+
+/// Registration of the notification icon with the shell.
+///
+/// `NIM_ADD` fails when the shell times out or when an icon with this id
+/// survived a quick restart (the auto-updater's relaunch). Treating that as
+/// "not added" and repeating `NIM_ADD` on every frame leaves the icon frozen
+/// for the whole session, so a failed add is retried as `NIM_MODIFY`, and
+/// later retries are paced by a backoff instead of the frame rate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct IconRegistration {
+    added: bool,
+    failures: u32,
+    retry_at: Option<Instant>,
+}
+
+impl IconRegistration {
+    const fn new() -> Self {
+        Self {
+            added: false,
+            failures: 0,
+            retry_at: None,
+        }
+    }
+
+    const fn is_added(&self) -> bool {
+        self.added
+    }
+
+    /// `notify` sends one `Shell_NotifyIconW` message and reports whether
+    /// the shell accepted it. Returns whether the icon is registered.
+    fn add(&mut self, now: Instant, notify: &mut dyn FnMut(u32) -> bool) -> bool {
+        if notify(NIM_ADD) || notify(NIM_MODIFY) {
+            let _ = notify(NIM_SETVERSION);
+            self.succeed();
+        } else {
+            self.fail(now);
+        }
+        self.added
+    }
+
+    /// Shows a new frame. An unregistered icon is re-added once its backoff
+    /// has elapsed; a registered icon the shell no longer accepts is dropped
+    /// and re-added the same way. Returns whether the shell shows this frame.
+    fn modify(&mut self, now: Instant, notify: &mut dyn FnMut(u32) -> bool) -> bool {
+        if !self.added {
+            if self.retry_at.is_some_and(|at| now < at) {
+                return false;
+            }
+            return self.add(now, notify);
+        }
+        if notify(NIM_MODIFY) {
+            self.succeed();
+            return true;
+        }
+        self.added = false;
+        self.fail(now);
+        false
+    }
+
+    /// Removes a registered icon and forgets any backoff.
+    fn remove(&mut self, notify: &mut dyn FnMut(u32) -> bool) {
+        if self.added {
+            let _ = notify(NIM_DELETE);
+        }
+        *self = Self::new();
+    }
+
+    fn succeed(&mut self) {
+        self.added = true;
+        self.failures = 0;
+        self.retry_at = None;
+    }
+
+    fn fail(&mut self, now: Instant) {
+        self.failures = self.failures.saturating_add(1);
+        let exponent = self.failures.saturating_sub(1).min(4);
+        let delay = ICON_RETRY_INITIAL
+            .saturating_mul(1 << exponent)
+            .min(ICON_RETRY_MAX);
+        self.retry_at = Some(now + delay);
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::IconRegistration;
+    use std::{
+        cell::RefCell,
+        time::{Duration, Instant},
+    };
+    use windows_sys::Win32::UI::Shell::{NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION};
+
+    #[test]
+    fn registration_falls_back_to_modify_when_the_icon_already_exists() {
+        let log = RefCell::new(Vec::new());
+        let mut existing = |message: u32| {
+            log.borrow_mut().push(message);
+            message != NIM_ADD
+        };
+        let mut registration = IconRegistration::new();
+        assert!(registration.add(Instant::now(), &mut existing));
+        assert_eq!(*log.borrow(), [NIM_ADD, NIM_MODIFY, NIM_SETVERSION]);
+        assert!(registration.is_added());
+        assert_eq!(registration.retry_at, None);
+        log.borrow_mut().clear();
+        assert!(registration.modify(Instant::now(), &mut existing));
+        assert_eq!(*log.borrow(), [NIM_MODIFY]);
+    }
+
+    #[test]
+    fn registration_registers_and_removes_through_the_normal_path() {
+        let log = RefCell::new(Vec::new());
+        let mut shell = |message: u32| {
+            log.borrow_mut().push(message);
+            true
+        };
+        let mut registration = IconRegistration::new();
+        registration.remove(&mut shell);
+        assert!(log.borrow().is_empty());
+        assert!(registration.add(Instant::now(), &mut shell));
+        assert_eq!(*log.borrow(), [NIM_ADD, NIM_SETVERSION]);
+        log.borrow_mut().clear();
+        registration.remove(&mut shell);
+        assert_eq!(*log.borrow(), [NIM_DELETE]);
+        assert_eq!(registration, IconRegistration::new());
+    }
+
+    #[test]
+    fn registration_backs_off_exponentially_while_the_shell_rejects_the_icon() {
+        let log = RefCell::new(Vec::new());
+        let mut dead = |message: u32| {
+            log.borrow_mut().push(message);
+            false
+        };
+        let start = Instant::now();
+        let mut registration = IconRegistration::new();
+        assert!(!registration.add(start, &mut dead));
+        assert_eq!(*log.borrow(), [NIM_ADD, NIM_MODIFY]);
+        assert_eq!(
+            registration.retry_at,
+            Some(start + Duration::from_millis(500))
+        );
+        log.borrow_mut().clear();
+        // Frames before the retry time send nothing to the shell.
+        assert!(!registration.modify(start + Duration::from_millis(499), &mut dead));
+        assert!(log.borrow().is_empty());
+        let mut at = start + Duration::from_millis(500);
+        for delay_ms in [1_000, 2_000, 4_000, 8_000, 8_000, 8_000] {
+            assert!(!registration.modify(at, &mut dead));
+            assert_eq!(*log.borrow(), [NIM_ADD, NIM_MODIFY]);
+            log.borrow_mut().clear();
+            let delay = Duration::from_millis(delay_ms);
+            assert_eq!(registration.retry_at, Some(at + delay));
+            at += delay;
+        }
+        // The shell comes back: the next retry registers the icon.
+        let mut alive = |message: u32| {
+            log.borrow_mut().push(message);
+            true
+        };
+        assert!(registration.modify(at, &mut alive));
+        assert_eq!(*log.borrow(), [NIM_ADD, NIM_SETVERSION]);
+        assert!(registration.is_added());
+        assert_eq!(registration.failures, 0);
+        assert_eq!(registration.retry_at, None);
+    }
+
+    #[test]
+    fn registration_re_adds_after_the_shell_drops_a_registered_icon() {
+        let log = RefCell::new(Vec::new());
+        let mut alive = |message: u32| {
+            log.borrow_mut().push(message);
+            true
+        };
+        let mut lost = |message: u32| {
+            log.borrow_mut().push(message);
+            false
+        };
+        let start = Instant::now();
+        let mut registration = IconRegistration::new();
+        assert!(registration.add(start, &mut alive));
+        log.borrow_mut().clear();
+        // Explorer restarted: the modify is refused and the icon is gone.
+        assert!(!registration.modify(start, &mut lost));
+        assert_eq!(*log.borrow(), [NIM_MODIFY]);
+        assert!(!registration.is_added());
+        log.borrow_mut().clear();
+        assert!(!registration.modify(start + Duration::from_millis(100), &mut alive));
+        assert!(log.borrow().is_empty());
+        assert!(registration.modify(start + Duration::from_millis(500), &mut alive));
+        assert_eq!(*log.borrow(), [NIM_ADD, NIM_SETVERSION]);
+        assert!(registration.is_added());
+    }
+
     #[test]
     fn failed_submenu_attachment_destroys_unowned_menu() {
         use windows_sys::Win32::UI::WindowsAndMessaging::{CreatePopupMenu, IsMenu};
