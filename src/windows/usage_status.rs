@@ -60,6 +60,9 @@ struct LiveUsageStatus {
     month: u32,
     last_collected_event_ms: u64,
     pending_files: usize,
+    /// Bytes RunDog knows exist in pending JSONL files but has not read yet.
+    /// While non-zero the local totals are behind the files on disk.
+    unread_bytes: u64,
     month_scan_in_progress: bool,
     cache_snapshot_at_ms: Option<u64>,
     /// Outcome of the latest otak-usage snapshot read: `unchecked`,
@@ -82,6 +85,7 @@ impl LiveUsageStatus {
             month: source.month,
             last_collected_event_ms: source.last_collected_ms,
             pending_files: source.pending_files,
+            unread_bytes: source.unread_bytes,
             month_scan_in_progress: displayed.month_scan_in_progress,
             cache_snapshot_at_ms: source.cache_floor.map(|cache| cache.updated_at_ms),
             cache_snapshot_status: source.cache_snapshot.as_str(),
@@ -190,6 +194,7 @@ mod tests {
             month: 20261001,
             last_collected_ms: 1_791_440_000_000,
             pending_files: 992,
+            unread_bytes: 8_069_000_000,
         };
         let value =
             serde_json::to_value(LiveUsageStatus::new(source, displayed, 1_791_460_001_000))
@@ -201,6 +206,7 @@ mod tests {
         assert_eq!(value["codex"]["cache_today_cents"], 23456);
         assert_eq!(value["codex"]["displayed_today_cents"], 23456);
         assert_eq!(value["pending_files"], 992);
+        assert_eq!(value["unread_bytes"], 8_069_000_000_u64);
         assert_eq!(value["cache_snapshot_at_ms"], 1_791_460_000_000_u64);
         assert_eq!(value["schema"], 2);
         assert_eq!(value["cache_snapshot_status"], "rejected");
