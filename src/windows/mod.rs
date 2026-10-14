@@ -270,7 +270,7 @@ impl WindowContext {
         if self.usage.take_month_rescan_finished() {
             self.platform.tray.notify_month_rescan_finished();
         }
-        let interval = usage_timer_interval(more, self.usage.snapshot().month_scan_in_progress);
+        let interval = usage_timer_interval(more, self.usage.catching_up());
         if more == UsageTick::Idle {
             self::process::trim_working_set();
         }

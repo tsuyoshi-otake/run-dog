@@ -17,6 +17,9 @@ use super::{
     usage_store_path::PinnedDirectory,
 };
 
+/// Bumped when fields are added: 2 adds the snapshot read outcome.
+const STATUS_SCHEMA: u8 = 2;
+
 const STATUS_NAME: &str = "usage-status.json";
 const STATUS_TEMP_NAME: &str = "usage-status.json.tmp";
 const CATCH_UP_STATUS_INTERVAL_MS: u64 = 5_000;
@@ -57,8 +60,17 @@ struct LiveUsageStatus {
     month: u32,
     last_collected_event_ms: u64,
     pending_files: usize,
+    /// Bytes RunDog knows exist in pending JSONL files but has not read yet.
+    /// While non-zero the local totals are behind the files on disk.
+    unread_bytes: u64,
     month_scan_in_progress: bool,
     cache_snapshot_at_ms: Option<u64>,
+    /// Outcome of the latest otak-usage snapshot read: `unchecked`,
+    /// `accepted`, `unchanged`, or `rejected` with `cache_snapshot_reason`.
+    cache_snapshot_status: &'static str,
+    cache_snapshot_reason: Option<&'static str>,
+    /// Usage fields in the current floor that this build does not price.
+    cache_snapshot_unknown_usage_fields: Option<u32>,
     claude: ProviderStatus,
     codex: ProviderStatus,
 }
@@ -66,15 +78,21 @@ struct LiveUsageStatus {
 impl LiveUsageStatus {
     fn new(source: UsageDiagnosticSource, displayed: UsageSnapshot, captured_at_ms: u64) -> Self {
         Self {
-            schema: 1,
+            schema: STATUS_SCHEMA,
             pid: std::process::id(),
             captured_at_ms,
             day: source.day,
             month: source.month,
             last_collected_event_ms: source.last_collected_ms,
             pending_files: source.pending_files,
+            unread_bytes: source.unread_bytes,
             month_scan_in_progress: displayed.month_scan_in_progress,
             cache_snapshot_at_ms: source.cache_floor.map(|cache| cache.updated_at_ms),
+            cache_snapshot_status: source.cache_snapshot.as_str(),
+            cache_snapshot_reason: source.cache_snapshot.reason(),
+            cache_snapshot_unknown_usage_fields: source
+                .cache_floor
+                .map(|cache| cache.unknown_usage_fields),
             claude: ProviderStatus::from_parts(
                 source.local.claude,
                 source.cache_floor.and_then(|cache| cache.claude),
@@ -145,8 +163,8 @@ mod tests {
     use super::LiveUsageStatus;
     use crate::core::UsageSnapshot;
     use crate::windows::{
-        otak_snapshot::{OtakSnapshot, ProviderSnapshot},
-        usage::UsageDiagnosticSource,
+        otak_snapshot::{OtakSnapshot, ProviderSnapshot, SnapshotRejection},
+        usage::{CacheSnapshotStatus, UsageDiagnosticSource},
     };
 
     #[test]
@@ -169,11 +187,14 @@ mod tests {
                     today_cost_nanos: 234_560_000_000,
                     ..ProviderSnapshot::default()
                 }),
+                unknown_usage_fields: 2,
             }),
+            cache_snapshot: CacheSnapshotStatus::Rejected(SnapshotRejection::Usage),
             day: 20261008,
             month: 20261001,
             last_collected_ms: 1_791_440_000_000,
             pending_files: 992,
+            unread_bytes: 8_069_000_000,
         };
         let value =
             serde_json::to_value(LiveUsageStatus::new(source, displayed, 1_791_460_001_000))
@@ -185,7 +206,12 @@ mod tests {
         assert_eq!(value["codex"]["cache_today_cents"], 23456);
         assert_eq!(value["codex"]["displayed_today_cents"], 23456);
         assert_eq!(value["pending_files"], 992);
+        assert_eq!(value["unread_bytes"], 8_069_000_000_u64);
         assert_eq!(value["cache_snapshot_at_ms"], 1_791_460_000_000_u64);
+        assert_eq!(value["schema"], 2);
+        assert_eq!(value["cache_snapshot_status"], "rejected");
+        assert_eq!(value["cache_snapshot_reason"], "usage");
+        assert_eq!(value["cache_snapshot_unknown_usage_fields"], 2);
         assert!(!value.to_string().contains(".jsonl"));
     }
 }

@@ -4,6 +4,9 @@
 //! lease heartbeat. A stopped VS Code window can leave a useful snapshot, but
 //! the lock pointer must identify the same immutable artifact before and after
 //! the read.
+//!
+//! Token classes this build does not price are counted, not fatal: a newer
+//! extension must not silently freeze the display floor at an old snapshot.
 
 use std::{fs::File, io::Read, path::Path};
 
@@ -13,6 +16,7 @@ use crate::core::{cost_nanos, local_ymd, ymd_key, TokenUsage};
 
 const MAX_JSON_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_TOKEN_FIELD: u64 = 1_000_000_000_000;
+const MAX_USAGE_FIELDS: usize = 64;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) struct ProviderSnapshot {
@@ -27,6 +31,52 @@ pub(super) struct OtakSnapshot {
     pub updated_at_ms: u64,
     pub claude: Option<ProviderSnapshot>,
     pub codex: Option<ProviderSnapshot>,
+    /// Usage fields, over every day and model, that this build does not
+    /// price. Non-zero means the floor may sit below the extension's display.
+    pub unknown_usage_fields: u32,
+}
+
+/// Why no snapshot was read. Reported through the usage diagnostics so a
+/// stale floor can be told apart from a missing extension.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum SnapshotRejection {
+    /// The requested month and day are inconsistent.
+    Window,
+    /// The Claude or Codex directory is not absolute.
+    GroupKey,
+    /// The extension storage directory is unavailable.
+    Storage,
+    /// The leader lock is missing or not a version-2 fence.
+    Lock,
+    /// The fenced artifact is missing, oversized, or not JSON.
+    Snapshot,
+    /// The artifact's shape or fence does not match.
+    Format,
+    /// The artifact, or one of its days, lies outside the requested month.
+    OutsideMonth,
+    /// A model key or token field is malformed or out of range.
+    Usage,
+    /// Totals exceed `u64`.
+    Overflow,
+    /// The lock changed while reading.
+    FenceChanged,
+}
+
+impl SnapshotRejection {
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Self::Window => "window",
+            Self::GroupKey => "group-key",
+            Self::Storage => "storage",
+            Self::Lock => "lock",
+            Self::Snapshot => "snapshot",
+            Self::Format => "format",
+            Self::OutsideMonth => "outside-month",
+            Self::Usage => "usage",
+            Self::Overflow => "overflow",
+            Self::FenceChanged => "fence-changed",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -37,20 +87,21 @@ struct Fence {
 }
 
 /// `month` is YYYYMM01 and `today` is YYYYMMDD in the machine's local time.
-/// A missing, stale-month, changed, or malformed extension snapshot is ignored.
+/// A missing, stale-month, changed, or malformed extension snapshot is
+/// rejected with the reason; the caller keeps whatever floor it already holds.
 pub(super) fn read_usage_snapshot(
     storage_dir: &Path,
     claude_dir: &Path,
     codex_home: &Path,
     month: u32,
     today: u32,
-) -> Option<OtakSnapshot> {
+) -> Result<OtakSnapshot, SnapshotRejection> {
     if month % 100 != 1 || today / 100 != month / 100 || today < month {
-        return None;
+        return Err(SnapshotRejection::Window);
     }
-    let key = group_key(claude_dir, codex_home)?;
+    let key = group_key(claude_dir, codex_home).ok_or(SnapshotRejection::GroupKey)?;
     let lock_path = storage_dir.join(format!("scan-leader-{key}.lock"));
-    let fence = read_lock_fence(&lock_path)?;
+    let fence = read_lock_fence(&lock_path).ok_or(SnapshotRejection::Lock)?;
     let token: String = fence
         .token
         .chars()
@@ -66,9 +117,12 @@ pub(super) fn read_usage_snapshot(
         "scan-snapshot-{key}.json.epoch-{}.{token}.json",
         fence.epoch
     ));
-    let raw = read_bounded_json(&snapshot_path)?;
+    let raw = read_bounded_json(&snapshot_path).ok_or(SnapshotRejection::Snapshot)?;
     let result = parse_snapshot(&raw, &fence, month, today)?;
-    (read_lock_fence(&lock_path)? == fence).then_some(result)
+    if read_lock_fence(&lock_path).as_ref() != Some(&fence) {
+        return Err(SnapshotRejection::FenceChanged);
+    }
+    Ok(result)
 }
 
 fn read_lock_fence(path: &Path) -> Option<Fence> {
@@ -109,73 +163,99 @@ fn read_bounded_json(path: &Path) -> Option<Value> {
     serde_json::from_slice(&bytes).ok()
 }
 
-fn parse_snapshot(raw: &Value, fence: &Fence, month: u32, today: u32) -> Option<OtakSnapshot> {
-    if raw.get("version")?.as_u64()? != 1
-        || raw.get("fence").and_then(parse_fence).as_ref()? != fence
-        || raw.get("leader")?.as_str()?.is_empty()
+fn parse_snapshot(
+    raw: &Value,
+    fence: &Fence,
+    month: u32,
+    today: u32,
+) -> Result<OtakSnapshot, SnapshotRejection> {
+    use SnapshotRejection::{Format, OutsideMonth, Overflow, Usage};
+    let leader = raw.get("leader").and_then(Value::as_str).ok_or(Format)?;
+    if raw.get("version").and_then(Value::as_u64) != Some(1)
+        || raw.get("fence").and_then(parse_fence).as_ref() != Some(fence)
+        || leader.is_empty()
     {
-        return None;
+        return Err(Format);
     }
-    let claude_available = raw.get("claudeAvailable")?.as_bool()?;
-    let codex_available = raw.get("codexAvailable")?.as_bool()?;
+    let claude_available = raw
+        .get("claudeAvailable")
+        .and_then(Value::as_bool)
+        .ok_or(Format)?;
+    let codex_available = raw
+        .get("codexAvailable")
+        .and_then(Value::as_bool)
+        .ok_or(Format)?;
     if !claude_available && !codex_available {
-        return None;
+        return Err(Format);
     }
-    let updated_at_ms = raw.get("updatedAtMs")?.as_u64()?;
+    let updated_at_ms = raw
+        .get("updatedAtMs")
+        .and_then(Value::as_u64)
+        .ok_or(Format)?;
     // The extension uses local calendar days. Its snapshot must have been
     // published during the requested month, even when the lease is now stale.
     let (year, month_of_year, day) =
         local_ymd(updated_at_ms, super::usage::timezone_bias_minutes());
     let updated_day = ymd_key(year, month_of_year, day);
     if updated_day / 100 != month / 100 || updated_day > today {
-        return None;
+        return Err(OutsideMonth);
     }
 
     let mut result = OtakSnapshot {
         updated_at_ms,
         claude: claude_available.then(ProviderSnapshot::default),
         codex: codex_available.then(ProviderSnapshot::default),
+        unknown_usage_fields: 0,
     };
-    let days = raw.get("days")?.as_object()?;
+    let days = raw.get("days").and_then(Value::as_object).ok_or(Format)?;
     if days.is_empty() || days.len() > 31 {
-        return None;
+        return Err(Format);
     }
     for (day_key, bucket) in days {
-        let day = parse_day(day_key)?;
+        let day = parse_day(day_key).ok_or(Format)?;
         if day / 100 != month / 100 || day > today {
-            return None;
+            return Err(OutsideMonth);
         }
-        let models = bucket.as_object()?;
+        let models = bucket.as_object().ok_or(Format)?;
         if models.len() > 512 {
-            return None;
+            return Err(Format);
         }
         for (key, raw_usage) in models {
-            let usage = parse_usage(raw_usage)?;
+            let usage = parse_usage(raw_usage, &mut result.unknown_usage_fields).ok_or(Usage)?;
             let (model, provider) = if let Some(model) = key.strip_prefix("claude/") {
                 (model, &mut result.claude)
             } else {
-                (key.strip_prefix("codex/")?, &mut result.codex)
+                (key.strip_prefix("codex/").ok_or(Usage)?, &mut result.codex)
             };
             if model.is_empty() || model.len() > 256 {
-                return None;
+                return Err(Usage);
             }
             let Some(provider) = provider.as_mut() else {
                 continue;
             };
             // otak-usage counts unknown models as $0, but retains their tokens.
             let cost = cost_nanos(model, usage, Some(day_key)).unwrap_or(0);
-            provider.month_cost_nanos = provider.month_cost_nanos.checked_add(cost)?;
+            provider.month_cost_nanos = provider
+                .month_cost_nanos
+                .checked_add(cost)
+                .ok_or(Overflow)?;
             provider.month_input_tokens = provider
                 .month_input_tokens
-                .checked_add(usage.processed_input_tokens())?;
-            provider.month_output_tokens =
-                provider.month_output_tokens.checked_add(usage.output)?;
+                .checked_add(usage.processed_input_tokens())
+                .ok_or(Overflow)?;
+            provider.month_output_tokens = provider
+                .month_output_tokens
+                .checked_add(usage.output)
+                .ok_or(Overflow)?;
             if day == today {
-                provider.today_cost_nanos = provider.today_cost_nanos.checked_add(cost)?;
+                provider.today_cost_nanos = provider
+                    .today_cost_nanos
+                    .checked_add(cost)
+                    .ok_or(Overflow)?;
             }
         }
     }
-    Some(result)
+    Ok(result)
 }
 
 fn parse_day(value: &str) -> Option<u32> {
@@ -206,23 +286,14 @@ fn parse_day(value: &str) -> Option<u32> {
     Some(year * 10_000 + month * 100 + day)
 }
 
-fn parse_usage(raw: &Value) -> Option<TokenUsage> {
+/// Known token classes are validated. Unknown keys are counted into
+/// `unknown_fields` rather than rejecting the snapshot: otak-usage adds
+/// classification fields (its `longContext*` subsets never remove tokens
+/// from the base fields), and an unpriced class only lowers the floor.
+fn parse_usage(raw: &Value, unknown_fields: &mut u32) -> Option<TokenUsage> {
     let object = raw.as_object()?;
-    for key in object.keys() {
-        if !matches!(
-            key.as_str(),
-            "input"
-                | "cachedInput"
-                | "cacheRead"
-                | "cacheWrite5m"
-                | "cacheWrite1h"
-                | "output"
-                | "longContextInput"
-                | "longContextCachedInput"
-                | "longContextOutput"
-        ) {
-            return None;
-        }
+    if object.len() > MAX_USAGE_FIELDS {
+        return None;
     }
     let field = |name: &str, required: bool| -> Option<u64> {
         let n = match object.get(name) {
@@ -232,7 +303,7 @@ fn parse_usage(raw: &Value) -> Option<TokenUsage> {
         };
         (n <= MAX_TOKEN_FIELD).then_some(n)
     };
-    Some(TokenUsage {
+    let usage = TokenUsage {
         input: field("input", true)?,
         cached_input: field("cachedInput", true)?,
         cache_read: field("cacheRead", true)?,
@@ -242,7 +313,32 @@ fn parse_usage(raw: &Value) -> Option<TokenUsage> {
         long_context_input: field("longContextInput", false)?,
         long_context_cached_input: field("longContextCachedInput", false)?,
         long_context_output: field("longContextOutput", false)?,
-    })
+        long_context_cache_read: field("longContextCacheRead", false)?,
+        long_context_cache_write_5m: field("longContextCacheWrite5m", false)?,
+        long_context_cache_write_1h: field("longContextCacheWrite1h", false)?,
+    };
+    let unknown = object
+        .keys()
+        .filter(|key| {
+            !matches!(
+                key.as_str(),
+                "input"
+                    | "cachedInput"
+                    | "cacheRead"
+                    | "cacheWrite5m"
+                    | "cacheWrite1h"
+                    | "output"
+                    | "longContextInput"
+                    | "longContextCachedInput"
+                    | "longContextOutput"
+                    | "longContextCacheRead"
+                    | "longContextCacheWrite5m"
+                    | "longContextCacheWrite1h"
+            )
+        })
+        .count();
+    *unknown_fields = unknown_fields.saturating_add(u32::try_from(unknown).ok()?);
+    Some(usage)
 }
 
 /// Exact JavaScript `hashKey()` over Windows `path.resolve(...).toLowerCase()`.
@@ -285,7 +381,8 @@ fn to_base36(mut value: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{group_key, parse_snapshot, read_usage_snapshot, Fence};
+    use super::{group_key, parse_snapshot, read_usage_snapshot, Fence, SnapshotRejection};
+    use crate::core::{cost_nanos, TokenUsage};
     use serde_json::json;
     use std::{
         path::{Path, PathBuf},
@@ -320,6 +417,7 @@ mod tests {
         });
         let result = parse_snapshot(&snapshot, &fence, 20260901, 20260919).unwrap();
         assert_eq!(result.updated_at_ms, 1_789_776_000_000);
+        assert_eq!(result.unknown_usage_fields, 0);
         let codex = result.codex.unwrap();
         let claude = result.claude.unwrap();
         assert_eq!(codex.month_input_tokens, 2_500_000);
@@ -345,12 +443,21 @@ mod tests {
             "days": {"2026-09-19": {"codex/gpt-6-luna": {"input": 100, "cachedInput": 0, "cacheRead": 0, "cacheWrite5m": 0, "cacheWrite1h": 0, "output": 10}}}
         });
         raw["fence"]["epoch"] = json!(6);
-        assert!(parse_snapshot(&raw, &fence, 20260901, 20260919).is_none());
+        assert_eq!(
+            parse_snapshot(&raw, &fence, 20260901, 20260919).unwrap_err(),
+            SnapshotRejection::Format
+        );
         raw["fence"]["epoch"] = json!(7);
         raw["days"]["2026-09-19"]["codex/gpt-6-luna"]["input"] = json!(-1);
-        assert!(parse_snapshot(&raw, &fence, 20260901, 20260919).is_none());
+        assert_eq!(
+            parse_snapshot(&raw, &fence, 20260901, 20260919).unwrap_err(),
+            SnapshotRejection::Usage
+        );
         raw["days"]["2026-09-19"]["codex/gpt-6-luna"]["input"] = json!(100);
-        assert!(parse_snapshot(&raw, &fence, 20261001, 20261019).is_none());
+        assert_eq!(
+            parse_snapshot(&raw, &fence, 20261001, 20261019).unwrap_err(),
+            SnapshotRejection::OutsideMonth
+        );
 
         raw["claudeAvailable"] = json!(false);
         let codex_only = parse_snapshot(&raw, &fence, 20260901, 20260919).unwrap();
@@ -426,8 +533,62 @@ mod tests {
         let replacement = json!({"version": 2, "epoch": 8, "holder": "window-2",
             "leaseToken": "11111111111111111111111111111111", "heartbeatMs": 0});
         std::fs::write(&lock_path, replacement.to_string()).unwrap();
-        assert!(read_usage_snapshot(&storage, claude, codex, 20260901, 20260919).is_none());
+        assert_eq!(
+            read_usage_snapshot(&storage, claude, codex, 20260901, 20260919).unwrap_err(),
+            SnapshotRejection::Snapshot
+        );
         std::fs::remove_dir_all(storage).unwrap();
+    }
+
+    #[test]
+    fn long_context_cache_subsets_are_priced_and_unknown_fields_are_counted() {
+        let fence = fence();
+        // otak-usage 1.26.16 classifies the over-threshold part of each cache
+        // class as a `longContext*` subset; the base fields keep every token.
+        let mut raw = json!({
+            "version": 1,
+            "updatedAtMs": 1789776000000_u64,
+            "leader": "window-1",
+            "claudeAvailable": true,
+            "codexAvailable": false,
+            "fence": {"epoch": 7, "holder": "window-1", "leaseToken": fence.token},
+            "days": {"2026-09-19": {"claude/claude-haiku-5-5": {
+                "input": 50000, "cachedInput": 0, "cacheRead": 60000,
+                "cacheWrite5m": 10000, "cacheWrite1h": 2000, "output": 5000,
+                "longContextInput": 50000, "longContextCachedInput": 0,
+                "longContextOutput": 5000, "longContextCacheRead": 60000,
+                "longContextCacheWrite5m": 10000, "longContextCacheWrite1h": 2000
+            }}}
+        });
+        let priced = parse_snapshot(&raw, &fence, 20260901, 20260919).unwrap();
+        let claude = priced.claude.unwrap();
+        assert_eq!(priced.unknown_usage_fields, 0);
+        assert_eq!(claude.month_input_tokens, 122_000);
+        assert_eq!(claude.month_output_tokens, 5_000);
+        // The local reader prices the same request through the SKU.
+        let measured = TokenUsage {
+            input: 50_000,
+            cache_read: 60_000,
+            cache_write_5m: 10_000,
+            cache_write_1h: 2_000,
+            output: 5_000,
+            ..TokenUsage::default()
+        };
+        assert_eq!(
+            claude.today_cost_nanos,
+            cost_nanos("claude-haiku-5-5-long-context", measured, None).unwrap()
+        );
+
+        raw["days"]["2026-09-19"]["claude/claude-haiku-5-5"]["cacheWrite24h"] = json!(1);
+        let tolerated = parse_snapshot(&raw, &fence, 20260901, 20260919).unwrap();
+        assert_eq!(tolerated.unknown_usage_fields, 1);
+        assert_eq!(tolerated.claude, priced.claude);
+
+        raw["days"]["2026-09-19"]["claude/claude-haiku-5-5"]["cacheRead"] = json!("60000");
+        assert_eq!(
+            parse_snapshot(&raw, &fence, 20260901, 20260919).unwrap_err(),
+            SnapshotRejection::Usage
+        );
     }
 
     /// Run manually on a workstation with the otak-usage VS Code extension.

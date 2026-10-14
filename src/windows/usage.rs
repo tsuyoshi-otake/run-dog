@@ -64,7 +64,9 @@ use crate::core::{
 #[cfg(test)]
 use crate::core::UsageCheckpoint;
 
-use super::otak_snapshot::{read_usage_snapshot, OtakSnapshot, ProviderSnapshot};
+use super::otak_snapshot::{
+    read_usage_snapshot, OtakSnapshot, ProviderSnapshot, SnapshotRejection,
+};
 use super::usage_store::FileUsageStore;
 
 pub const USAGE_TIMER_ID: usize = 4;
@@ -73,11 +75,13 @@ pub use super::messages::USAGE_READY_MESSAGE;
 pub const USAGE_FIRST_INTERVAL_MS: u32 = 8_000;
 /// Steady-state JSONL discover / read / ingest interval.
 pub const USAGE_IDLE_INTERVAL_MS: u32 = 60_000;
-/// Ordinary unread work retains the steady-state polling floor.
+/// Discovery and registration work keeps the steady-state polling floor.
 pub const USAGE_CONTINUE_INTERVAL_MS: u32 = USAGE_IDLE_INTERVAL_MS;
-/// Historical catch-up advances bounded local JSONL work without waiting a
-/// minute for each batch. Network fetch and hot-file restat have independent
-/// wall-clock cooldowns below.
+/// Historical catch-up, and any known unread bytes left after a tick (#106),
+/// advance bounded local JSONL work without waiting a minute for each batch.
+/// Network fetch, hot-file restat and failed-path retries have independent
+/// wall-clock cooldowns below, so this cadence never polls a caught-up file
+/// or spends a retry attempt faster.
 pub const USAGE_CATCH_UP_INTERVAL_MS: u32 = 50;
 const CATCH_UP_CHECKPOINT_INTERVAL_MS: u64 = 5_000;
 
@@ -92,6 +96,10 @@ const MAX_DIRS_PER_TICK: usize = 6;
 const CATCH_UP_FILES_PER_TICK: usize = 12;
 const CATCH_UP_BYTES_PER_TICK: u64 = 512 * 1_024;
 const CATCH_UP_DIRS_PER_TICK: usize = 24;
+/// Known unread bytes above this are shown as "scanning": the month total is
+/// visibly incomplete. Smaller remainders (a normal minute of appends) drain
+/// in a few catch-up ticks, and flagging them would make the flyout flicker.
+const SCANNING_BACKLOG_BYTES: u64 = 16 * 1_024 * 1_024;
 /// Assistant / token_count records are small. Larger lines are skipped so a
 /// single 300KiB+ user blob cannot stall the jsonl cursor.
 const MAX_PARSE_LINE: usize = 256 * 1_024;
@@ -108,10 +116,16 @@ const STAT_COOLDOWN_MS: u64 = USAGE_IDLE_INTERVAL_MS as u64;
 const COLD_RESTAT_MS: u64 = 10 * 60 * 1_000;
 const HOT_AGE_MS: u64 = 48 * 60 * 60 * 1_000;
 const REDISCOVER_MS: u64 = USAGE_IDLE_INTERVAL_MS as u64;
-/// An unreadable registration/probe gets a small number of immediate retry
-/// turns.  Once exhausted, the path has an explicit terminal outcome for the
+/// An unreadable registration/probe gets a small number of retry turns.
+/// Once exhausted, the path has an explicit terminal outcome for the
 /// current catch-up; it is revisited only after the cooldown below.
 const MAX_PATH_RETRIES: u8 = 3;
+/// The first retry of a failed path waits this long, doubling per further
+/// failure. The retry budget exists to ride out a transient antivirus or share
+/// race, so it must span wall-clock time rather than ticks: the 50 ms catch-up
+/// cadence (#106) would otherwise spend every attempt within a fraction of a
+/// second and park a fresh session for the whole terminal cooldown.
+const PATH_RETRY_MS: u64 = 1_000;
 const TERMINAL_PATH_RETRY_MS: u64 = 10 * 60 * 1_000;
 const MAX_HEADER_VALUE_BYTES: usize = 8 * 1_024;
 const MAX_CREDENTIAL_FILE_BYTES: usize = 256 * 1_024;
@@ -205,6 +219,12 @@ pub struct UsageCollector {
     #[cfg(test)]
     fail_file_id_path: Option<PathBuf>,
     pending: VecDeque<PathBuf>,
+    /// Unread bytes of pending files that are readable now (not waiting out a
+    /// failed attempt) after the last tick. Non-zero
+    /// keeps catch-up budgets and cadence until every known file is read to
+    /// its end; a long-lived session can grow faster than one steady read a
+    /// minute (#106).
+    backlog_bytes: u64,
     next_hot_provider: SourceKind,
     today_recovery_ticks: u8,
     snapshot: UsageSnapshot,
@@ -234,6 +254,7 @@ pub struct UsageCollector {
     cancelled: bool,
     checkpoint_dirty: bool,
     otak_cache_floor: Option<OtakSnapshot>,
+    otak_cache_status: CacheSnapshotStatus,
     last_otak_cache_attempt_ms: u64,
     last_checkpoint_attempt_ms: u64,
     persist_checkpoint: bool,
@@ -247,10 +268,46 @@ pub struct UsageCollector {
 pub(super) struct UsageDiagnosticSource {
     pub local: UsageSnapshot,
     pub cache_floor: Option<OtakSnapshot>,
+    pub cache_snapshot: CacheSnapshotStatus,
     pub day: u32,
     pub month: u32,
     pub last_collected_ms: u64,
     pub pending_files: usize,
+    /// Known unread bytes left after the last tick (#106).
+    pub unread_bytes: u64,
+}
+
+/// Outcome of the latest otak-usage snapshot read. Diagnostics only: the
+/// floor itself stays whatever was last accepted.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum CacheSnapshotStatus {
+    /// No read attempted yet, or this collector does not use the production
+    /// store.
+    Unchecked,
+    /// The read replaced the floor with a newer snapshot.
+    Accepted,
+    /// The read succeeded but was no newer than the floor held.
+    Unchanged,
+    /// The read failed; the previous floor, if any, is kept.
+    Rejected(SnapshotRejection),
+}
+
+impl CacheSnapshotStatus {
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Self::Unchecked => "unchecked",
+            Self::Accepted => "accepted",
+            Self::Unchanged => "unchanged",
+            Self::Rejected(_) => "rejected",
+        }
+    }
+
+    pub(super) fn reason(self) -> Option<&'static str> {
+        match self {
+            Self::Rejected(reason) => Some(reason.as_str()),
+            _ => None,
+        }
+    }
 }
 
 struct SlotOutcome {
@@ -355,6 +412,7 @@ impl UsageCollector {
             #[cfg(test)]
             fail_file_id_path: None,
             pending: VecDeque::new(),
+            backlog_bytes: 0,
             next_hot_provider: SourceKind::Codex,
             today_recovery_ticks: 0,
             snapshot: UsageSnapshot::default(),
@@ -384,6 +442,7 @@ impl UsageCollector {
             cancelled: false,
             checkpoint_dirty: false,
             otak_cache_floor: None,
+            otak_cache_status: CacheSnapshotStatus::Unchecked,
             last_otak_cache_attempt_ms: 0,
             last_checkpoint_attempt_ms: 0,
             persist_checkpoint,
@@ -437,7 +496,7 @@ impl UsageCollector {
     #[must_use]
     pub fn snapshot(&self) -> UsageSnapshot {
         let mut snapshot = UsageSnapshot {
-            month_scan_in_progress: self.catch_up,
+            month_scan_in_progress: self.catch_up || self.backlog_bytes >= SCANNING_BACKLOG_BYTES,
             ..self.snapshot
         };
         if let Some(cache) = self.otak_cache_floor {
@@ -456,11 +515,20 @@ impl UsageCollector {
         UsageDiagnosticSource {
             local: self.snapshot,
             cache_floor: self.otak_cache_floor,
+            cache_snapshot: self.otak_cache_status,
             day: self.day_key,
             month: self.month_key,
             last_collected_ms: self.last_collected_ms,
             pending_files: self.pending.len() + self.registrations.len(),
+            unread_bytes: self.backlog_bytes,
         }
+    }
+
+    /// True while bounded local reads should run at the catch-up cadence:
+    /// the month scan itself, or known unread bytes left by the last tick.
+    #[must_use]
+    pub fn catching_up(&self) -> bool {
+        self.catch_up || self.backlog_bytes > 0
     }
 
     #[must_use]
@@ -588,7 +656,8 @@ impl UsageCollector {
             self.prioritize_newest_pending();
         }
 
-        let (opens, unread_remaining) = self.scan_pending_and_hot(window, now_ms);
+        let (opens, unread_remaining, readable_bytes) = self.scan_pending_and_hot(window, now_ms);
+        self.backlog_bytes = readable_bytes;
         if !self.codex_from_remote {
             let has_codex = self
                 .files
@@ -637,7 +706,7 @@ impl UsageCollector {
         // bounded catch-up batch. A failed save is retried after the same
         // interval; shutdown and catch-up completion always flush directly.
         if self.checkpoint_dirty
-            && (!self.catch_up
+            && (!self.catching_up()
                 || self.startup_mode != StartupMode::Production
                 || self.last_checkpoint_attempt_ms == 0
                 || now_ms.saturating_sub(self.last_checkpoint_attempt_ms)
@@ -1152,6 +1221,7 @@ impl UsageCollector {
         self.files.clear();
         self.dirs.clear();
         self.pending.clear();
+        self.backlog_bytes = 0;
         self.registrations.clear();
         self.registration_today_count = 0;
         self.registration_recent_count = 0;
@@ -1325,7 +1395,9 @@ impl UsageCollector {
             }
             return;
         }
-        if !self.path_retry_due(&path, now_ms) {
+        // Rediscovery must not revive a terminal path before its cooldown. A
+        // non-terminal path stays queued; registration waits for its retry.
+        if self.path_retry_terminal(&path) && !self.path_retry_due(&path, now_ms) {
             return;
         }
         self.registration_paths.insert(path.clone());
@@ -1350,7 +1422,7 @@ impl UsageCollector {
     }
 
     /// Record one failed metadata/identity/read attempt.  The first failures
-    /// are retried on later ticks, but a path that cannot be read forever is
+    /// are retried after a short wall-clock delay, but a path that cannot be read forever is
     /// terminal for this catch-up.  A cooldown leaves a path recoverable if
     /// permissions or an antivirus lock are later cleared.
     fn record_path_failure(&mut self, path: &Path, now_ms: u64) -> bool {
@@ -1371,7 +1443,8 @@ impl UsageCollector {
         state.retry_after_ms = if state.terminal {
             now_ms.saturating_add(TERMINAL_PATH_RETRY_MS)
         } else {
-            now_ms
+            // Non-terminal means 1 <= attempts < MAX_PATH_RETRIES: 1 s, then 2 s.
+            now_ms.saturating_add(PATH_RETRY_MS << (state.attempts - 1))
         };
         state.terminal
     }
@@ -1401,13 +1474,23 @@ impl UsageCollector {
             self.file_work_remaining.div_ceil(2)
         };
         let count = self.registrations.len().min(budget);
+        let mut waiting = Vec::new();
         for _ in 0..count {
             let (path, recent) = self.registrations.pop_front().unwrap();
             self.registration_today_count = self.registration_today_count.saturating_sub(1);
             self.registration_recent_count = self.registration_recent_count.saturating_sub(1);
             self.registration_paths.remove(&path);
+            // A failed path waits for its wall-clock retry without spending
+            // an attempt or this tick's file budget.
+            if !self.path_retry_due(&path, now_ms) {
+                waiting.push((path, recent));
+                continue;
+            }
             self.file_work_remaining -= 1;
             self.register_jsonl_file(&path, window, recent, now_ms);
+        }
+        for (path, recent) in waiting {
+            self.queue_registration(path, recent, now_ms);
         }
     }
 
@@ -1775,7 +1858,11 @@ impl UsageCollector {
         chunk.consumed
     }
 
-    fn scan_pending_and_hot(&mut self, window: DayWindow, now_ms: u64) -> (usize, bool) {
+    /// Returns the files opened with new bytes, whether any pending file still
+    /// has unread bytes, and the unread bytes of pending files readable now.
+    /// Only pending files count: each of them is popped by a later tick, so a
+    /// non-zero byte count always makes progress.
+    fn scan_pending_and_hot(&mut self, window: DayWindow, now_ms: u64) -> (usize, bool, u64) {
         let mut bytes = 0_u64;
         let mut pending_bytes = 0_u64;
         let mut opens = 0_usize;
@@ -1912,13 +1999,31 @@ impl UsageCollector {
             }
         }
 
-        let unread_remaining = self.pending.iter().any(|path| {
-            self.files
-                .get(path)
-                .is_some_and(|cursor| cursor.size != cursor.offset && !cursor.waiting_incomplete)
-                && !self.path_retry_terminal(path)
-        });
-        (opens, unread_remaining)
+        // Every pending, non-terminal file with unread bytes keeps the tick
+        // busy and holds catch-up open, exactly as before #106. Only files
+        // readable now count as backlog that speeds up the cadence: ticking
+        // faster cannot advance a path that is waiting out a failure.
+        let mut counted = HashSet::new();
+        let mut unread_remaining = false;
+        let mut readable_bytes = 0_u64;
+        for path in &self.pending {
+            if !counted.insert(path) || self.path_retry_terminal(path) {
+                continue;
+            }
+            let Some(cursor) = self.files.get(path) else {
+                continue;
+            };
+            if cursor.size == cursor.offset || cursor.waiting_incomplete {
+                continue;
+            }
+            unread_remaining = true;
+            if self.path_retry_due(path, now_ms) {
+                // A cursor past a shrunk file still needs its rebuild read.
+                readable_bytes =
+                    readable_bytes.saturating_add(cursor.size.saturating_sub(cursor.offset).max(1));
+            }
+        }
+        (opens, unread_remaining, readable_bytes)
     }
 
     fn enqueue_scan(&mut self, path: PathBuf, mtime_ms: u64, window: DayWindow) {
@@ -1991,6 +2096,7 @@ impl UsageCollector {
             return;
         }
         let Some(appdata) = std::env::var_os("APPDATA") else {
+            self.record_otak_read(Err(SnapshotRejection::Storage));
             return;
         };
         let storage_dir = PathBuf::from(appdata)
@@ -1998,16 +2104,29 @@ impl UsageCollector {
             .join("User")
             .join("globalStorage")
             .join("odangoo.otak-usage");
-        let Some(source) = read_usage_snapshot(
+        let read = read_usage_snapshot(
             &storage_dir,
             &self.claude_dir,
             &self.codex_home,
             window.month_start,
             window.today,
-        ) else {
-            return;
+        );
+        self.record_otak_read(read);
+    }
+
+    /// A rejected read keeps the current floor; the status says why the floor
+    /// is not newer.
+    fn record_otak_read(&mut self, read: Result<OtakSnapshot, SnapshotRejection>) {
+        self.otak_cache_status = match read {
+            Ok(source) => {
+                if self.reconcile_otak_snapshot(source) {
+                    CacheSnapshotStatus::Accepted
+                } else {
+                    CacheSnapshotStatus::Unchanged
+                }
+            }
+            Err(reason) => CacheSnapshotStatus::Rejected(reason),
         };
-        self.reconcile_otak_snapshot(source);
     }
 
     fn reconcile_otak_snapshot(&mut self, source: OtakSnapshot) -> bool {
@@ -2027,7 +2146,7 @@ impl UsageCollector {
     }
 
     fn file_budget(&self) -> usize {
-        if self.catch_up || self.today_recovery_ticks > 0 {
+        if self.catching_up() || self.today_recovery_ticks > 0 {
             CATCH_UP_FILES_PER_TICK
         } else {
             MAX_FILES_PER_TICK
@@ -2037,7 +2156,7 @@ impl UsageCollector {
     fn byte_budget(&self) -> u64 {
         if self.today_recovery_ticks > 0 {
             TODAY_RECOVERY_BYTES_PER_TICK
-        } else if self.catch_up {
+        } else if self.catching_up() {
             CATCH_UP_BYTES_PER_TICK
         } else {
             MAX_BYTES_PER_TICK
@@ -3678,6 +3797,53 @@ mod tests {
     };
 
     #[test]
+    fn component_cache_snapshot_status_reports_the_last_read_outcome() {
+        use super::CacheSnapshotStatus;
+        use crate::windows::otak_snapshot::SnapshotRejection;
+        let root = std::env::temp_dir().join("run-dog-otak-cache-status-test");
+        let mut collector =
+            UsageCollector::with_dirs(root.join("claude"), root.join("codex"), false);
+        assert_eq!(collector.otak_cache_status, CacheSnapshotStatus::Unchecked);
+        assert_eq!(
+            collector.diagnostic_source().cache_snapshot.as_str(),
+            "unchecked"
+        );
+        collector.record_otak_read(Err(SnapshotRejection::Usage));
+        assert_eq!(
+            collector.otak_cache_status,
+            CacheSnapshotStatus::Rejected(SnapshotRejection::Usage)
+        );
+        assert_eq!(
+            collector.diagnostic_source().cache_snapshot.reason(),
+            Some("usage")
+        );
+        assert!(collector.otak_cache_floor.is_none());
+
+        let source = OtakSnapshot {
+            updated_at_ms: unix_now_ms(),
+            claude: Some(ProviderSnapshot {
+                today_cost_nanos: 1_000_000_000,
+                ..ProviderSnapshot::default()
+            }),
+            codex: None,
+            unknown_usage_fields: 3,
+        };
+        collector.record_otak_read(Ok(source));
+        assert_eq!(collector.otak_cache_status, CacheSnapshotStatus::Accepted);
+        assert_eq!(collector.diagnostic_source().cache_floor, Some(source));
+        collector.record_otak_read(Ok(source));
+        assert_eq!(collector.otak_cache_status, CacheSnapshotStatus::Unchanged);
+        assert_eq!(collector.diagnostic_source().cache_snapshot.reason(), None);
+
+        // A later rejection keeps the floor and says why it is not newer.
+        collector.record_otak_read(Err(SnapshotRejection::FenceChanged));
+        let diagnostics = collector.diagnostic_source();
+        assert_eq!(diagnostics.cache_snapshot.as_str(), "rejected");
+        assert_eq!(diagnostics.cache_snapshot.reason(), Some("fence-changed"));
+        assert_eq!(diagnostics.cache_floor, Some(source));
+    }
+
+    #[test]
     fn component_otak_cache_floors_are_independent_of_local_accounting() {
         let root = std::env::temp_dir().join("run-dog-otak-cache-reconcile-test");
         let mut collector =
@@ -3702,6 +3868,7 @@ mod tests {
                 month_input_tokens: 4_000_000_000,
                 month_output_tokens: 20_000_000,
             }),
+            unknown_usage_fields: 0,
         };
         collector.files.insert(
             root.join("codex/session.jsonl"),
@@ -5540,6 +5707,289 @@ mod tests {
         assert!(old_progress > 0, "the old backlog must also advance");
     }
 
+    /// #106: a long-lived Codex session keeps growing in the day directory of
+    /// its start date. Once its known unread bytes exceed one steady read, the
+    /// collector must keep reading at the catch-up cadence instead of 96 KiB a
+    /// minute, so an event behind megabytes of response items counts within
+    /// seconds rather than never.
+    #[test]
+    fn component_known_codex_backlog_drains_at_catch_up_cadence() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-codex-backlog-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let now = stable_test_now();
+        let window = day_window(now);
+        let session = write_codex_session(
+            &root,
+            "long-lived.jsonl",
+            &[token_count_line(&stamp_at(now), 1_000, 0, 10, 1_000, 0, 10)],
+        );
+        let mut collector = new_claude_collector(&root);
+        collector.catch_up = false;
+        collector.register_jsonl_file(&session, window, true, now);
+        collector.last_discover_ms = now;
+        collector.tick_at(ptr::null_mut(), now);
+        assert_eq!(collector.snapshot().codex.month_input_tokens, 1_000);
+
+        let filler = format!(
+            r#"{{"type":"response_item","payload":{{"type":"message","content":"{}"}}}}"#,
+            "x".repeat(64 * 1_024)
+        );
+        let mut lines = vec![filler; 64];
+        lines.push(token_count_line(
+            &stamp_at(now),
+            1_000_000,
+            0,
+            1_000,
+            1_001_000,
+            0,
+            1_010,
+        ));
+        append_codex_lines(&session, &lines);
+
+        let mut tick_ms = now + super::STAT_COOLDOWN_MS;
+        collector.last_discover_ms = tick_ms;
+        collector.tick_at(ptr::null_mut(), tick_ms);
+        let switched = collector.catching_up();
+        let mut showed_scanning = collector.snapshot().month_scan_in_progress;
+        let mut ticks = 1;
+        while collector.snapshot().codex.month_input_tokens < 1_001_000 && ticks < 12 {
+            tick_ms += u64::from(super::USAGE_CATCH_UP_INTERVAL_MS);
+            collector.tick_at(ptr::null_mut(), tick_ms);
+            showed_scanning |= collector.snapshot().month_scan_in_progress;
+            ticks += 1;
+        }
+        let usage = collector.snapshot().codex;
+        let offset = collector.files[&session].offset;
+        let size = fs::metadata(&session).unwrap().len();
+        let drained = (collector.backlog_bytes, collector.catching_up());
+        fs::remove_dir_all(&root).unwrap();
+        assert!(
+            switched,
+            "known unread bytes must switch to the catch-up cadence"
+        );
+        assert_eq!(
+            usage.month_input_tokens, 1_001_000,
+            "4 MiB of known unread bytes must drain within 12 catch-up ticks (read {offset} of {size} bytes in {ticks} ticks)"
+        );
+        assert_eq!(offset, size);
+        assert_eq!(
+            drained,
+            (0, false),
+            "a drained backlog returns to the steady cadence"
+        );
+        assert!(
+            !showed_scanning,
+            "a few MiB drain in seconds and must not flash the scanning label"
+        );
+    }
+
+    #[test]
+    fn component_failed_paths_keep_wall_clock_retries_at_catch_up_cadence() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-retry-cadence-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let now = stable_test_now();
+        let window = day_window(now);
+        let session = write_codex_session(
+            &root,
+            "long-lived.jsonl",
+            &[token_count_line(&stamp_at(now), 1_000, 0, 10, 1_000, 0, 10)],
+        );
+        let mut collector = new_claude_collector(&root);
+        collector.catch_up = false;
+        collector.register_jsonl_file(&session, window, true, now);
+        collector.last_discover_ms = now;
+        collector.tick_at(ptr::null_mut(), now);
+        let filler = format!(
+            r#"{{"type":"response_item","payload":{{"type":"message","content":"{}"}}}}"#,
+            "x".repeat(64 * 1_024)
+        );
+        let mut lines = vec![filler; 64];
+        lines.push(token_count_line(
+            &stamp_at(now),
+            1_000_000,
+            0,
+            1_000,
+            1_001_000,
+            0,
+            1_010,
+        ));
+        append_codex_lines(&session, &lines);
+        let fresh = write_codex_session(
+            &root,
+            "fresh.jsonl",
+            &[token_count_line(&stamp_at(now), 5_000, 0, 10, 5_000, 0, 10)],
+        );
+        let mut tick_ms = now + super::STAT_COOLDOWN_MS;
+        collector.last_discover_ms = tick_ms;
+        collector.tick_at(ptr::null_mut(), tick_ms);
+        let backlog_switched = collector.catching_up();
+
+        // An on-access scan now denies the pending session and the
+        // registration of a session that has just started.
+        collector.fail_file_id = true;
+        collector.queue_registration(fresh.clone(), true, tick_ms);
+        let step = u64::from(super::USAGE_CATCH_UP_INTERVAL_MS);
+        let retries = |collector: &UsageCollector| {
+            [&session, &fresh].map(|path| {
+                collector
+                    .path_retries
+                    .get(path)
+                    .map(|state| (state.attempts, state.terminal))
+            })
+        };
+        tick_ms += step;
+        let first_failure = tick_ms;
+        while tick_ms < first_failure + super::PATH_RETRY_MS {
+            collector.tick_at(ptr::null_mut(), tick_ms);
+            tick_ms += step;
+        }
+        let after_first_delay = retries(&collector);
+        let waiting = (
+            collector.backlog_bytes,
+            collector.catching_up(),
+            collector.registration_paths.contains(&fresh),
+        );
+        let second_failure = tick_ms;
+        while tick_ms < second_failure + 2 * super::PATH_RETRY_MS {
+            collector.tick_at(ptr::null_mut(), tick_ms);
+            tick_ms += step;
+        }
+        let after_second_delay = retries(&collector);
+
+        collector.fail_file_id = false;
+        let mut ticks = 0;
+        while collector.snapshot().codex.month_input_tokens < 1_006_000 && ticks < 24 {
+            collector.tick_at(ptr::null_mut(), tick_ms);
+            tick_ms += step;
+            ticks += 1;
+        }
+        let recovered = (
+            collector.snapshot().codex.month_input_tokens,
+            collector.path_retries.is_empty(),
+            collector.catching_up(),
+        );
+        fs::remove_dir_all(&root).unwrap();
+        assert!(
+            backlog_switched,
+            "the appended backlog drives catch-up ticks"
+        );
+        assert_eq!(
+            after_first_delay,
+            [Some((1, false)); 2],
+            "catch-up ticks must not spend retry attempts faster than wall-clock time"
+        );
+        assert_eq!(
+            waiting,
+            (0, false, true),
+            "a path waiting out a failure is not readable backlog, and its registration stays queued"
+        );
+        assert_eq!(
+            after_second_delay,
+            [Some((2, false)); 2],
+            "the second delay doubles"
+        );
+        assert_eq!(
+            recovered,
+            (1_006_000, true, false),
+            "both sessions recover in {ticks} ticks"
+        );
+    }
+
+    #[test]
+    fn component_unterminated_tail_line_does_not_hold_the_catch_up_cadence() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-codex-partial-tail-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let now = stable_test_now();
+        let window = day_window(now);
+        let session = write_codex_session(
+            &root,
+            "writing.jsonl",
+            &[token_count_line(&stamp_at(now), 1_000, 0, 10, 1_000, 0, 10)],
+        );
+        {
+            use std::io::Write;
+            let mut file = fs::OpenOptions::new().append(true).open(&session).unwrap();
+            write!(
+                file,
+                r#"{{"type":"response_item","payload":"{}"#,
+                "y".repeat(4_096)
+            )
+            .unwrap();
+        }
+        let mut collector = new_claude_collector(&root);
+        collector.catch_up = false;
+        collector.register_jsonl_file(&session, window, true, now);
+        collector.last_discover_ms = now;
+        // The first read consumes the complete line; only the next read can
+        // tell that the remainder is an unterminated record.
+        collector.tick_at(ptr::null_mut(), now);
+        let tick = collector.tick_at(
+            ptr::null_mut(),
+            now + u64::from(super::USAGE_CATCH_UP_INTERVAL_MS),
+        );
+        let state = (
+            collector.backlog_bytes,
+            collector.catching_up(),
+            collector.files[&session].waiting_incomplete,
+        );
+        let counted = collector.snapshot().codex.month_input_tokens;
+        fs::remove_dir_all(&root).unwrap();
+        assert_eq!(counted, 1_000);
+        assert_eq!(tick, UsageTick::Idle);
+        assert_eq!(
+            state,
+            (0, false, true),
+            "a line still being written is not readable backlog"
+        );
+    }
+
+    #[test]
+    fn component_unread_backlog_sets_budgets_cadence_and_scanning_flag() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-backlog-flags-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let mut collector = new_claude_collector(&root);
+        collector.catch_up = false;
+        assert!(!collector.catching_up());
+        assert_eq!(collector.file_budget(), super::MAX_FILES_PER_TICK);
+        assert_eq!(collector.byte_budget(), super::MAX_BYTES_PER_TICK);
+
+        collector.backlog_bytes = 1;
+        assert!(collector.catching_up());
+        assert_eq!(collector.file_budget(), super::CATCH_UP_FILES_PER_TICK);
+        assert_eq!(collector.byte_budget(), super::CATCH_UP_BYTES_PER_TICK);
+        assert!(!collector.snapshot().month_scan_in_progress);
+
+        collector.backlog_bytes = super::SCANNING_BACKLOG_BYTES;
+        assert!(collector.snapshot().month_scan_in_progress);
+        assert_eq!(
+            collector.diagnostic_source().unread_bytes,
+            super::SCANNING_BACKLOG_BYTES
+        );
+
+        collector.rescan_current_month();
+        assert_eq!(
+            collector.backlog_bytes, 0,
+            "a rescan drops the old pending queue"
+        );
+        assert!(
+            collector.catching_up(),
+            "the rescan itself is catch-up work"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn component_today_discovers_both_providers_ahead_of_old_directory_backlog() {
         let root = std::env::temp_dir().join(format!(
@@ -6815,9 +7265,16 @@ mod tests {
         let start = unix_now_ms();
         for i in 1..=50 {
             let before = collector.files_opened;
+            // Readable backlog left by the previous tick selects the catch-up
+            // budget (#106); discovery itself starts at the steady budget.
+            let budget = collector.file_budget();
+            if i == 1 {
+                assert_eq!(budget, super::MAX_FILES_PER_TICK);
+            }
             collector.tick_at(ptr::null_mut(), start + i * super::REDISCOVER_MS);
-            assert!(collector.files_opened - before <= (super::MAX_FILES_PER_TICK * 3) as u64);
+            assert!(collector.files_opened - before <= (budget * 3) as u64);
         }
+        assert!(!collector.catching_up());
         assert_eq!(collector.files.len(), 30);
         assert_eq!(collector.snapshot.claude.month_input_tokens, 30_000_000);
         fs::remove_dir_all(root).unwrap();
@@ -6892,7 +7349,15 @@ mod tests {
         assert_eq!(restored.cursor_reset_count, 0);
         assert_eq!(restored.build_state(window).cursors[0], original);
         restored.fail_file_id = false;
-        tick_idle(&mut restored);
+        // The failed probe is retried once its wall-clock delay has passed;
+        // ticking faster than that spends no attempt (#106).
+        let retry_at = unix_now_ms() + super::PATH_RETRY_MS;
+        for _ in 0..64 {
+            if restored.tick_at(ptr::null_mut(), retry_at) == UsageTick::Idle && !restored.catch_up
+            {
+                break;
+            }
+        }
         assert_eq!(restored.snapshot.claude.month_input_tokens, 2_000_000);
         assert_eq!(restored.cursor_reset_count, 0);
         restored.flush_checkpoint();
