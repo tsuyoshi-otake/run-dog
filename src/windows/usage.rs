@@ -3143,11 +3143,19 @@ fn read_claude_credentials(claude_dir: &Path) -> Option<ClaudeCreds> {
         access_token,
         refresh_token: oauth.refresh_token.filter(|token| !token.is_empty()),
         expires_at_ms: oauth.expires_at.map(normalize_expiry_ms),
-        plan: oauth
-            .rate_limit_tier
-            .filter(|tier| !tier.is_empty())
-            .or(oauth.subscription_type.filter(|kind| !kind.is_empty())),
+        plan: claude_plan_slug(oauth.subscription_type, oauth.rate_limit_tier),
     })
+}
+
+/// Like Claude Code: `subscriptionType` is the plan, and `rateLimitTier` only
+/// tells Max from Ultra. A Team premium seat carries the 5x tier but is Team.
+fn claude_plan_slug(kind: Option<String>, tier: Option<String>) -> Option<String> {
+    let kind = kind.filter(|kind| !kind.is_empty());
+    let tier = tier.filter(|tier| !tier.is_empty());
+    match kind.as_deref() {
+        Some("max") | None => tier.or(kind),
+        Some(_) => kind,
+    }
 }
 
 fn normalize_expiry_ms(expires: u64) -> u64 {
@@ -3783,11 +3791,12 @@ fn path_size_mtime(path: &Path) -> Option<(u64, u64)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        day_window, is_current_month, is_safe_header_value, is_subscription_limits,
-        parse_claude_line, parse_claude_usage_response, parse_codex_limits_line, parse_codex_model,
-        parse_codex_usage_line, parse_timestamp, parse_wham_usage_response,
-        persist_claude_credentials, read_claude_credentials, read_regular_file, unix_now_ms,
-        FileCursor, OtakSnapshot, ProviderSnapshot, SourceKind, UsageCollector, UsageTick,
+        claude_plan_slug, day_window, is_current_month, is_safe_header_value,
+        is_subscription_limits, parse_claude_line, parse_claude_usage_response,
+        parse_codex_limits_line, parse_codex_model, parse_codex_usage_line, parse_timestamp,
+        parse_wham_usage_response, persist_claude_credentials, read_claude_credentials,
+        read_regular_file, unix_now_ms, FileCursor, OtakSnapshot, ProviderSnapshot, SourceKind,
+        UsageCollector, UsageTick,
     };
     use crate::core::{local_hms, local_ymd, CursorKind, CursorRebuildReason, UsageCursor};
     use std::{
@@ -6447,10 +6456,10 @@ mod tests {
     #[test]
     fn component_codex_and_claude_limit_payloads_round_trip() {
         let codex = parse_codex_limits_line(
-            r#"{"timestamp":"2026-08-16T01:02:03Z","payload":{"rate_limits":{"plan_type":"pro","primary":{"used_percent":5.0,"resets_at":1780000000,"window_minutes":300},"secondary":{"used_percent":21.5,"resets_at":1780500000,"window_minutes":10080}}}}"#,
+            r#"{"timestamp":"2026-08-16T01:02:03Z","payload":{"rate_limits":{"plan_type":"promax","primary":{"used_percent":5.0,"resets_at":1780000000,"window_minutes":300},"secondary":{"used_percent":21.5,"resets_at":1780500000,"window_minutes":10080}}}}"#,
         )
         .expect("codex limits");
-        assert_eq!(codex.plan_label().as_deref(), Some("ChatGPT Pro"));
+        assert_eq!(codex.plan_label().as_deref(), Some("ChatGPT Pro 500"));
         assert_eq!(codex.primary.unwrap().used_tenths, 50);
         assert_eq!(codex.secondary.unwrap().window_minutes, 10_080);
 
@@ -6468,8 +6477,40 @@ mod tests {
             Some("default_claude_max_20x"),
         )
         .expect("claude max 20x");
-        assert_eq!(max_20x.plan_label().as_deref(), Some("Max 20x"));
+        assert_eq!(max_20x.plan_label().as_deref(), Some("Ultra"));
         assert!(max_20x.fable.is_none());
+
+        let max_5x = parse_claude_usage_response(
+            r#"{"five_hour":{"utilization":1.0},"seven_day":{"utilization":34.0}}"#,
+            Some("default_claude_max_5x"),
+        )
+        .expect("claude max 5x");
+        assert_eq!(max_5x.plan_label().as_deref(), Some("Max"));
+    }
+
+    #[test]
+    fn component_claude_plan_comes_from_subscription_type_and_max_tier() {
+        let plan = |kind: Option<&str>, tier: Option<&str>| {
+            claude_plan_slug(kind.map(str::to_owned), tier.map(str::to_owned))
+        };
+        // Local credentials on 2026-10-31: subscriptionType max + 20x tier.
+        assert_eq!(
+            plan(Some("max"), Some("default_claude_max_20x")).as_deref(),
+            Some("default_claude_max_20x")
+        );
+        assert_eq!(plan(Some("max"), None).as_deref(), Some("max"));
+        assert_eq!(
+            plan(None, Some("default_claude_max_5x")).as_deref(),
+            Some("default_claude_max_5x")
+        );
+        // A Team premium seat carries the 5x tier but is still Team.
+        assert_eq!(
+            plan(Some("team"), Some("default_claude_max_5x")).as_deref(),
+            Some("team")
+        );
+        assert_eq!(plan(Some("pro"), Some("")).as_deref(), Some("pro"));
+        assert_eq!(plan(Some(""), Some("")), None);
+        assert_eq!(plan(None, None), None);
     }
 
     #[test]
@@ -6553,7 +6594,7 @@ mod tests {
             r#"{"plan_type":"pro","rate_limit":{"primary_window":{"used_percent":34,"limit_window_seconds":18000,"reset_at":1778091218},"secondary_window":{"used_percent":37,"limit_window_seconds":604800,"reset_at":1778605571}}}"#,
         )
         .expect("wham usage");
-        assert_eq!(usage.plan_label().as_deref(), Some("ChatGPT Pro"));
+        assert_eq!(usage.plan_label().as_deref(), Some("ChatGPT Pro 200"));
         assert_eq!(usage.primary.unwrap().window_minutes, 300);
         assert_eq!(usage.primary.unwrap().used_tenths, 340);
         assert_eq!(usage.secondary.unwrap().window_minutes, 10_080);

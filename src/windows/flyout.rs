@@ -20,17 +20,17 @@ use std::{
 use windows_sys::{
     core::GUID,
     Win32::{
-        Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
+        Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM},
         Graphics::{
             Dwm::{DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND},
             Gdi::{
                 BeginPaint, CreateFontW, CreatePen, CreateRoundRectRgn, CreateSolidBrush,
                 DeleteObject, DrawTextW, Ellipse, EndPaint, FillRect, GetDC, GetDeviceCaps,
-                GetMonitorInfoW, GetStockObject, InvalidateRect, LineTo, MonitorFromPoint,
-                MonitorFromWindow, MoveToEx, Polygon, Polyline, ReleaseDC, RoundRect, SelectObject,
-                SetBkMode, SetTextColor, SetWindowRgn, CLEARTYPE_QUALITY, DEFAULT_CHARSET,
-                DEFAULT_GUI_FONT, DT_END_ELLIPSIS, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE,
-                DT_VCENTER, FW_NORMAL, FW_SEMIBOLD, LOGPIXELSX, MONITORINFO,
+                GetMonitorInfoW, GetStockObject, GetTextExtentPoint32W, InvalidateRect, LineTo,
+                MonitorFromPoint, MonitorFromWindow, MoveToEx, Polygon, Polyline, ReleaseDC,
+                RoundRect, SelectObject, SetBkMode, SetTextColor, SetWindowRgn, CLEARTYPE_QUALITY,
+                DEFAULT_CHARSET, DEFAULT_GUI_FONT, DT_END_ELLIPSIS, DT_NOPREFIX, DT_RIGHT,
+                DT_SINGLELINE, DT_VCENTER, FW_NORMAL, FW_SEMIBOLD, LOGPIXELSX, MONITORINFO,
                 MONITOR_DEFAULTTONEAREST, NULL_BRUSH, NULL_PEN, PAINTSTRUCT, PS_SOLID, TRANSPARENT,
             },
         },
@@ -1127,29 +1127,26 @@ fn paint_usage_row(
     }
 
     let heading = format_usage_heading(title, usage.plan_label().as_deref());
+    let today = format_today_usage(usage);
     select_font(hdc, title_font);
     let _ = unsafe { SetTextColor(hdc, palette.text) };
+    let title_row = RECT {
+        left: content_left,
+        top: row.top,
+        right: row.right,
+        bottom: row.top + layout.title_h,
+    };
+    draw_text(hdc, title_row, &today, DT_RIGHT);
+    // A long plan name ellipsizes before the Today amount instead of under it.
+    let heading_right = title_row.right - text_width(hdc, &today) - px(8, layout.dpi);
     draw_text(
         hdc,
         RECT {
-            left: content_left,
-            top: row.top,
-            right: row.right,
-            bottom: row.top + layout.title_h,
+            right: heading_right.max(content_left),
+            ..title_row
         },
         &heading,
         0,
-    );
-    draw_text(
-        hdc,
-        RECT {
-            left: content_left,
-            top: row.top,
-            right: row.right,
-            bottom: row.top + layout.title_h,
-        },
-        &format_today_usage(usage),
-        DT_RIGHT,
     );
 
     select_font(hdc, detail_font);
@@ -1582,6 +1579,19 @@ fn draw_text(
             DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS | extra_format,
         )
     };
+}
+
+/// Advance width of `text` in the selected font; 0 when GDI cannot measure.
+fn text_width(hdc: windows_sys::Win32::Graphics::Gdi::HDC, text: &str) -> i32 {
+    let wide = wide(text);
+    let mut size = SIZE { cx: 0, cy: 0 };
+    let measured =
+        unsafe { GetTextExtentPoint32W(hdc, wide.as_ptr(), (wide.len() - 1) as i32, &mut size) };
+    if measured == 0 {
+        0
+    } else {
+        size.cx
+    }
 }
 
 fn draw_separator(
@@ -2246,10 +2256,10 @@ mod tests {
             ..UsageSnapshot::default()
         };
         assert!(!usage.codex.has_month_activity());
-        assert_eq!(usage.codex.plan_label().as_deref(), Some("ChatGPT Pro"));
+        assert_eq!(usage.codex.plan_label().as_deref(), Some("ChatGPT Pro 200"));
         assert_eq!(
             crate::core::format_usage_heading("Codex", usage.codex.plan_label().as_deref()),
-            "ChatGPT Pro"
+            "ChatGPT Pro 200"
         );
         assert_eq!(visible_usage_count(usage), 1);
         assert_eq!(

@@ -123,7 +123,10 @@ pub fn format_banked_reset_label(available: Option<u16>) -> Option<String> {
 /// Nanodollars in one display cent. Accumulators stay in nanos; UI rounds once.
 pub const NANOS_PER_CENT: u64 = 10_000_000;
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+/// Bytes kept for a plan label. Every [`CHATGPT_PLAN_LABELS`] entry fits whole.
+const PLAN_LABEL_CAPACITY: usize = 40;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProviderUsage {
     pub today_cents: u32,
     pub month_cents: u32,
@@ -132,7 +135,7 @@ pub struct ProviderUsage {
     pub month_cost_nanos: u64,
     pub month_input_tokens: u64,
     pub month_output_tokens: u64,
-    pub plan: [u8; 24],
+    pub plan: [u8; PLAN_LABEL_CAPACITY],
     pub plan_len: u8,
     pub primary: Option<LimitWindow>,
     pub secondary: Option<LimitWindow>,
@@ -140,6 +143,26 @@ pub struct ProviderUsage {
     pub fable: Option<LimitWindow>,
     /// Codex banked reset credits (`available_count`). `None` means omitted.
     pub banked_reset_available: Option<u16>,
+}
+
+// `[u8; N]` derives `Default` only up to N = 32.
+impl Default for ProviderUsage {
+    fn default() -> Self {
+        Self {
+            today_cents: 0,
+            month_cents: 0,
+            today_cost_nanos: 0,
+            month_cost_nanos: 0,
+            month_input_tokens: 0,
+            month_output_tokens: 0,
+            plan: [0; PLAN_LABEL_CAPACITY],
+            plan_len: 0,
+            primary: None,
+            secondary: None,
+            fable: None,
+            banked_reset_available: None,
+        }
+    }
 }
 
 impl ProviderUsage {
@@ -156,7 +179,7 @@ impl ProviderUsage {
         self.store_plan(&format_plan_label(label));
     }
 
-    /// Codex / ChatGPT `plan_type` uses ChatGPT product names, not Claude Max 20x.
+    /// Codex / ChatGPT `plan_type` uses ChatGPT product names, not Claude plan names.
     pub fn set_chatgpt_plan(&mut self, label: &str) {
         self.store_plan(&format_chatgpt_plan_label(label));
     }
@@ -249,20 +272,20 @@ impl ProviderUsage {
     }
 }
 
-/// Claude slug `default_claude_max_20x` → `Max 20x`. Bare `pro` is `Pro`.
+/// Claude `subscriptionType` / `rateLimitTier` → plan name on claude.com/pricing.
 ///
-/// Multipliers stay only when the slug itself contains `20x` / `5x` / `2x`.
+/// The 2026-10 rename made the $200 Max 20x tier `Ultra` and the $100 Max 5x
+/// tier plain `Max`. Tier IDs kept their old names, so `max` + `20x` is Ultra.
+/// Multipliers are no longer part of any plan name.
 #[must_use]
 pub fn format_plan_label(raw: &str) -> String {
     let lower = raw.to_ascii_lowercase();
     let name = if lower.contains("enterprise") {
         "Enterprise"
-    } else if lower.contains("business") {
-        "Business"
     } else if lower.contains("team") {
         "Team"
-    } else if lower.contains("plus") {
-        "Plus"
+    } else if lower.contains("ultra") || (lower.contains("max") && lower.contains("20x")) {
+        "Ultra"
     } else if lower.contains("max") {
         "Max"
     } else if lower.contains("pro") {
@@ -270,32 +293,64 @@ pub fn format_plan_label(raw: &str) -> String {
     } else {
         raw.trim()
     };
-    match extract_multiplier(&lower) {
-        Some(multiplier) if !name.is_empty() => format!("{name} {multiplier}"),
-        _ if !name.is_empty() => name.to_owned(),
-        _ => raw.to_owned(),
+    if name.is_empty() {
+        raw.to_owned()
+    } else {
+        name.to_owned()
     }
 }
 
-/// Exact ChatGPT / Codex `plan_type` tokens → flyout label.
+/// ChatGPT / Codex `plan_type` slug → the name Codex CLI `/status` shows,
+/// prefixed with `ChatGPT`.
 ///
-/// `pro` / `plus` appear in repo JSONL and WHAM fixtures. `go` / `business`
-/// are official product names mapped only on exact slug match (live payload
-/// NOT RUN). Free / Team / Enterprise / Edu are not mapped: no captured ID.
+/// Mirrors openai/codex `codex-rs/tui/src/subscription.rs`
+/// (`SubscriptionDisplay::Status`, fea1d7f7d) and the slug aliases of
+/// `codex-rs/protocol/src/auth.rs` `PlanType::from_raw_value`. The slug is
+/// not the product name: `pro` is Pro 200, `promax` Pro 500, `team` Business
+/// and `business` Enterprise. The `chatgpt_` / `chatgpt-` rows predate that
+/// source and keep their base slug's label.
 const CHATGPT_PLAN_LABELS: &[(&str, &str)] = &[
-    ("pro", "ChatGPT Pro"),
-    ("chatgpt_pro", "ChatGPT Pro"),
-    ("chatgpt-pro", "ChatGPT Pro"),
-    ("plus", "ChatGPT Plus"),
-    ("chatgpt_plus", "ChatGPT Plus"),
-    ("chatgpt-plus", "ChatGPT Plus"),
+    ("free", "ChatGPT Free"),
     ("go", "ChatGPT Go"),
     ("chatgpt_go", "ChatGPT Go"),
     ("chatgpt-go", "ChatGPT Go"),
-    ("business", "ChatGPT Business"),
-    ("chatgpt_business", "ChatGPT Business"),
-    ("chatgpt-business", "ChatGPT Business"),
+    ("plus", "ChatGPT Plus"),
+    ("chatgpt_plus", "ChatGPT Plus"),
+    ("chatgpt-plus", "ChatGPT Plus"),
+    ("pro", "ChatGPT Pro 200"),
+    ("chatgpt_pro", "ChatGPT Pro 200"),
+    ("chatgpt-pro", "ChatGPT Pro 200"),
+    ("prolite", "ChatGPT Pro 100"),
+    ("promax", "ChatGPT Pro 500"),
+    ("team", "ChatGPT Business"),
+    ("self_serve_business_usage_based", "ChatGPT Business"),
+    ("self_serve_business_prolite", "ChatGPT Business Premium"),
+    ("business", "ChatGPT Enterprise"),
+    ("chatgpt_business", "ChatGPT Enterprise"),
+    ("chatgpt-business", "ChatGPT Enterprise"),
+    ("enterprise", "ChatGPT Enterprise"),
+    ("hc", "ChatGPT Enterprise"),
+    ("ent26", "ChatGPT Enterprise"),
+    ("enterprise_cbp_usage_based", "ChatGPT Enterprise"),
+    (
+        "enterprise_cbp_automation",
+        "ChatGPT Enterprise (Automation)",
+    ),
+    ("edu", "ChatGPT Edu"),
+    ("education", "ChatGPT Edu"),
+    ("edu_plus", "ChatGPT Edu Plus"),
+    ("edu_pro", "ChatGPT Edu Pro"),
+    ("sci", "ChatGPT Academic Researchers"),
+    ("sci_plus", "ChatGPT Academic Researchers Plus"),
 ];
+
+const _: () = {
+    let mut i = 0;
+    while i < CHATGPT_PLAN_LABELS.len() {
+        assert!(CHATGPT_PLAN_LABELS[i].1.len() <= PLAN_LABEL_CAPACITY);
+        i += 1;
+    }
+};
 
 /// ChatGPT / Codex `plan_type` from WHAM or JSONL `rate_limits`.
 ///
@@ -334,12 +389,6 @@ pub fn format_usage_heading(title: &str, plan: Option<&str>) -> String {
         (_, Some(plan)) if !plan.is_empty() => format!("{title} {plan}"),
         _ => title.to_owned(),
     }
-}
-
-fn extract_multiplier(lower: &str) -> Option<&'static str> {
-    ["20x", "5x", "2x"]
-        .into_iter()
-        .find(|candidate| lower.contains(candidate))
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -1330,34 +1379,77 @@ mod tests {
     }
 
     #[test]
-    fn component_plan_labels_capitalise_and_keep_rate_multipliers() {
-        assert_eq!(format_plan_label("default_claude_max_20x"), "Max 20x");
+    fn component_claude_plan_labels_use_renamed_plan_names() {
+        // support.claude.com: "The Max 20x plan is now called the Ultra plan";
+        // the $100 Max 5x tier is plain Max. Tier IDs kept their old names.
+        assert_eq!(format_plan_label("default_claude_max_20x"), "Ultra");
+        assert_eq!(format_plan_label("default_claude_max_5x"), "Max");
         assert_eq!(format_plan_label("max"), "Max");
+        assert_eq!(format_plan_label("ultra"), "Ultra");
         assert_eq!(format_plan_label("pro"), "Pro");
-        assert_eq!(format_plan_label("plus"), "Plus");
+        assert_eq!(format_plan_label("team"), "Team");
+        assert_eq!(format_plan_label("enterprise"), "Enterprise");
+        assert_eq!(format_plan_label("future_tier"), "future_tier");
+        assert_ne!(format_plan_label("default_claude_max_20x"), "Max 20x");
+        assert_ne!(format_plan_label("default_claude_max_5x"), "Max 5x");
     }
 
     #[test]
-    fn component_chatgpt_plan_ids_use_product_names() {
-        assert_eq!(format_chatgpt_plan_label("pro"), "ChatGPT Pro");
-        assert_eq!(format_chatgpt_plan_label("plus"), "ChatGPT Plus");
-        assert_eq!(format_chatgpt_plan_label("go"), "ChatGPT Go");
-        assert_eq!(format_chatgpt_plan_label("business"), "ChatGPT Business");
-        assert_eq!(format_chatgpt_plan_label("chatgpt-pro"), "ChatGPT Pro");
-        assert_eq!(format_chatgpt_plan_label("team"), "team");
-        assert_eq!(format_chatgpt_plan_label("enterprise"), "enterprise");
-        assert_eq!(format_chatgpt_plan_label("free"), "free");
-        assert_eq!(format_chatgpt_plan_label("edu"), "edu");
+    fn component_chatgpt_plan_ids_match_codex_status_labels() {
+        // openai/codex codex-rs/tui/src/subscription.rs, SubscriptionDisplay::Status.
+        for (slug, label) in [
+            ("free", "ChatGPT Free"),
+            ("go", "ChatGPT Go"),
+            ("plus", "ChatGPT Plus"),
+            ("pro", "ChatGPT Pro 200"),
+            ("prolite", "ChatGPT Pro 100"),
+            ("promax", "ChatGPT Pro 500"),
+            ("team", "ChatGPT Business"),
+            ("self_serve_business_usage_based", "ChatGPT Business"),
+            ("self_serve_business_prolite", "ChatGPT Business Premium"),
+            ("business", "ChatGPT Enterprise"),
+            ("enterprise", "ChatGPT Enterprise"),
+            ("hc", "ChatGPT Enterprise"),
+            ("ent26", "ChatGPT Enterprise"),
+            ("enterprise_cbp_usage_based", "ChatGPT Enterprise"),
+            (
+                "enterprise_cbp_automation",
+                "ChatGPT Enterprise (Automation)",
+            ),
+            ("edu", "ChatGPT Edu"),
+            ("education", "ChatGPT Edu"),
+            ("edu_plus", "ChatGPT Edu Plus"),
+            ("edu_pro", "ChatGPT Edu Pro"),
+            ("sci", "ChatGPT Academic Researchers"),
+            ("sci_plus", "ChatGPT Academic Researchers Plus"),
+        ] {
+            assert_eq!(format_chatgpt_plan_label(slug), label, "{slug}");
+        }
+        assert_eq!(format_chatgpt_plan_label(" ProMax "), "ChatGPT Pro 500");
+        assert_eq!(format_chatgpt_plan_label("chatgpt-pro"), "ChatGPT Pro 200");
+        assert_eq!(format_chatgpt_plan_label("future_tier"), "future_tier");
         assert_eq!(format_chatgpt_plan_label("not a plan!!"), "");
+        assert_ne!(format_chatgpt_plan_label("promax"), "promax");
         assert_ne!(format_chatgpt_plan_label("pro"), "Pro 20x");
-        assert_ne!(format_chatgpt_plan_label("pro"), "Plus");
+    }
+
+    #[test]
+    fn component_longest_chatgpt_plan_label_is_stored_whole() {
+        let mut usage = ProviderUsage::default();
+        usage.set_chatgpt_plan("sci_plus");
+        assert_eq!(
+            usage.plan_label().as_deref(),
+            Some("ChatGPT Academic Researchers Plus")
+        );
+        usage.set_chatgpt_plan("promax");
+        assert_eq!(usage.plan_label().as_deref(), Some("ChatGPT Pro 500"));
     }
 
     #[test]
     fn component_usage_heading_does_not_stack_codex_on_chatgpt() {
         assert_eq!(
-            format_usage_heading("Codex", Some("ChatGPT Pro")),
-            "ChatGPT Pro"
+            format_usage_heading("Codex", Some("ChatGPT Pro 500")),
+            "ChatGPT Pro 500"
         );
         assert_eq!(
             format_usage_heading("Codex", Some("ChatGPT Plus")),
@@ -1371,16 +1463,19 @@ mod tests {
             format_usage_heading("Codex", Some("ChatGPT Business")),
             "ChatGPT Business"
         );
-        assert_eq!(format_usage_heading("Codex", Some("team")), "Codex team");
+        assert_eq!(
+            format_usage_heading("Codex", Some("future_tier")),
+            "Codex future_tier"
+        );
         assert_eq!(format_usage_heading("Codex", None), "Codex");
         assert_eq!(format_usage_heading("Codex", Some("")), "Codex");
         assert_ne!(
-            format_usage_heading("Codex", Some("ChatGPT Pro")),
-            "Codex ChatGPT Pro"
+            format_usage_heading("Codex", Some("ChatGPT Pro 500")),
+            "Codex ChatGPT Pro 500"
         );
         assert_eq!(
-            format_usage_heading("Claude", Some("Max 20x")),
-            "Claude Max 20x"
+            format_usage_heading("Claude", Some("Ultra")),
+            "Claude Ultra"
         );
         assert_eq!(format_usage_heading("Claude", None), "Claude");
     }
@@ -1418,7 +1513,7 @@ mod tests {
         plan.set_chatgpt_plan("pro");
         assert!(plan.shows_chatgpt_card(NOW));
         assert!(!plan.has_month_activity());
-        assert_eq!(plan.plan_label().as_deref(), Some("ChatGPT Pro"));
+        assert_eq!(plan.plan_label().as_deref(), Some("ChatGPT Pro 200"));
         assert_ne!(plan.plan_label().as_deref(), Some("Pro 20x"));
 
         let live = ProviderUsage {
