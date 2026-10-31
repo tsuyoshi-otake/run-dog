@@ -191,10 +191,20 @@ impl ProviderUsage {
         self.plan_len = len as u8;
     }
 
+    /// Marks API-key access. The heading becomes `Claude API` / `OpenAI API`.
+    pub fn set_api_access(&mut self) {
+        self.store_plan(API_PLAN_LABEL);
+    }
+
+    #[must_use]
+    pub fn is_api_access(&self) -> bool {
+        self.plan.get(..usize::from(self.plan_len)) == Some(API_PLAN_LABEL.as_bytes())
+    }
+
     /// True when this month's jsonl produced an API-equivalent cost.
     ///
-    /// Limit windows alone do not count. Codex / ChatGPT flyout visibility
-    /// uses [`shows_chatgpt_card`] so a live plan or 5h/7d can still appear.
+    /// Limit windows alone do not count. Flyout visibility uses
+    /// [`Self::is_in_use`], which also accepts a live window with usage.
     #[must_use]
     pub const fn has_month_activity(self) -> bool {
         self.month_cents > 0
@@ -203,19 +213,20 @@ impl ProviderUsage {
             || self.month_output_tokens > 0
     }
 
-    /// Codex / ChatGPT flyout row: month JSONL, a resolved plan, or a live 5h/7d.
+    /// Flyout card visibility: this month's JSONL, or a live limit window
+    /// (5h / 7d / Fable) with usage above 0%.
     ///
-    /// Credential files, failed fetches, and unknown/expired windows do not
-    /// qualify. Those must not be painted as 0%.
+    /// A plan name, a credential file, a local folder, a failed fetch, and an
+    /// unknown/expired or 0% window are not use (#112).
     #[must_use]
-    pub fn shows_chatgpt_card(self, now_ms: u64) -> bool {
-        if self.has_month_activity() || self.plan_len != 0 {
+    pub fn is_in_use(self, now_ms: u64) -> bool {
+        if self.has_month_activity() {
             return true;
         }
-        [self.session_window(), self.weekly_window()]
+        [self.session_window(), self.weekly_window(), self.fable]
             .into_iter()
             .flatten()
-            .any(|window| window.is_current(now_ms))
+            .any(|window| window.is_current(now_ms) && window.used_tenths > 0)
     }
 
     #[must_use]
@@ -378,13 +389,18 @@ pub fn format_chatgpt_plan_label(raw: &str) -> String {
     }
 }
 
+/// Plan label stored for API-key access instead of a subscription plan.
+pub const API_PLAN_LABEL: &str = "API";
+
 /// Flyout heading: ChatGPT product names stand alone. Claude stays `Claude {plan}`.
 ///
-/// Unknown Codex slugs keep the `Codex` prefix. Empty plan is just the title —
-/// no trailing space.
+/// API-key access reads `Claude API` / `OpenAI API`: Codex on an API key is
+/// billed by the OpenAI API, not a ChatGPT plan. Unknown Codex slugs keep the
+/// `Codex` prefix. Empty plan is just the title — no trailing space.
 #[must_use]
 pub fn format_usage_heading(title: &str, plan: Option<&str>) -> String {
     match (title, plan) {
+        ("Codex", Some(API_PLAN_LABEL)) => "OpenAI API".to_owned(),
         ("Codex", Some(plan)) if plan.starts_with("ChatGPT ") => plan.to_owned(),
         (_, Some(plan)) if !plan.is_empty() => format!("{title} {plan}"),
         _ => title.to_owned(),
@@ -1505,16 +1521,26 @@ mod tests {
     }
 
     #[test]
-    fn component_chatgpt_card_shows_plan_or_live_limits() {
+    fn component_provider_card_shows_only_when_in_use() {
         const NOW: u64 = 1_786_865_940_000;
-        assert!(!ProviderUsage::default().shows_chatgpt_card(NOW));
+        assert!(!ProviderUsage::default().is_in_use(NOW));
 
+        // #112: a signed-in plan alone is not use. A Claude-only user with a
+        // ChatGPT login must not get a ChatGPT card.
         let mut plan = ProviderUsage::default();
         plan.set_chatgpt_plan("pro");
-        assert!(plan.shows_chatgpt_card(NOW));
-        assert!(!plan.has_month_activity());
+        assert!(!plan.is_in_use(NOW));
         assert_eq!(plan.plan_label().as_deref(), Some("ChatGPT Pro 200"));
         assert_ne!(plan.plan_label().as_deref(), Some("Pro 20x"));
+        let mut api = ProviderUsage::default();
+        api.set_api_access();
+        assert!(!api.is_in_use(NOW));
+
+        let month = ProviderUsage {
+            month_cents: 1,
+            ..plan
+        };
+        assert!(month.is_in_use(NOW));
 
         let live = ProviderUsage {
             primary: Some(LimitWindow {
@@ -1524,7 +1550,7 @@ mod tests {
             }),
             ..ProviderUsage::default()
         };
-        assert!(live.shows_chatgpt_card(NOW));
+        assert!(live.is_in_use(NOW));
         assert!(!live.has_month_activity());
 
         let weekly = ProviderUsage {
@@ -1535,7 +1561,33 @@ mod tests {
             }),
             ..ProviderUsage::default()
         };
-        assert!(weekly.shows_chatgpt_card(NOW));
+        assert!(weekly.is_in_use(NOW));
+
+        let fable = ProviderUsage {
+            fable: Some(LimitWindow {
+                used_tenths: 1,
+                resets_at_ms: NOW + 1,
+                window_minutes: 10_080,
+            }),
+            ..ProviderUsage::default()
+        };
+        assert!(fable.is_in_use(NOW));
+
+        // A live window at 0% means signed in but unused in that window.
+        let idle = ProviderUsage {
+            primary: Some(LimitWindow {
+                used_tenths: 0,
+                resets_at_ms: NOW + 1,
+                window_minutes: 300,
+            }),
+            secondary: Some(LimitWindow {
+                used_tenths: 0,
+                resets_at_ms: NOW + 1,
+                window_minutes: 10_080,
+            }),
+            ..plan
+        };
+        assert!(!idle.is_in_use(NOW));
 
         let expired = ProviderUsage {
             primary: Some(LimitWindow {
@@ -1545,7 +1597,7 @@ mod tests {
             }),
             ..ProviderUsage::default()
         };
-        assert!(!expired.shows_chatgpt_card(NOW));
+        assert!(!expired.is_in_use(NOW));
 
         let unknown = ProviderUsage {
             primary: Some(LimitWindow {
@@ -1555,12 +1607,40 @@ mod tests {
             }),
             ..ProviderUsage::default()
         };
-        assert!(!unknown.shows_chatgpt_card(NOW));
+        assert!(!unknown.is_in_use(NOW));
 
         let mut garbage = ProviderUsage::default();
         garbage.set_chatgpt_plan("not a plan!!");
-        assert!(!garbage.shows_chatgpt_card(NOW));
+        assert!(!garbage.is_in_use(NOW));
         assert_eq!(garbage.plan_len, 0);
+    }
+
+    #[test]
+    fn component_api_access_headings_name_the_api() {
+        let mut usage = ProviderUsage::default();
+        usage.set_api_access();
+        let plan = usage.plan_label();
+        assert_eq!(plan.as_deref(), Some("API"));
+        assert_eq!(
+            format_usage_heading("Claude", plan.as_deref()),
+            "Claude API"
+        );
+        assert_eq!(format_usage_heading("Codex", plan.as_deref()), "OpenAI API");
+        assert_ne!(format_usage_heading("Codex", plan.as_deref()), "Codex API");
+        // Subscription headings are unchanged.
+        assert_eq!(
+            format_usage_heading("Claude", Some("Ultra")),
+            "Claude Ultra"
+        );
+        assert_eq!(
+            format_usage_heading("Codex", Some("ChatGPT Pro 200")),
+            "ChatGPT Pro 200"
+        );
+        assert_eq!(
+            format_usage_heading("Codex", Some("future")),
+            "Codex future"
+        );
+        assert_eq!(format_usage_heading("Codex", None), "Codex");
     }
 
     #[test]

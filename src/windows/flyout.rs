@@ -188,7 +188,7 @@ impl HoverFlyout {
         let dpi = window_dpi(self.hwnd);
         let usage = self.state.as_ref().map(|state| state.usage);
         let show_gpu = self.state.as_ref().is_some_and(|state| state.gpu.is_some());
-        let (width, height) = window_size_with_disk(dpi, usage, show_gpu, self.disk_visibility());
+        let (width, height) = window_size(dpi, usage, show_gpu);
         let (x, y) = position_near_icon(self.owner, width, height);
         let _ = unsafe {
             SetWindowPos(
@@ -203,14 +203,6 @@ impl HoverFlyout {
         };
         apply_rounded_chrome(self.hwnd, width, height, dpi);
         let _ = unsafe { InvalidateRect(self.hwnd, ptr::null(), 1) };
-    }
-
-    fn disk_visibility(&self) -> [bool; 2] {
-        let scanning = self.disk_scan.is_some();
-        [
-            scanning || self.disk_bytes[0].is_some(),
-            scanning || self.disk_bytes[1].is_some(),
-        ]
     }
 
     pub fn hide_unless_pinned(&mut self) {
@@ -436,41 +428,27 @@ fn virtual_screen_rect() -> PixelRect {
     }
 }
 
-#[cfg(test)]
 fn window_size(dpi: i32, usage: Option<UsageSnapshot>, show_gpu: bool) -> (i32, i32) {
-    window_size_with_disk(dpi, usage, show_gpu, [false; 2])
-}
-
-fn window_size_with_disk(
-    dpi: i32,
-    usage: Option<UsageSnapshot>,
-    show_gpu: bool,
-    disk_visible: [bool; 2],
-) -> (i32, i32) {
-    let blocks = usage
-        .map(|usage| visible_usage_rows(usage, disk_visible).len())
-        .unwrap_or(0) as i32;
-    let extra = usage.map(extra_usage_block_units).unwrap_or(0);
+    let rows = usage.map(visible_usage_rows).unwrap_or_default();
+    let blocks = rows
+        .iter()
+        .map(|row| CARD_USAGE_BLOCK_HEIGHT + extra_usage_block_units(row.usage))
+        .sum::<i32>();
     let gpu = i32::from(show_gpu) * CARD_GPU_BLOCK_HEIGHT;
-    (
-        px(CARD_WIDTH, dpi),
-        px(
-            CARD_HEIGHT + gpu + CARD_USAGE_BLOCK_HEIGHT * blocks + extra,
-            dpi,
-        ),
-    )
+    (px(CARD_WIDTH, dpi), px(CARD_HEIGHT + gpu + blocks, dpi))
 }
 
-fn extra_usage_block_units(usage: UsageSnapshot) -> i32 {
+/// Rows a visible card adds beyond 5h / 7d, matching [`usage_block_height`].
+/// A hidden card adds nothing.
+fn extra_usage_block_units(usage: ProviderUsage) -> i32 {
     const METRIC: i32 = 24;
     const LINE: i32 = 15;
-    i32::from(usage.claude.fable.is_some()) * METRIC
-        + i32::from(usage.codex.shows_banked_reset()) * LINE
+    i32::from(usage.fable.is_some()) * METRIC + i32::from(usage.shows_banked_reset()) * LINE
 }
 
 #[cfg(test)]
 fn visible_usage_count(usage: UsageSnapshot) -> usize {
-    visible_usage_rows(usage, [false; 2]).len()
+    visible_usage_rows(usage).len()
 }
 
 fn window_dpi(hwnd: HWND) -> i32 {
@@ -708,7 +686,7 @@ fn paint(hwnd: HWND) {
     draw_separator(hdc, content_left, content_right, top, palette.separator);
     top += px(9, dpi);
 
-    let usage_rows = visible_usage_rows(state.usage, flyout.disk_visibility());
+    let usage_rows = visible_usage_rows(state.usage);
     let last = usage_rows.len().saturating_sub(1);
     for (index, row) in usage_rows.iter().enumerate() {
         let block_bottom = top + usage_block_height(&layout, row.usage);
@@ -1079,17 +1057,21 @@ struct VisibleUsageRow {
     mark: UsageMark,
 }
 
-fn visible_usage_rows(usage: UsageSnapshot, disk_visible: [bool; 2]) -> Vec<VisibleUsageRow> {
+/// Cards for providers in use ([`ProviderUsage::is_in_use`]). A local folder
+/// or a signed-in plan alone shows nothing (#112). The month scan keeps both
+/// cards so an active one does not vanish while its totals are rebuilt.
+fn visible_usage_rows(usage: UsageSnapshot) -> Vec<VisibleUsageRow> {
     let scanning = usage.month_scan_in_progress;
+    let now_ms = flyout_now_ms();
     let mut rows = Vec::with_capacity(2);
-    if usage.claude.has_month_activity() || scanning || disk_visible[0] {
+    if usage.claude.is_in_use(now_ms) || scanning {
         rows.push(VisibleUsageRow {
             title: "Claude",
             usage: usage.claude,
             mark: UsageMark::Claude,
         });
     }
-    if usage.codex.shows_chatgpt_card(flyout_now_ms()) || scanning || disk_visible[1] {
+    if usage.codex.is_in_use(now_ms) || scanning {
         rows.push(VisibleUsageRow {
             title: "Codex",
             usage: usage.codex,
@@ -2000,8 +1982,8 @@ mod tests {
         directory_bytes, extra_usage_block_units, format_bytes, format_gpu_capacity,
         format_limit_metric_label, format_month_usage, format_percent, format_provider_disk,
         format_reset_local, format_self_usage, format_today_usage, gpu_details, position_flyout,
-        visible_usage_count, visible_usage_rows, window_size, window_size_with_disk, PixelRect,
-        CARD_GPU_BLOCK_HEIGHT, CARD_HEIGHT, CARD_USAGE_BLOCK_HEIGHT, CARD_WIDTH,
+        visible_usage_count, visible_usage_rows, window_size, PixelRect, CARD_GPU_BLOCK_HEIGHT,
+        CARD_HEIGHT, CARD_USAGE_BLOCK_HEIGHT, CARD_WIDTH,
     };
     use crate::core::{
         format_banked_reset_label, format_fable_limit_label, CpuLoad, LimitWindow, ProcessStatus,
@@ -2236,19 +2218,61 @@ mod tests {
     }
 
     #[test]
-    fn component_flyout_shows_provider_with_only_disk_usage() {
-        let usage = UsageSnapshot::default();
-        assert_eq!(visible_usage_rows(usage, [true, false]).len(), 1);
-        assert_eq!(visible_usage_rows(usage, [false, true]).len(), 1);
-        assert_eq!(visible_usage_rows(usage, [true, true]).len(), 2);
+    fn component_flyout_hides_signed_in_but_unused_provider() {
+        // #112: Claude-only use with a ChatGPT login and a `~/.codex` folder.
+        let mut chatgpt = ProviderUsage::default();
+        chatgpt.set_chatgpt_plan("pro");
+        let mut claude = ProviderUsage {
+            today_cents: 12,
+            month_cents: 340,
+            ..ProviderUsage::default()
+        };
+        claude.set_plan("team");
+        let usage = UsageSnapshot {
+            claude,
+            codex: chatgpt,
+            ..UsageSnapshot::default()
+        };
+        let rows = visible_usage_rows(usage);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].title, "Claude");
         assert_eq!(
-            window_size_with_disk(96, Some(usage), false, [true, false]),
+            window_size(96, Some(usage), false),
             (CARD_WIDTH, CARD_HEIGHT + CARD_USAGE_BLOCK_HEIGHT)
+        );
+
+        // The month scan keeps both cards so an active one cannot vanish mid-scan.
+        let scanning = UsageSnapshot {
+            month_scan_in_progress: true,
+            ..usage
+        };
+        assert_eq!(visible_usage_rows(scanning).len(), 2);
+
+        // A hidden card's Fable / Banked Reset rows add no height.
+        let hidden_extras = UsageSnapshot {
+            claude: ProviderUsage {
+                fable: Some(LimitWindow {
+                    used_tenths: 0,
+                    resets_at_ms: u64::MAX,
+                    window_minutes: 10_080,
+                }),
+                ..ProviderUsage::default()
+            },
+            codex: ProviderUsage {
+                banked_reset_available: Some(2),
+                ..chatgpt
+            },
+            ..UsageSnapshot::default()
+        };
+        assert_eq!(visible_usage_count(hidden_extras), 0);
+        assert_eq!(
+            window_size(96, Some(hidden_extras), false),
+            (CARD_WIDTH, CARD_HEIGHT)
         );
     }
 
     #[test]
-    fn component_flyout_shows_codex_when_chatgpt_plan_or_live_limits() {
+    fn component_flyout_shows_codex_only_when_chatgpt_limits_are_used() {
         let mut plan_only = ProviderUsage::default();
         plan_only.set_chatgpt_plan("pro");
         let usage = UsageSnapshot {
@@ -2261,10 +2285,10 @@ mod tests {
             crate::core::format_usage_heading("Codex", usage.codex.plan_label().as_deref()),
             "ChatGPT Pro 200"
         );
-        assert_eq!(visible_usage_count(usage), 1);
+        assert_eq!(visible_usage_count(usage), 0);
         assert_eq!(
             window_size(96, Some(usage), false),
-            (CARD_WIDTH, CARD_HEIGHT + CARD_USAGE_BLOCK_HEIGHT)
+            (CARD_WIDTH, CARD_HEIGHT)
         );
 
         let expired = UsageSnapshot {
@@ -2340,7 +2364,8 @@ mod tests {
             },
             ..UsageSnapshot::default()
         };
-        assert_eq!(extra_usage_block_units(usage), 24 + 15);
+        assert_eq!(extra_usage_block_units(usage.claude), 24);
+        assert_eq!(extra_usage_block_units(usage.codex), 15);
         assert_eq!(
             window_size(96, Some(usage), false),
             (

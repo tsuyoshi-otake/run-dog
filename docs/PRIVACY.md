@@ -9,8 +9,9 @@ The GitHub Pages copy lives in [`docs/i18n.js`](i18n.js) `privacyBody`.
 - Settings in `HKCU\Software\SystemExe\RunDog`.
 - Claude Code JSONL under `%USERPROFILE%\.claude\projects\` (or `%CLAUDE_CONFIG_DIR%\projects\`).
 - Claude credentials at `%USERPROFILE%\.claude\.credentials.json` (or the config-dir equivalent).
+- Only when there is no Claude login: Claude Code settings at `%USERPROFILE%\.claude\settings.json` (`apiKeyHelper`, `env`) and whether the `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` environment variables are set, so the card can read `Claude API`. Only the presence of a key is checked. Its value is not stored, logged, or sent.
 - Codex CLI JSONL under `%USERPROFILE%\.codex\sessions\{year}\` (or `%CODEX_HOME%`).
-- Codex credentials at `%USERPROFILE%\.codex\auth.json`.
+- Codex credentials at `%USERPROFILE%\.codex\auth.json`. With `auth_mode: "apikey"` (or an `OPENAI_API_KEY` and no ChatGPT tokens), the card reads `OpenAI API` and no limit request is made.
 - RunDog usage state under `%LOCALAPPDATA%\RunDog\usage` (written by RunDog, not a vendor home).
 - RunDog live usage status under `%LOCALAPPDATA%\RunDog\diagnostics\usage-status.json` (displayed and source totals, update time, and process ID; no session paths or message contents).
 
@@ -28,7 +29,7 @@ repository except public GitHub Release metadata that GitHub already hosts.
 | `github.com` / GitHub release CDN | After the user chooses Install, or automatically when auto-update is on (default) and an automatic check finds a newer release | Installer and SHA-256 sidecar GET. |
 | `api.anthropic.com` `/api/oauth/usage` | When Claude credentials exist, about every 5 minutes | Bearer access token and Anthropic OAuth beta header. Usage/limit JSON back. |
 | `platform.claude.com` or `console.anthropic.com` `/v1/oauth/token` | When the Claude access token is expired or the usage GET fails as unauthorized | OAuth refresh grant. May rewrite `.credentials.json` via `ReplaceFileW`. |
-| `chatgpt.com` `/backend-api/wham/usage` | When Codex `auth.json` exists, about every 60 seconds | Bearer access token and ChatGPT account id. Usage/limit JSON back. |
+| `chatgpt.com` `/backend-api/wham/usage` | When Codex `auth.json` holds a ChatGPT login, about every 60 seconds | Bearer access token and ChatGPT account id. Usage/limit JSON back. |
 
 **Not sent** on limit fetch: raw prompts, raw responses, JSONL session bodies,
 or tokens to any third party other than the vendor that already issued them.

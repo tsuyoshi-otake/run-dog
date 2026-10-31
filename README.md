@@ -26,6 +26,8 @@
 
 Claude / Codex の Today と Month はローカル JSONL から集計します。otak-usage の有効な保存済み日別スナップショットがある場合は、削除済みログの利用量も表示できるよう、各サービスの表示額にその集計額を下限として適用します。両方を足し合わせないため、同じ利用量を二重計上しません。
 
+カードを出すのは、使っているサービスだけです。今月のログに利用があるか、5 時間・週次・Fable の上限に 0% より多い利用があれば出します。ログインしているだけ、フォルダがあるだけでは出しません。ただし今月分の集計中は、途中で消えないよう両方を出します。API キーで使っている場合、見出しは `Claude API` / `OpenAI API` になります。Claude は claude.ai のログインがなく、`ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` か `~/.claude/settings.json` の `apiKeyHelper` / `env` があるとき、Codex は `auth.json` が API キー方式のときです。ログインと API キーが両方ある Claude は、上限を表示できるログイン側を出します。
+
 画面に渡した Today の値は、RunDog の起動中に `.\scripts\show-usage-status.ps1` で確認できます。`%LOCALAPPDATA%\RunDog\diagnostics\usage-status.json` に、画面表示・ローカル JSONL・otak-usage 下限の各金額と更新時刻を記録します。スクリプトは別プロセスの古い記録を拒否します。金額は API 料金表で換算した参考値で、サブスクリプションの請求額ではありません。
 
 配備された `dark-dog-*.ico` は ICO ヘッダーではなく 32×32 ARGB BMP です。RunDog は起動時に検証して `HICON` を一度だけ作成します。原画は暗い犬で、ライトなタスクバーでは原画、ダークなタスクバーでは alpha を保った反転色を使います。アニメーション中にファイルを読み直しません。

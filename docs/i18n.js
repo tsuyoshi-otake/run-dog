@@ -102,7 +102,7 @@ export const I18N = {
     back: "RunDog に戻る",
     privacyBody: [
       "RunDog はアカウントを作りません。CPU・メモリ・GPU・ストレージは Windows の API で端末内だけ読みます。設定は HKCU\\Software\\SystemExe\\RunDog に保存します。",
-      "読むファイルは Claude の projects JSONL と .credentials.json、Codex の sessions JSONL と auth.json、および RunDog 自身の %LOCALAPPDATA%\\RunDog\\usage です。JSONL の生プロンプトや応答を上限取得で送りません。",
+      "読むファイルは Claude の projects JSONL と .credentials.json / settings.json、Codex の sessions JSONL と auth.json、および RunDog 自身の %LOCALAPPDATA%\\RunDog\\usage です。JSONL の生プロンプトや応答を上限取得で送りません。",
       "送信先は GitHub（api.github.com / github.com、起動時と約 1 時間ごとの更新確認、自動更新または明示した導入）、Anthropic（api.anthropic.com の usage、必要時のみ platform.claude.com または console.anthropic.com の token refresh）、OpenAI（chatgpt.com の wham/usage）です。RunDog 自身のサーバーへは送りません。",
       "Claude の上限問い合わせは約 5 分ごと、Codex は約 60 秒ごとです。期限切れや認証失敗のとき Claude の refresh が走り、.credentials.json を ReplaceFileW で更新することがあります。Codex の auth.json は読み取りのみです。",
       "ベンダー上限の自動問い合わせは、Claude / Codex が端末にあるとき従来どおり On です。新しい「Automatic vendor usage-limit queries」設定はメニューと UX を壊すので見送りました。止めたい場合は認証情報か CLI を外してください。",
@@ -198,7 +198,7 @@ export const I18N = {
     back: "Back to RunDog",
     privacyBody: [
       "RunDog does not create an account. CPU, memory, GPU, and storage are read locally through Windows APIs. Settings live in HKCU\\Software\\SystemExe\\RunDog.",
-      "It may read Claude projects JSONL and .credentials.json, Codex sessions JSONL and auth.json, plus RunDog's own %LOCALAPPDATA%\\RunDog\\usage store. Limit fetch does not send raw prompts or responses.",
+      "It may read Claude projects JSONL and .credentials.json / settings.json, Codex sessions JSONL and auth.json, plus RunDog's own %LOCALAPPDATA%\\RunDog\\usage store. Limit fetch does not send raw prompts or responses.",
       "Destinations are GitHub (api.github.com / github.com — update check at startup and about hourly, plus auto-update or explicit Install), Anthropic (api.anthropic.com usage; token refresh on platform.claude.com or console.anthropic.com when needed), and OpenAI (chatgpt.com wham/usage). There is no RunDog-owned server.",
       "Claude limit queries run about every 5 minutes; Codex about every 60 seconds. An expired or unauthorized Claude token may refresh and rewrite .credentials.json via ReplaceFileW. Codex auth.json is read-only.",
       "Automatic vendor limit queries stay On when those CLIs are present. A new Automatic vendor usage-limit queries setting is deferred so the tray UX is not broken. Remove credentials or the CLI to stop queries.",
@@ -293,7 +293,7 @@ export const I18N = {
     back: "返回 RunDog",
     privacyBody: [
       "RunDog 不创建账户。CPU、内存、GPU 和存储只通过 Windows API 在本机读取。设置保存在 HKCU\\Software\\SystemExe\\RunDog。",
-      "可能读取 Claude 的 projects JSONL 与 .credentials.json、Codex 的 sessions JSONL 与 auth.json，以及 RunDog 自己的 LOCALAPPDATA 存储。限额查询不会发送原始提示或回复。",
+      "可能读取 Claude 的 projects JSONL 与 .credentials.json / settings.json、Codex 的 sessions JSONL 与 auth.json，以及 RunDog 自己的 LOCALAPPDATA 存储。限额查询不会发送原始提示或回复。",
       "发送目标是 GitHub、Anthropic（api.anthropic.com，必要时 token refresh）和 chatgpt.com。没有 RunDog 自己的服务器。Claude 约每 5 分钟、Codex 约每 60 秒查询一次；过期时可能改写 .credentials.json。",
       "有 CLI 时自动查询限额保持开启。未新增会破坏菜单的开关。不包含广告、分析或崩溃报告 SDK。",
       "This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.",
@@ -386,7 +386,7 @@ export const I18N = {
     back: "返回 RunDog",
     privacyBody: [
       "RunDog 不建立帳戶。CPU、記憶體、GPU 和儲存只透過 Windows API 在本機讀取。設定保存在 HKCU\\Software\\SystemExe\\RunDog。",
-      "可能讀取 Claude 的 projects JSONL 與 .credentials.json、Codex 的 sessions JSONL 與 auth.json，以及 RunDog 自己的 LOCALAPPDATA。限額查詢不會傳送原始提示或回覆。",
+      "可能讀取 Claude 的 projects JSONL 與 .credentials.json / settings.json、Codex 的 sessions JSONL 與 auth.json，以及 RunDog 自己的 LOCALAPPDATA。限額查詢不會傳送原始提示或回覆。",
       "傳送目標是 GitHub、Anthropic 與 chatgpt.com。沒有 RunDog 自己的伺服器。Claude 約每 5 分鐘、Codex 約每 60 秒查一次；過期時可能改寫 .credentials.json。",
       "有 CLI 時自動查詢維持開啟。未新增會破壞選單的開關。不含廣告、分析或當機回報 SDK。",
       "This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.",
@@ -479,7 +479,7 @@ export const I18N = {
     back: "RunDog로 돌아가기",
     privacyBody: [
       "RunDog는 계정을 만들지 않습니다. CPU·메모리·GPU·저장소는 Windows API로 기기 안에서만 읽습니다. 설정은 HKCU\\Software\\SystemExe\\RunDog에 있습니다.",
-      "Claude projects JSONL과 .credentials.json, Codex sessions JSONL과 auth.json, RunDog LOCALAPPDATA 저장소를 읽을 수 있습니다. 한도 조회에 raw prompt/response는 보내지 않습니다.",
+      "Claude projects JSONL과 .credentials.json / settings.json, Codex sessions JSONL과 auth.json, RunDog LOCALAPPDATA 저장소를 읽을 수 있습니다. 한도 조회에 raw prompt/response는 보내지 않습니다.",
       "전송처는 GitHub, Anthropic, chatgpt.com입니다. RunDog 자체 서버는 없습니다. Claude는 약 5분, Codex는 약 60초마다 조회하며, 만료 시 .credentials.json을 다시 쓸 수 있습니다.",
       "CLI가 있으면 자동 한도 조회는 그대로 On입니다. 메뉴를 깨는 새 설정은 넣지 않았습니다. 광고·분석·충돌 SDK는 없습니다.",
       "This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.",
@@ -573,7 +573,7 @@ export const I18N = {
     back: "Quay lại RunDog",
     privacyBody: [
       "RunDog không tạo tài khoản. CPU, bộ nhớ, GPU và lưu trữ đọc cục bộ qua API Windows. Cài đặt ở HKCU\\Software\\SystemExe\\RunDog.",
-      "Có thể đọc JSONL/projects và .credentials.json của Claude, JSONL/sessions và auth.json của Codex, cùng kho LOCALAPPDATA của RunDog. Truy vấn hạn mức không gửi raw prompt/response.",
+      "Có thể đọc JSONL/projects và .credentials.json / settings.json của Claude, JSONL/sessions và auth.json của Codex, cùng kho LOCALAPPDATA của RunDog. Truy vấn hạn mức không gửi raw prompt/response.",
       "Đích đến: GitHub, Anthropic, chatgpt.com. Không có máy chủ của RunDog. Claude khoảng 5 phút, Codex khoảng 60 giây; hết hạn có thể ghi lại .credentials.json.",
       "Khi có CLI, truy vấn hạn mức tự động vẫn On. Không thêm toggle làm hỏng menu. Không có SDK quảng cáo, phân tích hay sự cố.",
       "This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.",
@@ -667,7 +667,7 @@ export const I18N = {
     back: "Retour à RunDog",
     privacyBody: [
       "RunDog ne crée pas de compte. CPU, mémoire, GPU et stockage sont lus localement via les API Windows. Réglages : HKCU\\Software\\SystemExe\\RunDog.",
-      "Il peut lire les JSONL projects et .credentials.json de Claude, les JSONL sessions et auth.json de Codex, plus le store LOCALAPPDATA de RunDog. Les plafonds n'envoient pas les prompts/réponses bruts.",
+      "Il peut lire les JSONL projects et .credentials.json / settings.json de Claude, les JSONL sessions et auth.json de Codex, plus le store LOCALAPPDATA de RunDog. Les plafonds n'envoient pas les prompts/réponses bruts.",
       "Destinations : GitHub, Anthropic, chatgpt.com. Pas de serveur RunDog. Claude ~5 min, Codex ~60 s ; un jeton expiré peut réécrire .credentials.json.",
       "Les requêtes automatiques restent activées si les CLI sont présents. Pas de nouveau bascule qui casserait le menu. Aucun SDK pub, analyse ou plantage.",
       "This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.",
@@ -761,7 +761,7 @@ export const I18N = {
     back: "Zurück zu RunDog",
     privacyBody: [
       "RunDog legt kein Konto an. CPU, Speicher, GPU und Datenträger werden lokal über Windows-APIs gelesen. Einstellungen: HKCU\\Software\\SystemExe\\RunDog.",
-      "Es kann Claude-projects-JSONL und .credentials.json, Codex-sessions-JSONL und auth.json sowie den RunDog-LOCALAPPDATA-Store lesen. Limit-Abfragen senden keine Roh-Prompts oder Antworten.",
+      "Es kann Claude-projects-JSONL und .credentials.json / settings.json, Codex-sessions-JSONL und auth.json sowie den RunDog-LOCALAPPDATA-Store lesen. Limit-Abfragen senden keine Roh-Prompts oder Antworten.",
       "Ziele: GitHub, Anthropic, chatgpt.com. Kein eigener RunDog-Server. Claude ~5 Min., Codex ~60 s; abgelaufene Tokens können .credentials.json neu schreiben.",
       "Automatische Limit-Abfragen bleiben an, wenn die CLIs da sind. Kein neues Menü-Toggle. Kein Werbe-, Analyse- oder Absturz-SDK.",
       "This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.",
@@ -855,7 +855,7 @@ export const I18N = {
     back: "Volver a RunDog",
     privacyBody: [
       "RunDog no crea una cuenta. CPU, memoria, GPU y almacenamiento se leen en el equipo con las API de Windows. Ajustes: HKCU\\Software\\SystemExe\\RunDog.",
-      "Puede leer JSONL de projects y .credentials.json de Claude, JSONL de sessions y auth.json de Codex, y el almacén LOCALAPPDATA de RunDog. La consulta de límites no envía prompts ni respuestas en bruto.",
+      "Puede leer JSONL de projects y .credentials.json / settings.json de Claude, JSONL de sessions y auth.json de Codex, y el almacén LOCALAPPDATA de RunDog. La consulta de límites no envía prompts ni respuestas en bruto.",
       "Destinos: GitHub, Anthropic, chatgpt.com. No hay servidor propio de RunDog. Claude ~5 min, Codex ~60 s; un token caducado puede reescribir .credentials.json.",
       "Las consultas automáticas siguen activas si están los CLI. No se añade un interruptor que rompa el menú. Sin SDK de anuncios, analítica ni fallos.",
       "This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.",
@@ -949,7 +949,7 @@ export const I18N = {
     back: "Назад к RunDog",
     privacyBody: [
       "RunDog не создаёт учётную запись. CPU, память, GPU и диск читаются локально через API Windows. Настройки: HKCU\\Software\\SystemExe\\RunDog.",
-      "Может читать projects JSONL и .credentials.json Claude, sessions JSONL и auth.json Codex, плюс LOCALAPPDATA RunDog. Запрос лимитов не отправляет сырые промпты и ответы.",
+      "Может читать projects JSONL и .credentials.json / settings.json Claude, sessions JSONL и auth.json Codex, плюс LOCALAPPDATA RunDog. Запрос лимитов не отправляет сырые промпты и ответы.",
       "Адреса: GitHub, Anthropic, chatgpt.com. Своего сервера RunDog нет. Claude примерно каждые 5 мин, Codex — 60 с; при истечении может перезаписать .credentials.json.",
       "Автозапросы лимитов остаются включёнными, если CLI есть. Новый переключатель в меню не добавляли. Нет SDK рекламы, аналитики или сбоев.",
       "This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.",
@@ -1043,7 +1043,7 @@ export const I18N = {
     back: "Torna a RunDog",
     privacyBody: [
       "RunDog non crea un account. CPU, memoria, GPU e archiviazione si leggono in locale tramite le API di Windows. Impostazioni: HKCU\\Software\\SystemExe\\RunDog.",
-      "Può leggere JSONL projects e .credentials.json di Claude, JSONL sessions e auth.json di Codex, più lo store LOCALAPPDATA di RunDog. Il fetch dei limiti non invia prompt o risposte grezzi.",
+      "Può leggere JSONL projects e .credentials.json / settings.json di Claude, JSONL sessions e auth.json di Codex, più lo store LOCALAPPDATA di RunDog. Il fetch dei limiti non invia prompt o risposte grezzi.",
       "Destinazioni: GitHub, Anthropic, chatgpt.com. Nessun server di RunDog. Claude ~5 min, Codex ~60 s; un token scaduto può riscrivere .credentials.json.",
       "Le query automatiche restano attive se i CLI sono presenti. Nessun nuovo interruttore nel menu. Nessun SDK di pubblicità, analitica o crash.",
       "This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.",
@@ -1137,7 +1137,7 @@ export const I18N = {
     back: "กลับไป RunDog",
     privacyBody: [
       "RunDog ไม่สร้างบัญชี CPU หน่วยความจำ GPU และที่เก็บข้อมูลอ่านในเครื่องผ่าน Windows API การตั้งค่าอยู่ที่ HKCU\\Software\\SystemExe\\RunDog",
-      "อาจอ่าน projects JSONL กับ .credentials.json ของ Claude, sessions JSONL กับ auth.json ของ Codex และที่เก็บ LOCALAPPDATA ของ RunDog การขอโควตาไม่ส่งพรอมต์หรือคำตอบดิบ",
+      "อาจอ่าน projects JSONL กับ .credentials.json / settings.json ของ Claude, sessions JSONL กับ auth.json ของ Codex และที่เก็บ LOCALAPPDATA ของ RunDog การขอโควตาไม่ส่งพรอมต์หรือคำตอบดิบ",
       "ปลายทางคือ GitHub, Anthropic, chatgpt.com ไม่มีเซิร์ฟเวอร์ของ RunDog เอง Claude ประมาณ 5 นาที Codex ประมาณ 60 วินาที หมดอายุแล้วอาจเขียน .credentials.json ใหม่",
       "ถ้ามี CLI การถามโควตาอัตโนมัติยังเปิดอยู่ ไม่เพิ่มสวิตช์ที่ทำเมนูพัง ไม่มี SDK โฆษณา วิเคราะห์ หรือรายงานข้อผิดพลาด",
       "This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.",

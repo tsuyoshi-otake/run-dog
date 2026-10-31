@@ -3225,7 +3225,9 @@ struct OAuthTokenResponse {
 }
 
 fn fetch_claude_limits(claude_dir: &Path) -> Result<ProviderUsage, FetchErrorKind> {
-    let mut creds = read_claude_credentials(claude_dir).ok_or(FetchErrorKind::AuthMissing)?;
+    let Some(mut creds) = read_claude_credentials(claude_dir) else {
+        return claude_access_without_login(claude_dir, env_has_anthropic_key());
+    };
     if claude_token_expired(&creds) {
         let _ = refresh_claude_credentials(claude_dir, &mut creds);
     }
@@ -3244,6 +3246,60 @@ fn fetch_claude_limits(claude_dir: &Path) -> Result<ProviderUsage, FetchErrorKin
     } else {
         Err(FetchErrorKind::AuthMissing)
     }
+}
+
+/// No claude.ai login: API-key access when Claude Code has a key configured,
+/// otherwise signed out. A login wins when both exist, since only it has
+/// live 5h / 7d limits (#112).
+fn claude_access_without_login(
+    claude_dir: &Path,
+    env_has_key: bool,
+) -> Result<ProviderUsage, FetchErrorKind> {
+    let settings = read_regular_file(&claude_dir.join("settings.json"));
+    if env_has_key || claude_settings_configure_api_key(settings.as_deref()) {
+        let mut usage = ProviderUsage::default();
+        usage.set_api_access();
+        Ok(usage)
+    } else {
+        Err(FetchErrorKind::AuthMissing)
+    }
+}
+
+/// Claude Code's documented API-key sources: `ANTHROPIC_API_KEY` /
+/// `ANTHROPIC_AUTH_TOKEN`. Only presence is checked; the value is never kept.
+fn env_has_anthropic_key() -> bool {
+    ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"]
+        .into_iter()
+        .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()))
+}
+
+#[derive(Deserialize)]
+struct ClaudeSettingsFile {
+    #[serde(rename = "apiKeyHelper")]
+    api_key_helper: Option<String>,
+    env: Option<HashMap<String, serde_json::Value>>,
+}
+
+/// `~/.claude/settings.json` with `apiKeyHelper`, or an `env` block that sets
+/// `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN`.
+fn claude_settings_configure_api_key(raw: Option<&str>) -> bool {
+    let Some(file) = raw.and_then(|raw| serde_json::from_str::<ClaudeSettingsFile>(raw).ok())
+    else {
+        return false;
+    };
+    let helper = file
+        .api_key_helper
+        .is_some_and(|helper| !helper.trim().is_empty());
+    let env_key = file.env.is_some_and(|env| {
+        ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"]
+            .into_iter()
+            .any(|name| {
+                env.get(name)
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|value| !value.is_empty())
+            })
+    });
+    helper || env_key
 }
 
 fn claude_usage_request(token: &str, plan: Option<&str>) -> Result<ProviderUsage, FetchErrorKind> {
@@ -3326,7 +3382,29 @@ fn refresh_claude_credentials(claude_dir: &Path, creds: &mut ClaudeCreds) -> boo
 
 #[derive(Deserialize)]
 struct CodexAuthFile {
+    auth_mode: Option<String>,
+    #[serde(rename = "OPENAI_API_KEY")]
+    openai_api_key: Option<String>,
     tokens: Option<CodexAuthTokens>,
+}
+
+impl CodexAuthFile {
+    /// Codex on an OpenAI API key, per openai/codex `AuthDotJson`
+    /// (`codex-rs/login/src/auth/storage.rs`, 13ab0b254): `auth_mode` is
+    /// `apikey`; files written before `auth_mode` have `OPENAI_API_KEY` and
+    /// no ChatGPT `tokens`. Other modes (ChatGPT, Bedrock, headers, …) are not.
+    fn uses_api_key(&self) -> bool {
+        match self.auth_mode.as_deref() {
+            Some(mode) => mode == "apikey",
+            None => {
+                self.tokens.is_none()
+                    && self
+                        .openai_api_key
+                        .as_deref()
+                        .is_some_and(|key| !key.is_empty())
+            }
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -3364,6 +3442,12 @@ fn fetch_codex_wham_limits(codex_home: &Path) -> Result<ProviderUsage, FetchErro
     let raw =
         read_regular_file(&codex_home.join("auth.json")).ok_or(FetchErrorKind::AuthMissing)?;
     let file: CodexAuthFile = serde_json::from_str(&raw).map_err(|_| FetchErrorKind::Parse)?;
+    if file.uses_api_key() {
+        // No ChatGPT plan or limits to fetch; the heading becomes `OpenAI API`.
+        let mut usage = ProviderUsage::default();
+        usage.set_api_access();
+        return Ok(usage);
+    }
     let tokens = file.tokens.ok_or(FetchErrorKind::AuthMissing)?;
     let access = tokens
         .access_token
@@ -3443,6 +3527,9 @@ fn apply_provider_limits(target: &mut ProviderUsage, limits: ProviderUsage) {
     if limits.plan_len != 0 {
         target.plan = limits.plan;
         target.plan_len = limits.plan_len;
+    } else if target.is_api_access() {
+        // A login replaced the API key. Its unknown plan must not keep "API".
+        target.plan_len = 0;
     }
 }
 
@@ -3791,11 +3878,13 @@ fn path_size_mtime(path: &Path) -> Option<(u64, u64)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        claude_plan_slug, day_window, is_current_month, is_safe_header_value,
-        is_subscription_limits, parse_claude_line, parse_claude_usage_response,
-        parse_codex_limits_line, parse_codex_model, parse_codex_usage_line, parse_timestamp,
-        parse_wham_usage_response, persist_claude_credentials, read_claude_credentials,
-        read_regular_file, unix_now_ms, FileCursor, OtakSnapshot, ProviderSnapshot, SourceKind,
+        apply_provider_limits, claude_access_without_login, claude_plan_slug,
+        claude_settings_configure_api_key, day_window, fetch_codex_wham_limits, is_current_month,
+        is_safe_header_value, is_subscription_limits, parse_claude_line,
+        parse_claude_usage_response, parse_codex_limits_line, parse_codex_model,
+        parse_codex_usage_line, parse_timestamp, parse_wham_usage_response,
+        persist_claude_credentials, read_claude_credentials, read_regular_file, unix_now_ms,
+        CodexAuthFile, FetchErrorKind, FileCursor, OtakSnapshot, ProviderSnapshot, SourceKind,
         UsageCollector, UsageTick,
     };
     use crate::core::{local_hms, local_ymd, CursorKind, CursorRebuildReason, UsageCursor};
@@ -4976,6 +5065,130 @@ mod tests {
         assert!(!is_safe_header_value("abc\r\nX-Injected: 1"));
         assert!(!is_safe_header_value("abc\n"));
         assert!(!is_safe_header_value("token with space"));
+    }
+
+    fn api_test_dir(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-{name}-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        fs::create_dir_all(&root).expect("temp dir");
+        root
+    }
+
+    #[test]
+    fn component_codex_api_key_auth_reads_as_openai_api() {
+        let parse = |raw: &str| serde_json::from_str::<CodexAuthFile>(raw).expect("auth.json");
+        assert!(
+            parse(r#"{"auth_mode":"apikey","OPENAI_API_KEY":"sk-x","tokens":null}"#).uses_api_key()
+        );
+        assert!(parse(r#"{"auth_mode":"apikey","OPENAI_API_KEY":null}"#).uses_api_key());
+        // Written before `auth_mode` existed.
+        assert!(parse(r#"{"OPENAI_API_KEY":"sk-x","tokens":null}"#).uses_api_key());
+        assert!(
+            !parse(r#"{"OPENAI_API_KEY":"sk-x","tokens":{"access_token":"a"}}"#).uses_api_key()
+        );
+        assert!(!parse(r#"{"OPENAI_API_KEY":""}"#).uses_api_key());
+        // Both machines checked on 2026-10-31 have this shape: ChatGPT login.
+        assert!(!parse(
+            r#"{"auth_mode":"chatgpt","OPENAI_API_KEY":null,"tokens":{"access_token":"a"},"last_refresh":"x"}"#
+        )
+        .uses_api_key());
+        assert!(!parse(r#"{"auth_mode":"bedrockApiKey","OPENAI_API_KEY":null}"#).uses_api_key());
+
+        let root = api_test_dir("codex-apikey");
+        fs::write(
+            root.join("auth.json"),
+            r#"{"auth_mode":"apikey","OPENAI_API_KEY":"sk-test"}"#,
+        )
+        .expect("auth.json");
+        let usage = fetch_codex_wham_limits(&root);
+        let _ = fs::remove_dir_all(&root);
+        let usage = usage.expect("API-key access needs no network");
+        assert_eq!(usage.plan_label().as_deref(), Some("API"));
+        assert_eq!(usage.primary, None);
+        assert_eq!(usage.secondary, None);
+        assert_eq!(
+            crate::core::format_usage_heading("Codex", usage.plan_label().as_deref()),
+            "OpenAI API"
+        );
+    }
+
+    #[test]
+    fn component_claude_api_key_without_login_reads_as_claude_api() {
+        assert!(claude_settings_configure_api_key(Some(
+            r#"{"apiKeyHelper":"~/bin/get-key.cmd"}"#
+        )));
+        assert!(claude_settings_configure_api_key(Some(
+            r#"{"env":{"ANTHROPIC_API_KEY":"sk-ant-test"}}"#
+        )));
+        assert!(claude_settings_configure_api_key(Some(
+            r#"{"env":{"ANTHROPIC_AUTH_TOKEN":"gateway-token"}}"#
+        )));
+        assert!(!claude_settings_configure_api_key(Some(
+            r#"{"env":{"ANTHROPIC_API_KEY":"","DISABLE_TELEMETRY":"1"},"apiKeyHelper":" "}"#
+        )));
+        assert!(!claude_settings_configure_api_key(Some(
+            r#"{"model":"opus"}"#
+        )));
+        assert!(!claude_settings_configure_api_key(Some("not json")));
+        assert!(!claude_settings_configure_api_key(None));
+
+        let root = api_test_dir("claude-apikey");
+        assert_eq!(
+            claude_access_without_login(&root, false).map(|usage| usage.plan_len),
+            Err(FetchErrorKind::AuthMissing)
+        );
+        let from_env = claude_access_without_login(&root, true).expect("env key");
+        assert_eq!(from_env.plan_label().as_deref(), Some("API"));
+        fs::write(
+            root.join("settings.json"),
+            r#"{"env":{"ANTHROPIC_API_KEY":"sk-ant-test"}}"#,
+        )
+        .expect("settings.json");
+        let from_settings = claude_access_without_login(&root, false);
+        let _ = fs::remove_dir_all(&root);
+        let from_settings = from_settings.expect("settings key");
+        assert_eq!(
+            crate::core::format_usage_heading("Claude", from_settings.plan_label().as_deref()),
+            "Claude API"
+        );
+        assert_eq!(from_settings.primary, None);
+    }
+
+    #[test]
+    fn component_login_after_api_key_drops_the_api_label() {
+        let session = crate::core::LimitWindow {
+            used_tenths: 120,
+            resets_at_ms: u64::MAX,
+            window_minutes: 300,
+        };
+        let login_without_plan = crate::core::ProviderUsage {
+            primary: Some(session),
+            ..crate::core::ProviderUsage::default()
+        };
+
+        let mut shown = crate::core::ProviderUsage::default();
+        shown.set_api_access();
+        assert!(shown.is_api_access());
+        apply_provider_limits(&mut shown, login_without_plan);
+        assert_eq!(shown.plan_label(), None);
+        assert!(!shown.is_api_access());
+        assert_eq!(shown.primary, Some(session));
+
+        // A real plan still survives a fetch that omits it.
+        let mut max = crate::core::ProviderUsage::default();
+        max.set_plan("max");
+        apply_provider_limits(&mut max, login_without_plan);
+        assert_eq!(max.plan_label().as_deref(), Some("Max"));
+
+        let mut api = crate::core::ProviderUsage::default();
+        api.set_api_access();
+        let mut chatgpt = login_without_plan;
+        chatgpt.set_chatgpt_plan("plus");
+        apply_provider_limits(&mut api, chatgpt);
+        assert_eq!(api.plan_label().as_deref(), Some("ChatGPT Plus"));
     }
 
     fn sample_claude_credentials() -> String {
