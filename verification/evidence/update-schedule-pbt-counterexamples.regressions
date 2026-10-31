@@ -1,0 +1,4 @@
+# Seeds for failure cases in the update schedule PBT (#110).
+#
+# Proptest reads this file before generating the deterministic 1,024 cases.
+# A minimized counterexample is appended automatically if the property fails.

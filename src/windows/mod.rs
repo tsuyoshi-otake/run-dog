@@ -57,22 +57,25 @@ use crate::{
         Event, TimerKind,
     },
     core::{AppSettings, ResolvedTheme},
-    update::StartupUpdateGate,
+    update::{UpdateCheckOrigin, UpdateSchedule},
 };
 
 use self::{
     cpu::WindowsCpuSource,
     icons::IconFrames,
     messages::{
-        UPDATE_CHECK_DONE_MESSAGE, UPDATE_REQUEST_EXIT_MESSAGE, USAGE_READY_MESSAGE,
-        WM_SHOW_TRAY_MENU,
+        UPDATE_CHECK_DONE_MESSAGE, UPDATE_INSTALL_FAILED_MESSAGE, UPDATE_REQUEST_EXIT_MESSAGE,
+        USAGE_READY_MESSAGE, WM_SHOW_TRAY_MENU,
     },
     tray::{
         event_for_command, TrayAdapter, COMMAND_ABOUT, COMMAND_CHECK_FOR_UPDATES,
         COMMAND_INSTALL_UPDATE, COMMAND_RESCAN_MONTH_USAGE, COMMAND_TOGGLE_PINNED_FLYOUT,
         HOVER_TIMER_ID, PROMOTE_TIMER_ID, TRAY_CALLBACK_MESSAGE,
     },
-    update::{UpdateController, UpdateMenuState},
+    update::{
+        unix_now_ms, update_check_jitter_ms, UpdateController, UPDATE_TIMER_ID,
+        UPDATE_TIMER_INTERVAL_MS,
+    },
     usage::{
         UsageCollector, UsageTick, USAGE_CATCH_UP_INTERVAL_MS, USAGE_CONTINUE_INTERVAL_MS,
         USAGE_FIRST_INTERVAL_MS, USAGE_IDLE_INTERVAL_MS, USAGE_TIMER_ID,
@@ -211,7 +214,7 @@ struct WindowContext {
     usage: UsageCollector,
     usage_status: UsageStatusWriter,
     taskbar_recreated_message: u32,
-    startup_update: StartupUpdateGate,
+    update_schedule: UpdateSchedule,
 }
 
 impl WindowContext {
@@ -238,19 +241,70 @@ impl WindowContext {
             usage: UsageCollector::new(),
             usage_status: UsageStatusWriter::production(),
             taskbar_recreated_message: 0,
-            startup_update: StartupUpdateGate::default(),
+            update_schedule: UpdateSchedule::default(),
         }
     }
 
     fn start(&mut self) {
         for effect in self.app.start() {
-            if let Effect::CheckForUpdates { auto_install } = effect {
-                self.startup_update.arm(auto_install);
-                self.updater.check_for_updates(self.platform.hwnd, false);
+            if effect == Effect::CheckForUpdates {
+                self.start_update_checks();
             }
             self.platform.apply(&effect);
         }
         self.arm_usage_timer(USAGE_FIRST_INTERVAL_MS);
+    }
+
+    /// Checks now and then whenever the schedule is due, so a release
+    /// published while RunDog runs is found without a restart.
+    fn start_update_checks(&mut self) {
+        if !self.platform.hwnd.is_null() {
+            let _ = unsafe {
+                SetTimer(
+                    self.platform.hwnd,
+                    UPDATE_TIMER_ID,
+                    UPDATE_TIMER_INTERVAL_MS,
+                    None,
+                )
+            };
+        }
+        self.tick_update();
+    }
+
+    fn tick_update(&mut self) {
+        // WM_TIMER is generated only when no posted message is queued, so a
+        // finished check still awaited here lost its UPDATE_CHECK_DONE_MESSAGE.
+        if self.update_schedule.awaiting_result() && self.updater.check_outcome().is_some() {
+            self.finish_update_check();
+        }
+        if self.update_schedule.is_due(unix_now_ms())
+            && self.updater.check_for_updates(self.platform.hwnd)
+        {
+            self.update_schedule.begin(UpdateCheckOrigin::Automatic);
+        }
+    }
+
+    fn finish_update_check(&mut self) {
+        if !self.update_schedule.awaiting_result() {
+            return;
+        }
+        let Some(outcome) = self.updater.check_outcome() else {
+            return;
+        };
+        let decision = self.update_schedule.complete(
+            unix_now_ms(),
+            outcome,
+            self.app.snapshot().settings.auto_update,
+            update_check_jitter_ms(),
+        );
+        if decision.announce {
+            self.platform
+                .tray
+                .notify_update_result(&self.updater.menu_state());
+        }
+        if decision.install {
+            self.updater.install_available(self.platform.hwnd);
+        }
     }
 
     fn arm_usage_timer(&self, interval_ms: u32) {
@@ -279,11 +333,12 @@ impl WindowContext {
 
     fn dispatch(&mut self, event: Event) {
         if matches!(&event, Event::ExitRequested) {
-            self.startup_update.cancel();
+            self.update_schedule.cancel();
             self.updater.cancel();
             self.usage.cancel_remote_fetches();
             if !self.platform.hwnd.is_null() {
                 let _ = unsafe { KillTimer(self.platform.hwnd, USAGE_TIMER_ID) };
+                let _ = unsafe { KillTimer(self.platform.hwnd, UPDATE_TIMER_ID) };
             }
             self.usage.flush_checkpoint();
         }
@@ -306,7 +361,7 @@ impl WindowsPlatform {
                 settings.theme,
                 settings.fps_limit,
                 settings.launch_at_startup,
-                settings.auto_update_on_startup,
+                settings.auto_update,
                 settings.display_mode,
             ),
             store,
@@ -342,7 +397,7 @@ impl EffectPort for WindowsPlatform {
             | Effect::NotifyStartupChanged(_)
             | Effect::SetAutoUpdateMenu(_)
             | Effect::NotifyAutoUpdateChanged(_)
-            | Effect::CheckForUpdates { .. }
+            | Effect::CheckForUpdates
             | Effect::CommitSettings { .. }
             | Effect::CancelCommit { .. } => {}
         }
@@ -501,6 +556,7 @@ unsafe extern "system" fn window_proc(
             PROMOTE_TIMER_ID => context.platform.tray.on_promote_timer(),
             HOVER_TIMER_ID => context.platform.tray.on_hover_timer(),
             USAGE_TIMER_ID => context.tick_usage(),
+            UPDATE_TIMER_ID => context.tick_update(),
             _ => {}
         }
         return 0;
@@ -537,20 +593,14 @@ unsafe extern "system" fn window_proc(
     }
 
     if message == UPDATE_CHECK_DONE_MESSAGE {
+        context.finish_update_check();
+        return 0;
+    }
+
+    if message == UPDATE_INSTALL_FAILED_MESSAGE {
         context
-            .platform
-            .tray
-            .notify_update_result(&context.updater.menu_state(), wparam != 0);
-        let update_available = matches!(
-            context.updater.menu_state(),
-            UpdateMenuState::Available { .. }
-        );
-        if context.startup_update.complete_check(
-            context.app.snapshot().settings.auto_update_on_startup,
-            update_available,
-        ) {
-            context.updater.install_available(hwnd);
-        }
+            .update_schedule
+            .install_failed(unix_now_ms(), update_check_jitter_ms());
         return 0;
     }
 
@@ -562,7 +612,9 @@ unsafe extern "system" fn window_proc(
     if message == WM_COMMAND {
         let command = (wparam & 0xFFFF) as u32;
         if command == COMMAND_CHECK_FOR_UPDATES {
-            context.updater.check_for_updates(hwnd, true);
+            if context.updater.check_for_updates(hwnd) {
+                context.update_schedule.begin(UpdateCheckOrigin::Manual);
+            }
         } else if command == COMMAND_INSTALL_UPDATE {
             context.updater.install_available(hwnd);
         } else if command == COMMAND_TOGGLE_PINNED_FLYOUT {
@@ -634,7 +686,26 @@ fn last_error(operation: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{create_process_command_line, usage_timer_interval, UsageTick};
+    use super::{
+        create_process_command_line, usage_timer_interval, UsageTick, HOVER_TIMER_ID,
+        PROMOTE_TIMER_ID, TIMER_ANIMATION, TIMER_CPU, UPDATE_TIMER_ID, USAGE_TIMER_ID,
+    };
+
+    #[test]
+    fn component_message_window_timer_ids_are_unique() {
+        let mut ids = vec![
+            TIMER_CPU,
+            TIMER_ANIMATION,
+            PROMOTE_TIMER_ID,
+            USAGE_TIMER_ID,
+            HOVER_TIMER_ID,
+            UPDATE_TIMER_ID,
+        ];
+        let count = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), count);
+    }
 
     #[test]
     fn catch_up_advances_local_backlog_without_accelerating_idle_polling() {

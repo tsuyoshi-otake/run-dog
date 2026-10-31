@@ -10,37 +10,204 @@ pub const DEFAULT_REPOSITORY: &str = "tsuyoshi-otake/run-dog";
 pub const INSTALLER_ASSET_NAME: &str = "RunDog-Setup-x64.exe";
 pub const CHECKSUM_ASSET_NAME: &str = "RunDog-Setup-x64.exe.sha256";
 
-/// One-shot policy for the update check started during application startup.
-///
-/// The adapter arms this from the persisted setting, then consumes the decision
-/// when that specific check completes. Rechecking the setting at completion
-/// prevents an install after the user turns the option off while the request is
-/// in flight.
+/// Wall-clock time between automatic update checks while RunDog runs.
+pub const UPDATE_CHECK_INTERVAL_MS: u64 = 60 * 60 * 1_000;
+/// Upper bound of the random delay added to every automatic check, so PCs
+/// behind one address do not query GitHub in the same second.
+pub const UPDATE_CHECK_MAX_JITTER_MS: u64 = 5 * 60 * 1_000;
+/// First retry after a failed check or install; doubles per consecutive
+/// failure up to `UPDATE_CHECK_INTERVAL_MS`.
+pub const UPDATE_RETRY_BASE_MS: u64 = 5 * 60 * 1_000;
+/// Longest server-requested wait honored before checking again.
+pub const UPDATE_SERVER_RETRY_MAX_MS: u64 = 6 * 60 * 60 * 1_000;
+
+/// Who started an update check. Only automatic checks install by themselves;
+/// a manual check reports its result and leaves Install to the user.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UpdateCheckOrigin {
+    Automatic,
+    Manual,
+}
+
+/// Terminal result of one update check.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum UpdateCheckOutcome {
+    Current,
+    Available(Version),
+    /// `retry_not_before_ms` is GitHub's `Retry-After` / rate-limit reset as
+    /// Unix milliseconds, when the response carried one.
+    Failed {
+        retry_not_before_ms: Option<u64>,
+    },
+}
+
+/// What the adapter does after a check completes.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct StartupUpdateGate {
-    install_pending: bool,
+pub struct UpdateCheckDecision {
+    /// Start the verified download-and-install path.
+    pub install: bool,
+    /// Show the result balloon. Manual checks report every result; automatic
+    /// checks announce each newly available version once.
+    pub announce: bool,
+}
+
+/// Wall-clock policy for update checks while RunDog runs.
+///
+/// The first automatic check is due at startup. Every completion (Current,
+/// Available, or Failed; automatic or manual) reschedules: success waits the
+/// interval, a failed check or install backs off from `UPDATE_RETRY_BASE_MS`
+/// and never retries before a server-provided time. Each delay adds the
+/// caller's jitter, capped at `UPDATE_CHECK_MAX_JITTER_MS`. The setting is
+/// read at completion, so turning auto-update off while a request is in flight
+/// prevents that install. After `cancel` (exit) nothing is due and nothing
+/// installs.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct UpdateSchedule {
+    next_due_ms: u64,
+    /// When `next_due_ms` was set; a clock now earlier than this moved
+    /// backwards, and the check is due instead of waiting out the jump.
+    scheduled_at_ms: u64,
+    in_flight: Option<UpdateCheckOrigin>,
+    consecutive_failures: u32,
+    announced: Option<Version>,
     cancelled: bool,
 }
 
-impl StartupUpdateGate {
-    pub fn arm(&mut self, auto_install: bool) {
-        self.install_pending = auto_install;
-        self.cancelled = false;
+impl UpdateSchedule {
+    /// Whether the adapter should start an automatic check now.
+    #[must_use]
+    pub fn is_due(&self, now_ms: u64) -> bool {
+        !self.cancelled
+            && self.in_flight.is_none()
+            && (now_ms >= self.next_due_ms || now_ms < self.scheduled_at_ms)
+    }
+
+    /// Records a check the adapter actually started.
+    pub fn begin(&mut self, origin: UpdateCheckOrigin) {
+        if !self.cancelled {
+            self.in_flight = Some(origin);
+        }
+    }
+
+    /// Whether a started check still waits for `complete`. A result arriving
+    /// without one (a duplicate or late completion) must be ignored.
+    #[must_use]
+    pub fn awaiting_result(&self) -> bool {
+        self.in_flight.is_some()
+    }
+
+    /// Consumes the in-flight check, reschedules, and decides install and
+    /// announcement.
+    #[must_use]
+    pub fn complete(
+        &mut self,
+        now_ms: u64,
+        outcome: UpdateCheckOutcome,
+        setting_enabled: bool,
+        jitter_ms: u64,
+    ) -> UpdateCheckDecision {
+        let origin = self.in_flight.take();
+        if self.cancelled {
+            return UpdateCheckDecision::default();
+        }
+        let manual = origin == Some(UpdateCheckOrigin::Manual);
+        match outcome {
+            UpdateCheckOutcome::Current => {
+                self.succeeded(now_ms, jitter_ms);
+                UpdateCheckDecision {
+                    install: false,
+                    announce: manual,
+                }
+            }
+            UpdateCheckOutcome::Available(version) => {
+                self.succeeded(now_ms, jitter_ms);
+                let new_version = self.announced.as_ref() != Some(&version);
+                self.announced = Some(version);
+                UpdateCheckDecision {
+                    install: origin == Some(UpdateCheckOrigin::Automatic) && setting_enabled,
+                    announce: manual || new_version,
+                }
+            }
+            UpdateCheckOutcome::Failed {
+                retry_not_before_ms,
+            } => {
+                self.failed(now_ms, retry_not_before_ms, jitter_ms);
+                UpdateCheckDecision {
+                    install: false,
+                    announce: manual,
+                }
+            }
+        }
+    }
+
+    /// A verified install could not be started; retry the check with backoff.
+    pub fn install_failed(&mut self, now_ms: u64, jitter_ms: u64) {
+        if !self.cancelled {
+            self.failed(now_ms, None, jitter_ms);
+        }
     }
 
     pub fn cancel(&mut self) {
-        self.install_pending = false;
         self.cancelled = true;
+        self.in_flight = None;
     }
 
-    /// Consumes the startup request and returns whether the verified install
-    /// path should run. Every completion, including Current and Failed,
-    /// consumes the request so a later manual check cannot inherit it.
-    #[must_use]
-    pub fn complete_check(&mut self, setting_enabled: bool, update_available: bool) -> bool {
-        let pending = std::mem::take(&mut self.install_pending);
-        pending && !self.cancelled && setting_enabled && update_available
+    fn succeeded(&mut self, now_ms: u64, jitter_ms: u64) {
+        self.consecutive_failures = 0;
+        self.schedule(
+            now_ms,
+            now_ms.saturating_add(UPDATE_CHECK_INTERVAL_MS),
+            jitter_ms,
+        );
     }
+
+    fn failed(&mut self, now_ms: u64, retry_not_before_ms: Option<u64>, jitter_ms: u64) {
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        let doublings = (self.consecutive_failures - 1).min(16);
+        let backoff = UPDATE_RETRY_BASE_MS
+            .saturating_mul(1 << doublings)
+            .min(UPDATE_CHECK_INTERVAL_MS);
+        let retry_at = now_ms
+            .saturating_add(backoff)
+            .max(retry_not_before_ms.unwrap_or(0));
+        self.schedule(now_ms, retry_at, jitter_ms);
+    }
+
+    fn schedule(&mut self, now_ms: u64, due_ms: u64, jitter_ms: u64) {
+        self.scheduled_at_ms = now_ms;
+        self.next_due_ms = due_ms.saturating_add(jitter_ms.min(UPDATE_CHECK_MAX_JITTER_MS));
+    }
+}
+
+/// GitHub's earliest retry time for a rate-limited API response, as Unix
+/// milliseconds. Only 403/429 count: `Retry-After` seconds win, otherwise an
+/// exhausted quota (`X-RateLimit-Remaining: 0`) waits for
+/// `X-RateLimit-Reset`. The wait is capped at `UPDATE_SERVER_RETRY_MAX_MS`.
+#[must_use]
+pub fn github_retry_not_before_ms(
+    now_ms: u64,
+    status: u32,
+    retry_after: Option<&str>,
+    ratelimit_remaining: Option<&str>,
+    ratelimit_reset: Option<&str>,
+) -> Option<u64> {
+    if !matches!(status, 403 | 429) {
+        return None;
+    }
+    let latest = now_ms.saturating_add(UPDATE_SERVER_RETRY_MAX_MS);
+    let seconds = |value: Option<&str>| value.and_then(|value| value.trim().parse::<u64>().ok());
+    if let Some(wait) = seconds(retry_after) {
+        return Some(
+            now_ms
+                .saturating_add(wait.saturating_mul(1_000))
+                .min(latest),
+        );
+    }
+    if seconds(ratelimit_remaining) != Some(0) {
+        return None;
+    }
+    let reset_ms = seconds(ratelimit_reset)?.saturating_mul(1_000);
+    (reset_ms > now_ms).then_some(reset_ms.min(latest))
 }
 
 /// A GitHub owner/repository slug accepted by the update protocol.
@@ -587,6 +754,464 @@ mod tests {
             let release_version = Version::parse(&tag).unwrap();
 
             prop_assert_eq!(selection.is_some(), release_version > current);
+        }
+    }
+}
+
+#[cfg(test)]
+mod schedule_tests {
+    use super::{
+        github_retry_not_before_ms, UpdateCheckDecision, UpdateCheckOrigin, UpdateCheckOutcome,
+        UpdateSchedule, Version, UPDATE_CHECK_INTERVAL_MS, UPDATE_CHECK_MAX_JITTER_MS,
+        UPDATE_RETRY_BASE_MS, UPDATE_SERVER_RETRY_MAX_MS,
+    };
+    use proptest::{
+        prelude::*,
+        test_runner::{Config as ProptestConfig, FileFailurePersistence, RngSeed},
+    };
+
+    const T0: u64 = 1_793_410_000_000;
+    const MINUTE: u64 = 60_000;
+
+    fn version(value: &str) -> Version {
+        Version::parse(value).unwrap()
+    }
+
+    fn available(value: &str) -> UpdateCheckOutcome {
+        UpdateCheckOutcome::Available(version(value))
+    }
+
+    fn failed() -> UpdateCheckOutcome {
+        UpdateCheckOutcome::Failed {
+            retry_not_before_ms: None,
+        }
+    }
+
+    fn run(
+        schedule: &mut UpdateSchedule,
+        origin: UpdateCheckOrigin,
+        now_ms: u64,
+        outcome: UpdateCheckOutcome,
+        setting_enabled: bool,
+    ) -> UpdateCheckDecision {
+        schedule.begin(origin);
+        schedule.complete(now_ms, outcome, setting_enabled, 0)
+    }
+
+    #[test]
+    fn c2_schedule_first_check_is_due_at_startup_and_not_while_in_flight() {
+        let mut schedule = UpdateSchedule::default();
+        assert!(schedule.is_due(T0));
+        assert!(!schedule.awaiting_result());
+        schedule.begin(UpdateCheckOrigin::Automatic);
+        assert!(schedule.awaiting_result());
+        assert!(!schedule.is_due(T0));
+        assert!(!schedule.is_due(T0 + 10 * UPDATE_CHECK_INTERVAL_MS));
+
+        let _ = schedule.complete(T0, UpdateCheckOutcome::Current, true, 0);
+        assert!(!schedule.awaiting_result());
+        schedule.begin(UpdateCheckOrigin::Manual);
+        schedule.cancel();
+        assert!(!schedule.awaiting_result());
+    }
+
+    #[test]
+    fn c2_schedule_rechecks_after_the_interval_plus_jitter_while_running() {
+        let mut schedule = UpdateSchedule::default();
+        schedule.begin(UpdateCheckOrigin::Automatic);
+        let _ = schedule.complete(T0, UpdateCheckOutcome::Current, true, 1_234);
+
+        assert!(!schedule.is_due(T0 + UPDATE_CHECK_INTERVAL_MS + 1_233));
+        assert!(schedule.is_due(T0 + UPDATE_CHECK_INTERVAL_MS + 1_234));
+
+        // Jitter is bounded even if the adapter passes a larger value.
+        schedule.begin(UpdateCheckOrigin::Automatic);
+        let _ = schedule.complete(T0, UpdateCheckOutcome::Current, true, u64::MAX);
+        assert!(schedule.is_due(T0 + UPDATE_CHECK_INTERVAL_MS + UPDATE_CHECK_MAX_JITTER_MS));
+    }
+
+    #[test]
+    fn c2_schedule_backs_off_after_failures_caps_at_the_interval_and_resets() {
+        let mut schedule = UpdateSchedule::default();
+        let mut now = T0;
+        for minutes in [5, 10, 20, 40, 60, 60, 60] {
+            let _ = run(
+                &mut schedule,
+                UpdateCheckOrigin::Automatic,
+                now,
+                failed(),
+                true,
+            );
+            assert!(
+                !schedule.is_due(now + minutes * MINUTE - 1),
+                "{minutes} min"
+            );
+            assert!(schedule.is_due(now + minutes * MINUTE), "{minutes} min");
+            now += minutes * MINUTE;
+        }
+        assert_eq!(UPDATE_RETRY_BASE_MS, 5 * MINUTE);
+        assert_eq!(UPDATE_CHECK_INTERVAL_MS, 60 * MINUTE);
+
+        let _ = run(
+            &mut schedule,
+            UpdateCheckOrigin::Automatic,
+            now,
+            UpdateCheckOutcome::Current,
+            true,
+        );
+        let _ = run(
+            &mut schedule,
+            UpdateCheckOrigin::Automatic,
+            now,
+            failed(),
+            true,
+        );
+        assert!(
+            schedule.is_due(now + 5 * MINUTE),
+            "success resets the backoff"
+        );
+    }
+
+    #[test]
+    fn c2_schedule_waits_for_a_server_retry_time_but_never_less_than_backoff() {
+        let mut schedule = UpdateSchedule::default();
+        schedule.begin(UpdateCheckOrigin::Automatic);
+        let _ = schedule.complete(
+            T0,
+            UpdateCheckOutcome::Failed {
+                retry_not_before_ms: Some(T0 + 50 * MINUTE),
+            },
+            true,
+            0,
+        );
+        assert!(!schedule.is_due(T0 + 50 * MINUTE - 1));
+        assert!(schedule.is_due(T0 + 50 * MINUTE));
+
+        schedule.begin(UpdateCheckOrigin::Automatic);
+        let _ = schedule.complete(
+            T0,
+            UpdateCheckOutcome::Failed {
+                retry_not_before_ms: Some(T0 + MINUTE),
+            },
+            true,
+            0,
+        );
+        assert!(
+            !schedule.is_due(T0 + 10 * MINUTE - 1),
+            "second failure backs off 10 min"
+        );
+        assert!(schedule.is_due(T0 + 10 * MINUTE));
+    }
+
+    #[test]
+    fn c2_schedule_installs_only_automatic_available_updates_with_the_setting_on() {
+        let mut schedule = UpdateSchedule::default();
+        assert_eq!(
+            run(
+                &mut schedule,
+                UpdateCheckOrigin::Automatic,
+                T0,
+                available("1.2.4"),
+                true
+            ),
+            UpdateCheckDecision {
+                install: true,
+                announce: true
+            }
+        );
+        assert_eq!(
+            run(
+                &mut schedule,
+                UpdateCheckOrigin::Manual,
+                T0,
+                available("1.2.4"),
+                true
+            ),
+            UpdateCheckDecision {
+                install: false,
+                announce: true
+            },
+            "a manual check keeps the Install menu item"
+        );
+
+        let mut off = UpdateSchedule::default();
+        assert_eq!(
+            run(
+                &mut off,
+                UpdateCheckOrigin::Automatic,
+                T0,
+                available("1.2.4"),
+                false
+            ),
+            UpdateCheckDecision {
+                install: false,
+                announce: true
+            }
+        );
+        assert_eq!(
+            run(
+                &mut off,
+                UpdateCheckOrigin::Automatic,
+                T0,
+                available("1.2.4"),
+                false
+            ),
+            UpdateCheckDecision::default(),
+            "the same version is announced once, not every hour"
+        );
+        assert_eq!(
+            run(
+                &mut off,
+                UpdateCheckOrigin::Automatic,
+                T0,
+                available("1.2.5"),
+                false
+            ),
+            UpdateCheckDecision {
+                install: false,
+                announce: true
+            }
+        );
+    }
+
+    #[test]
+    fn c2_schedule_reports_every_manual_result_and_no_automatic_non_update() {
+        let mut schedule = UpdateSchedule::default();
+        for outcome in [UpdateCheckOutcome::Current, failed()] {
+            assert_eq!(
+                run(
+                    &mut schedule,
+                    UpdateCheckOrigin::Automatic,
+                    T0,
+                    outcome.clone(),
+                    true
+                ),
+                UpdateCheckDecision::default()
+            );
+            assert_eq!(
+                run(&mut schedule, UpdateCheckOrigin::Manual, T0, outcome, true),
+                UpdateCheckDecision {
+                    install: false,
+                    announce: true
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn c2_schedule_retries_a_failed_install_with_backoff() {
+        let mut schedule = UpdateSchedule::default();
+        let decision = run(
+            &mut schedule,
+            UpdateCheckOrigin::Automatic,
+            T0,
+            available("1.2.4"),
+            true,
+        );
+        assert!(decision.install);
+        assert!(!schedule.is_due(T0 + 30 * MINUTE));
+
+        schedule.install_failed(T0 + MINUTE, 0);
+        assert!(!schedule.is_due(T0 + 6 * MINUTE - 1));
+        assert!(schedule.is_due(T0 + 6 * MINUTE));
+
+        assert!(
+            run(
+                &mut schedule,
+                UpdateCheckOrigin::Automatic,
+                T0 + 6 * MINUTE,
+                available("1.2.4"),
+                true
+            )
+            .install,
+            "the retry installs the same version again"
+        );
+    }
+
+    #[test]
+    fn c2_schedule_after_exit_never_checks_or_installs() {
+        let mut schedule = UpdateSchedule::default();
+        schedule.begin(UpdateCheckOrigin::Automatic);
+        schedule.cancel();
+        assert_eq!(
+            schedule.complete(T0, available("1.2.4"), true, 0),
+            UpdateCheckDecision::default()
+        );
+        assert!(!schedule.is_due(T0 + 10 * UPDATE_CHECK_INTERVAL_MS));
+        schedule.install_failed(T0, 0);
+        schedule.begin(UpdateCheckOrigin::Automatic);
+        assert!(!schedule.is_due(T0 + 10 * UPDATE_CHECK_INTERVAL_MS));
+        assert_eq!(
+            schedule.complete(T0, available("1.2.4"), true, 0),
+            UpdateCheckDecision::default()
+        );
+    }
+
+    #[test]
+    fn c2_schedule_treats_a_clock_moved_backwards_as_due() {
+        let mut schedule = UpdateSchedule::default();
+        let _ = run(
+            &mut schedule,
+            UpdateCheckOrigin::Automatic,
+            T0,
+            UpdateCheckOutcome::Current,
+            true,
+        );
+        assert!(!schedule.is_due(T0 + MINUTE));
+        assert!(schedule.is_due(T0 - 1));
+    }
+
+    #[test]
+    fn c2_github_retry_hint_honors_retry_after_and_exhausted_rate_limit_reset() {
+        let now = T0;
+        assert_eq!(
+            github_retry_not_before_ms(now, 403, Some("120"), None, None),
+            Some(now + 120_000)
+        );
+        assert_eq!(
+            github_retry_not_before_ms(now, 429, Some(" 7 "), Some("0"), Some("1793413478")),
+            Some(now + 7_000),
+            "Retry-After wins over the reset time"
+        );
+        assert_eq!(
+            github_retry_not_before_ms(now, 403, None, Some("0"), Some("1793413478")),
+            Some(1_793_413_478_000)
+        );
+        assert_eq!(
+            github_retry_not_before_ms(now, 403, None, Some("5"), Some("1793413478")),
+            None,
+            "a 403 with quota left is not a rate limit"
+        );
+        assert_eq!(
+            github_retry_not_before_ms(now, 403, None, Some("0"), Some("1000")),
+            None,
+            "a reset in the past adds no wait"
+        );
+        assert_eq!(
+            github_retry_not_before_ms(now, 200, Some("120"), Some("0"), None),
+            None
+        );
+        assert_eq!(
+            github_retry_not_before_ms(now, 503, Some("120"), None, None),
+            None
+        );
+        assert_eq!(
+            github_retry_not_before_ms(now, 429, Some("soon"), None, None),
+            None
+        );
+        assert_eq!(
+            github_retry_not_before_ms(now, 429, Some("999999999"), None, None),
+            Some(now + UPDATE_SERVER_RETRY_MAX_MS),
+            "a server wait is bounded"
+        );
+    }
+
+    #[derive(Clone, Debug)]
+    enum Step {
+        Check {
+            manual: bool,
+            outcome: u8,
+            setting: bool,
+            jitter: u64,
+            elapsed: u64,
+        },
+        InstallFailed {
+            elapsed: u64,
+        },
+        Exit,
+    }
+
+    fn step() -> impl Strategy<Value = Step> {
+        prop_oneof![
+            8 => (
+                any::<bool>(),
+                0_u8..4,
+                any::<bool>(),
+                any::<u64>(),
+                0_u64..3 * UPDATE_CHECK_INTERVAL_MS,
+            )
+                .prop_map(|(manual, outcome, setting, jitter, elapsed)| Step::Check {
+                    manual,
+                    outcome,
+                    setting,
+                    jitter,
+                    elapsed,
+                }),
+            2 => (0_u64..UPDATE_CHECK_INTERVAL_MS)
+                .prop_map(|elapsed| Step::InstallFailed { elapsed }),
+            1 => Just(Step::Exit),
+        ]
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 1_024,
+            rng_seed: RngSeed::Fixed(0x5EED_2026_1031_0110),
+            failure_persistence: Some(Box::new(FileFailurePersistence::Direct(
+                "verification/evidence/update-schedule-pbt-counterexamples.regressions",
+            ))),
+            .. ProptestConfig::default()
+        })]
+
+        /// Stateful model check: every completion leaves the schedule idle with
+        /// a bounded next check, and only automatic, enabled, available checks
+        /// before exit may install.
+        #[test]
+        fn pbt_schedule_always_reschedules_and_installs_only_when_allowed(
+            steps in proptest::collection::vec(step(), 1..40)
+        ) {
+            let mut schedule = UpdateSchedule::default();
+            let mut now = T0;
+            let mut exited = false;
+            for step in steps {
+                match step {
+                    Step::Check { manual, outcome, setting, jitter, elapsed } => {
+                        now += elapsed;
+                        let origin = if manual {
+                            UpdateCheckOrigin::Manual
+                        } else {
+                            UpdateCheckOrigin::Automatic
+                        };
+                        let outcome = match outcome {
+                            0 => UpdateCheckOutcome::Current,
+                            1 => available("1.2.4"),
+                            2 => failed(),
+                            _ => UpdateCheckOutcome::Failed {
+                                retry_not_before_ms: Some(now + 7 * MINUTE),
+                            },
+                        };
+                        let is_available = matches!(outcome, UpdateCheckOutcome::Available(_));
+                        schedule.begin(origin);
+                        let decision = schedule.complete(now, outcome, setting, jitter);
+                        prop_assert_eq!(
+                            decision.install,
+                            !exited && !manual && setting && is_available
+                        );
+                        if exited {
+                            prop_assert_eq!(decision, UpdateCheckDecision::default());
+                            prop_assert!(!schedule.is_due(now + 10 * UPDATE_CHECK_INTERVAL_MS));
+                        } else {
+                            prop_assert!(
+                                schedule.is_due(
+                                    now + UPDATE_CHECK_INTERVAL_MS + UPDATE_CHECK_MAX_JITTER_MS
+                                ),
+                                "next check is never later than interval + jitter"
+                            );
+                        }
+                    }
+                    Step::InstallFailed { elapsed } => {
+                        now += elapsed;
+                        schedule.install_failed(now, 0);
+                        if !exited {
+                            prop_assert!(schedule.is_due(now + UPDATE_CHECK_INTERVAL_MS));
+                        }
+                    }
+                    Step::Exit => {
+                        schedule.cancel();
+                        exited = true;
+                    }
+                }
+            }
         }
     }
 }

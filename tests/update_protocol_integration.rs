@@ -7,8 +7,9 @@ use std::collections::BTreeMap;
 
 use run_dog::update::{
     github_release_download_path, parse_checksum_manifest, select_update, Release, ReleaseAsset,
-    StartupUpdateGate, UpdateCandidate, UpdateProtocolError, UpdateRepository, Version,
-    CHECKSUM_ASSET_NAME, INSTALLER_ASSET_NAME,
+    UpdateCandidate, UpdateCheckOrigin, UpdateCheckOutcome, UpdateProtocolError, UpdateRepository,
+    UpdateSchedule, Version, CHECKSUM_ASSET_NAME, INSTALLER_ASSET_NAME, UPDATE_CHECK_INTERVAL_MS,
+    UPDATE_RETRY_BASE_MS,
 };
 
 const WINDOWS_ADAPTER: &str = include_str!("../src/windows/mod.rs");
@@ -94,32 +95,63 @@ fn fixture_sha256(payload: &[u8]) -> Option<&'static str> {
     (payload == INSTALLER_FIXTURE).then_some(INSTALLER_FIXTURE_SHA256)
 }
 
-/// Shared startup policy plus protocol-compatible fake I/O. This follows the
-/// same `StartupUpdateGate` consumed by the Win32 UPDATE_CHECK_DONE handler.
+/// Wall-clock start of every scenario (2026-10-31T00:00:00Z).
+const NOW: u64 = 1_793_404_800_000;
+
+/// One check through the shared update policy plus protocol-compatible fake
+/// I/O. This follows the same `UpdateSchedule` calls as the Win32 adapter:
+/// `begin` when a check starts, `complete` on UPDATE_CHECK_DONE, and
+/// `install_failed` on UPDATE_INSTALL_FAILED.
 fn execute_update_flow_with_fakes(
     current: &Version,
     endpoint: &mut FakeGitHubReleaseApi,
     launcher: &mut FakeInstallerLauncher,
-    startup: &mut StartupUpdateGate,
+    schedule: &mut UpdateSchedule,
+    origin: UpdateCheckOrigin,
+    now_ms: u64,
     setting_enabled: bool,
 ) -> Result<UpdateFlowResult, UpdateFlowError> {
+    schedule.begin(origin);
     let release = endpoint.latest_release();
     let candidate = match select_update(&endpoint.repository, current, &release) {
         Ok(candidate) => candidate,
         Err(error) => {
-            let _ = startup.complete_check(setting_enabled, false);
+            let _ = schedule.complete(
+                now_ms,
+                UpdateCheckOutcome::Failed {
+                    retry_not_before_ms: None,
+                },
+                setting_enabled,
+                0,
+            );
             return Err(UpdateFlowError::Protocol(error));
         }
     };
     let Some(candidate) = candidate else {
-        let _ = startup.complete_check(setting_enabled, false);
+        let _ = schedule.complete(now_ms, UpdateCheckOutcome::Current, setting_enabled, 0);
         return Ok(UpdateFlowResult::Current);
     };
 
-    if !startup.complete_check(setting_enabled, true) {
+    let decision = schedule.complete(
+        now_ms,
+        UpdateCheckOutcome::Available(candidate.version.clone()),
+        setting_enabled,
+        0,
+    );
+    if !decision.install {
         return Ok(UpdateFlowResult::Available(candidate));
     }
 
+    install_with_fakes(endpoint, launcher, candidate).inspect_err(|_| {
+        schedule.install_failed(now_ms, 0);
+    })
+}
+
+fn install_with_fakes(
+    endpoint: &mut FakeGitHubReleaseApi,
+    launcher: &mut FakeInstallerLauncher,
+    candidate: UpdateCandidate,
+) -> Result<UpdateFlowResult, UpdateFlowError> {
     let checksum = endpoint.download(&candidate.checksum_url, CHECKSUM_ASSET_NAME)?;
     let checksum =
         std::str::from_utf8(&checksum).map_err(|_| UpdateFlowError::InvalidChecksumEncoding)?;
@@ -162,24 +194,40 @@ fn endpoint_with_assets(tag: &str, checksum: String, installer: &[u8]) -> FakeGi
     endpoint
 }
 
-#[test]
-fn integration_startup_auto_update_verifies_and_installs_once() {
-    let tag = "v1.2.4";
-    let mut endpoint = endpoint_with_assets(
+fn candidate(tag: &str) -> UpdateCandidate {
+    UpdateCandidate {
+        version: Version::parse(tag.trim_start_matches('v')).unwrap(),
+        installer_url: format!(
+            "https://github.com/{REPOSITORY}/releases/download/{tag}/{INSTALLER_ASSET_NAME}"
+        ),
+        checksum_url: format!(
+            "https://github.com/{REPOSITORY}/releases/download/{tag}/{CHECKSUM_ASSET_NAME}"
+        ),
+    }
+}
+
+fn verified_endpoint(tag: &str) -> FakeGitHubReleaseApi {
+    endpoint_with_assets(
         tag,
         format!("{INSTALLER_FIXTURE_SHA256}  {INSTALLER_ASSET_NAME}\n"),
         INSTALLER_FIXTURE,
-    );
+    )
+}
+
+#[test]
+fn integration_automatic_update_verifies_and_installs_while_manual_check_only_offers() {
+    let mut endpoint = verified_endpoint("v1.2.4");
     let mut launcher = FakeInstallerLauncher::default();
-    let mut startup = StartupUpdateGate::default();
-    startup.arm(true);
+    let mut schedule = UpdateSchedule::default();
 
     assert_eq!(
         execute_update_flow_with_fakes(
             &Version::parse("1.2.3").unwrap(),
             &mut endpoint,
             &mut launcher,
-            &mut startup,
+            &mut schedule,
+            UpdateCheckOrigin::Automatic,
+            NOW,
             true,
         ),
         Ok(UpdateFlowResult::InstalledAfterPermission(
@@ -196,58 +244,102 @@ fn integration_startup_auto_update_verifies_and_installs_once() {
     );
     assert_eq!(launcher.launched_versions.len(), 1);
 
-    // A second completion cannot inherit the startup permission.
+    // A manual check never inherits install permission; it offers Install.
     assert_eq!(
         execute_update_flow_with_fakes(
             &Version::parse("1.2.3").unwrap(),
             &mut endpoint,
             &mut launcher,
-            &mut startup,
+            &mut schedule,
+            UpdateCheckOrigin::Manual,
+            NOW,
             true,
         ),
-        Ok(UpdateFlowResult::Available(UpdateCandidate {
-            version: Version::parse("1.2.4").unwrap(),
-            installer_url: format!(
-                "https://github.com/{REPOSITORY}/releases/download/v1.2.4/{INSTALLER_ASSET_NAME}"
-            ),
-            checksum_url: format!(
-                "https://github.com/{REPOSITORY}/releases/download/v1.2.4/{CHECKSUM_ASSET_NAME}"
-            ),
-        }))
+        Ok(UpdateFlowResult::Available(candidate("v1.2.4")))
     );
     assert_eq!(launcher.launched_versions.len(), 1);
 }
 
 #[test]
-fn integration_update_rejects_corrupt_or_stale_release_before_the_fake_installer() {
+fn integration_release_published_while_running_installs_on_a_later_automatic_check() {
+    let current = Version::parse("1.2.3").unwrap();
+    let mut launcher = FakeInstallerLauncher::default();
+    let mut schedule = UpdateSchedule::default();
+
+    // Startup check: the release does not exist yet.
+    let mut before_release = verified_endpoint("v1.2.3");
+    assert!(schedule.is_due(NOW));
+    assert_eq!(
+        execute_update_flow_with_fakes(
+            &current,
+            &mut before_release,
+            &mut launcher,
+            &mut schedule,
+            UpdateCheckOrigin::Automatic,
+            NOW,
+            true,
+        ),
+        Ok(UpdateFlowResult::Current)
+    );
+    assert!(!schedule.is_due(NOW + UPDATE_CHECK_INTERVAL_MS - 1));
+
+    // v1.2.4 is published while RunDog keeps running; the next due check
+    // installs it without a restart.
+    let later = NOW + UPDATE_CHECK_INTERVAL_MS;
+    assert!(schedule.is_due(later));
+    let mut after_release = verified_endpoint("v1.2.4");
+    assert_eq!(
+        execute_update_flow_with_fakes(
+            &current,
+            &mut after_release,
+            &mut launcher,
+            &mut schedule,
+            UpdateCheckOrigin::Automatic,
+            later,
+            true,
+        ),
+        Ok(UpdateFlowResult::InstalledAfterPermission(
+            Version::parse("1.2.4").unwrap()
+        ))
+    );
+    assert_eq!(launcher.launched_versions.len(), 1);
+}
+
+#[test]
+fn integration_update_rejects_corrupt_or_stale_release_and_retries_with_backoff() {
     let mut corrupt = endpoint_with_assets(
         "v1.2.4",
         format!("{}  {INSTALLER_ASSET_NAME}\n", "0".repeat(64)),
         INSTALLER_FIXTURE,
     );
     let mut launcher = FakeInstallerLauncher::default();
-    let mut startup = StartupUpdateGate::default();
-    startup.arm(true);
+    let mut schedule = UpdateSchedule::default();
     assert_eq!(
         execute_update_flow_with_fakes(
             &Version::parse("1.2.3").unwrap(),
             &mut corrupt,
             &mut launcher,
-            &mut startup,
+            &mut schedule,
+            UpdateCheckOrigin::Automatic,
+            NOW,
             true,
         ),
         Err(UpdateFlowError::ChecksumMismatch)
     );
     assert!(launcher.launched_versions.is_empty());
+    // A failed install is retried after the backoff, not left failed.
+    assert!(!schedule.is_due(NOW + UPDATE_RETRY_BASE_MS - 1));
+    assert!(schedule.is_due(NOW + UPDATE_RETRY_BASE_MS));
 
     let mut failed_check = FakeGitHubReleaseApi::new(release("not-a-version"));
-    startup.arm(true);
     assert_eq!(
         execute_update_flow_with_fakes(
             &Version::parse("1.2.3").unwrap(),
             &mut failed_check,
             &mut launcher,
-            &mut startup,
+            &mut schedule,
+            UpdateCheckOrigin::Automatic,
+            NOW,
             true,
         ),
         Err(UpdateFlowError::Protocol(
@@ -255,19 +347,17 @@ fn integration_update_rejects_corrupt_or_stale_release_before_the_fake_installer
         ))
     );
     assert!(launcher.launched_versions.is_empty());
+    assert!(!schedule.is_due(NOW));
 
-    let mut stale = endpoint_with_assets(
-        "v1.2.3",
-        format!("{INSTALLER_FIXTURE_SHA256}  {INSTALLER_ASSET_NAME}\n"),
-        INSTALLER_FIXTURE,
-    );
-    startup.arm(true);
+    let mut stale = verified_endpoint("v1.2.3");
     assert_eq!(
         execute_update_flow_with_fakes(
             &Version::parse("1.2.3").unwrap(),
             &mut stale,
             &mut launcher,
-            &mut startup,
+            &mut schedule,
+            UpdateCheckOrigin::Automatic,
+            NOW,
             true,
         ),
         Ok(UpdateFlowResult::Current)
@@ -280,20 +370,17 @@ fn integration_update_rejects_corrupt_or_stale_release_before_the_fake_installer
 }
 
 #[test]
-fn integration_disabled_changed_and_cancelled_startup_never_install() {
-    let mut endpoint = endpoint_with_assets(
-        "v1.2.4",
-        format!("{INSTALLER_FIXTURE_SHA256}  {INSTALLER_ASSET_NAME}\n"),
-        INSTALLER_FIXTURE,
-    );
+fn integration_disabled_setting_and_exit_never_install() {
+    let mut endpoint = verified_endpoint("v1.2.4");
     let mut launcher = FakeInstallerLauncher::default();
-    let mut startup = StartupUpdateGate::default();
-    startup.arm(false);
+    let mut schedule = UpdateSchedule::default();
     let available = execute_update_flow_with_fakes(
         &Version::parse("1.2.3").unwrap(),
         &mut endpoint,
         &mut launcher,
-        &mut startup,
+        &mut schedule,
+        UpdateCheckOrigin::Automatic,
+        NOW,
         false,
     )
     .unwrap();
@@ -304,24 +391,15 @@ fn integration_disabled_changed_and_cancelled_startup_never_install() {
     assert!(launcher.launched_versions.is_empty());
     assert_eq!(candidate.version, Version::parse("1.2.4").unwrap());
 
-    startup.arm(true);
+    schedule.cancel();
+    assert!(!schedule.is_due(NOW + 10 * UPDATE_CHECK_INTERVAL_MS));
     let available = execute_update_flow_with_fakes(
         &Version::parse("1.2.3").unwrap(),
         &mut endpoint,
         &mut launcher,
-        &mut startup,
-        false,
-    )
-    .unwrap();
-    assert!(matches!(available, UpdateFlowResult::Available(_)));
-
-    startup.arm(true);
-    startup.cancel();
-    let available = execute_update_flow_with_fakes(
-        &Version::parse("1.2.3").unwrap(),
-        &mut endpoint,
-        &mut launcher,
-        &mut startup,
+        &mut schedule,
+        UpdateCheckOrigin::Automatic,
+        NOW,
         true,
     )
     .unwrap();
@@ -331,7 +409,16 @@ fn integration_disabled_changed_and_cancelled_startup_never_install() {
 }
 
 #[test]
-fn integration_windows_completion_routes_gate_to_available_installer() {
-    assert!(WINDOWS_ADAPTER.contains("context.startup_update.complete_check("));
-    assert!(WINDOWS_ADAPTER.contains("context.updater.install_available(hwnd);"));
+fn integration_windows_adapter_routes_the_schedule_to_checks_and_installer() {
+    for wiring in [
+        "UPDATE_TIMER_ID => context.tick_update(),",
+        "self.update_schedule.begin(UpdateCheckOrigin::Automatic);",
+        "context.update_schedule.begin(UpdateCheckOrigin::Manual);",
+        "let decision = self.update_schedule.complete(",
+        "self.updater.install_available(self.platform.hwnd);",
+        ".install_failed(unix_now_ms(), update_check_jitter_ms());",
+        "self.update_schedule.cancel();",
+    ] {
+        assert!(WINDOWS_ADAPTER.contains(wiring), "{wiring}");
+    }
 }

@@ -24,8 +24,8 @@ repository except public GitHub Release metadata that GitHub already hosts.
 
 | Destination | When | What is sent |
 | --- | --- | --- |
-| `api.github.com` | Once at startup, or when the user chooses Check again | Release metadata GET. No account token. |
-| `github.com` / GitHub release CDN | After the user chooses Install, or automatically at startup when auto-update on startup is on (default) and a newer release exists | Installer and SHA-256 sidecar GET. |
+| `api.github.com` | At startup, then about once an hour while RunDog runs (plus 0-5 minutes of random spread), or when the user chooses Check again. After a failed check, retries back off from 5 minutes up to 1 hour and never come before GitHub's `Retry-After` or rate-limit reset time | Release metadata GET. No account token. |
+| `github.com` / GitHub release CDN | After the user chooses Install, or automatically when auto-update is on (default) and an automatic check finds a newer release | Installer and SHA-256 sidecar GET. |
 | `api.anthropic.com` `/api/oauth/usage` | When Claude credentials exist, about every 5 minutes | Bearer access token and Anthropic OAuth beta header. Usage/limit JSON back. |
 | `platform.claude.com` or `console.anthropic.com` `/v1/oauth/token` | When the Claude access token is expired or the usage GET fails as unauthorized | OAuth refresh grant. May rewrite `.credentials.json` via `ReplaceFileW`. |
 | `chatgpt.com` `/backend-api/wham/usage` | When Codex `auth.json` exists, about every 60 seconds | Bearer access token and ChatGPT account id. Usage/limit JSON back. |

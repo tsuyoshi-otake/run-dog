@@ -19,9 +19,9 @@
 - `GetSystemTimes` の累積値差分による全体 CPU 使用率と、`GlobalMemoryStatusEx` によるメモリ使用率、システムボリュームの使用量、GPU エンジン使用率と専用 / 共有ビデオメモリ。ホバーで CPU / メモリ / GPU / ストレージのカードと直近 1 分のスパークライン、Claude Code / Codex CLI のサブスクリミットと API 相当利用料、RunDog 自身の CPU 割合とプライベートメモリを表示
 - CPU 使用率に応じた 5–40 FPS のアニメーション（既定の上限は 40 FPS）
 - 右クリックのトレイ表示切替（犬（CPU） / CPU / メモリ / GPU / Claude 5時間 / Claude 週 / Fable 週 / Codex 5時間 / Codex 週）。数値モードは 32×32 の整数パーセント。古い・無いリミットは `--` で、0% は作らない。設定は残る
-- System / Light / Dark テーマ、アニメーション上限、スタートアップ、起動時に自動更新（既定オン）、カード固定、更新確認、今月の利用状況の再スキャン、About、終了の右クリックメニュー（Windows の表示言語に追従）
+- System / Light / Dark テーマ、アニメーション上限、スタートアップ、自動更新（既定オン）、カード固定、更新確認、今月の利用状況の再スキャン、About、終了の右クリックメニュー（Windows の表示言語に追従）
 - Windows のスタートアップで起動、初回トレイ登録時の通知領域ピン留め（ユーザーが隠した場合は維持）、左クリックでモニターカードの常時表示と TOP 固定トグル、Explorer 再起動後の tray 再登録
-- GitHub Releases の stable release を起動時に一度だけ非同期確認し、検証済みの新版をサイレント導入
+- GitHub Releases の stable release を起動時と起動中の約 1 時間ごとに非同期確認し、検証済みの新版をサイレント導入
 - 単一インスタンス、単一 message-loop thread。GUI フレームワーク / GC / 常時ポーリングスレッドなし。リリースは `lto`・単一 codegen unit・`panic = "abort"` で最小化
 
 Claude / Codex の Today と Month はローカル JSONL から集計します。otak-usage の有効な保存済み日別スナップショットがある場合は、削除済みログの利用量も表示できるよう、各サービスの表示額にその集計額を下限として適用します。両方を足し合わせないため、同じ利用量を二重計上しません。
@@ -42,11 +42,14 @@ cargo build --release
 
 ## 自動更新と配布
 
-RunDog は起動時に一度だけ、GitHub Releases の latest published stable release
-を短命なバックグラウンド worker で確認します。`起動時に自動更新` は既定でオンです。
-オンのときは新しい stable release があれば、トレイの Install と同じ経路で
-installer を検証してサイレント導入します。オフでも起動時の確認と通知は行い、
-メニューから手動で Install できます。常時ポーリングはしません。
+RunDog は起動時と、起動中は約 1 時間ごと（0〜5 分のランダムなずれ付き）に、
+GitHub Releases の latest published stable release を短命なバックグラウンド worker で
+確認します。確認に失敗したときは 5 分から倍々に延ばして最大 1 時間間隔で再試行し、
+GitHub が `Retry-After` や rate-limit の reset 時刻を返したときはそれより前に再試行しません。
+`自動更新` は既定でオンです。オンのときは自動の確認で新しい stable release が見つかると、
+トレイの Install と同じ経路で installer を検証してサイレント導入します。導入に失敗したときも
+同じ待機で再試行します。オフでも確認は行い、新しい version を見つけたときに一度だけ通知し、
+メニューから手動で Install できます。
 
 ユーザーが Install を選ぶと、固定名の installer と SHA-256 sidecar がそろい、asset URL が
 設定済み repository と release tag へ一致する場合だけ、installer を 16 KiB 単位でディスクへ
@@ -88,7 +91,7 @@ RunDog 自身のサーバーへは送りません。
 
 Rust から Win32 を直接叩いています。GUI フレームワーク、ガベージコレクタ、常時ポーリングのスレッドはありません。実行時スレッドは原則 1 本で、更新確認とリミット取得だけ短命 worker を使います。リリースプロファイルは `lto = true`、`codegen-units = 1`、`panic = "abort"`、`strip = "symbols"` です。
 
-CPU サンプリングは 2 秒ごと、静止に近い時のアニメーションは 5 FPS（200 ms）です。速度が変わったときだけ timer を張り直し、設定はユーザー操作または正常終了時だけ保存します。更新確認は起動時とユーザーによる再確認時だけで、release metadata は最大 1 MiB、checksum は最大 16 KiB、installer は最大 100 MiB として stream 処理します。Claude Code / Codex の利用料は CLI を起動せず、メタデータでサイズが増えた jsonl を 1 tick あたり最大 3 ファイル・通常 96 KiB の読み取り予算で処理します。古いログの滞留中は、当日の追記確認に最大 1 ファイル・96 KiB の予算を別枠で確保します。Claude のリミット取得は 5 分に 1 回・短命 worker に限定します。カードの一番下には、RunDog 自身の CPU 割合とプライベートメモリも出します。
+CPU サンプリングは 2 秒ごと、静止に近い時のアニメーションは 5 FPS（200 ms）です。速度が変わったときだけ timer を張り直し、設定はユーザー操作または正常終了時だけ保存します。更新確認は起動時、起動中の約 1 時間ごと、ユーザーによる再確認時で、release metadata は最大 1 MiB、checksum は最大 16 KiB、installer は最大 100 MiB として stream 処理します。Claude Code / Codex の利用料は CLI を起動せず、メタデータでサイズが増えた jsonl を 1 tick あたり最大 3 ファイル・通常 96 KiB の読み取り予算で処理します。古いログの滞留中は、当日の追記確認に最大 1 ファイル・96 KiB の予算を別枠で確保します。Claude のリミット取得は 5 分に 1 回・短命 worker に限定します。カードの一番下には、RunDog 自身の CPU 割合とプライベートメモリも出します。
 
 その結果、アイドル常駐ではマシン全体の CPU がおおむね 0.1% 未満、プライベートメモリは数 MiB、スレッドは 2 本です。Windows が載せる DLL を含むワーキングセットはそれより大きく見えますが、RunDog が確保しているのはプライベートメモリの側です。
 

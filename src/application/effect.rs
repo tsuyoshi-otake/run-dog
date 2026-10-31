@@ -84,11 +84,10 @@ pub enum Effect {
     SetAutoUpdateMenu(bool),
     /// User-visible confirmation after a successful auto-update-on-startup toggle.
     NotifyAutoUpdateChanged(bool),
-    /// Startup GitHub release check. `auto_install` applies the existing Install path
-    /// when a newer release is selected; a false value still checks and surfaces the menu.
-    CheckForUpdates {
-        auto_install: bool,
-    },
+    /// Start GitHub release checks: at startup and then on the update schedule
+    /// while running. The auto-update setting decides whether an automatic check
+    /// that finds a newer release installs it; off still checks and surfaces the menu.
+    CheckForUpdates,
     LaunchTaskManager,
     Quit,
 }

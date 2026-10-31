@@ -17,6 +17,9 @@ pub const UPDATE_CHECK_DONE_MESSAGE: u32 = WM_APP + 4;
 /// Reserved after a verified installer has been handed to ShellExecute.
 /// Historically collided with `WM_SHOW_TRAY_MENU` when both used `WM_APP + 2`.
 pub const UPDATE_REQUEST_EXIT_MESSAGE: u32 = WM_APP + 5;
+/// Posted when a verified install could not be started, so the update
+/// schedule retries instead of staying failed until restart.
+pub const UPDATE_INSTALL_FAILED_MESSAGE: u32 = WM_APP + 6;
 
 const APP_MESSAGE_IDS: &[u32] = &[
     TRAY_CALLBACK_MESSAGE,
@@ -24,6 +27,7 @@ const APP_MESSAGE_IDS: &[u32] = &[
     USAGE_READY_MESSAGE,
     UPDATE_CHECK_DONE_MESSAGE,
     UPDATE_REQUEST_EXIT_MESSAGE,
+    UPDATE_INSTALL_FAILED_MESSAGE,
 ];
 
 const fn ids_are_unique(ids: &[u32]) -> bool {
@@ -58,6 +62,10 @@ mod tests {
             ("USAGE_READY_MESSAGE", USAGE_READY_MESSAGE),
             ("UPDATE_CHECK_DONE_MESSAGE", UPDATE_CHECK_DONE_MESSAGE),
             ("UPDATE_REQUEST_EXIT_MESSAGE", UPDATE_REQUEST_EXIT_MESSAGE),
+            (
+                "UPDATE_INSTALL_FAILED_MESSAGE",
+                UPDATE_INSTALL_FAILED_MESSAGE,
+            ),
         ];
         assert_eq!(named.len(), APP_MESSAGE_IDS.len());
         for (i, (_, id)) in named.iter().enumerate() {

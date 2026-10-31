@@ -33,6 +33,27 @@ cargo mutants --file src/update.rs --output target\mutants-update-full-final-03 
   `src/update.rs` 313/335 lines, 30/32 functions, 51/58 branches. Branch
   coverage is not reported as C2 or MC/DC.
 
+## Update schedule while running (#110)
+
+The results above predate #110. Since #110, checks are no longer startup-only:
+`UpdateSchedule` in `src/update.rs` decides when the next automatic check is
+due, whether a result is announced, and whether it installs.
+
+- First check due at startup; then every hour plus 0-5 minutes of jitter.
+- Failed check or failed install: backoff 5, 10, 20, 40 minutes, capped at
+  1 hour; a GitHub `Retry-After` or exhausted rate-limit reset (403/429) is
+  honored, capped at 6 hours.
+- Only an automatic check with the auto-update setting on installs; a manual
+  check reports every result; an automatic check announces a version once.
+- After exit nothing is due and nothing installs; a clock moved backwards
+  makes the check due instead of stalling.
+- `schedule_tests` (`c2_schedule_*`, `c2_github_retry_hint_*`) cover these
+  rules; `pbt_schedule_always_reschedules_and_installs_only_when_allowed` runs
+  1,024 cases with seed `0x5EED_2026_1031_0110` and persists minimized failures
+  in `update-schedule-pbt-counterexamples.regressions`.
+- `tests/update_protocol_integration.rs` drives the schedule with the fake
+  GitHub API, including a release published while RunDog keeps running.
+
 ## Outside the non-live test scope
 
 - A live GitHub Release request/download.

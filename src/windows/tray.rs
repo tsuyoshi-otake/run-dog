@@ -222,7 +222,7 @@ impl TrayAdapter {
             | Effect::SaveSettings(_)
             | Effect::CommitSettings { .. }
             | Effect::CancelCommit { .. }
-            | Effect::CheckForUpdates { .. }
+            | Effect::CheckForUpdates
             | Effect::LaunchTaskManager
             | Effect::Quit => {}
         }
@@ -654,9 +654,10 @@ impl TrayAdapter {
         data
     }
 
-    pub fn notify_update_result(&mut self, state: &UpdateMenuState, notify_always: bool) {
-        if let Some(body) = update_balloon_text(super::i18n::current().menu(), state, notify_always)
-        {
+    /// Shows a finished check's result. The update schedule decides whether a
+    /// result is announced at all.
+    pub fn notify_update_result(&mut self, state: &UpdateMenuState) {
+        if let Some(body) = update_balloon_text(super::i18n::current().menu(), state) {
             self.show_balloon("RunDog", &body);
         }
     }
@@ -776,17 +777,13 @@ fn append_disabled(menu: HMENU, label: &str) {
 }
 
 #[must_use]
-fn update_balloon_text(
-    text: super::i18n::MenuText,
-    state: &UpdateMenuState,
-    notify_always: bool,
-) -> Option<String> {
+fn update_balloon_text(text: super::i18n::MenuText, state: &UpdateMenuState) -> Option<String> {
     match state {
-        UpdateMenuState::Current if notify_always => Some(text.balloon_up_to_date.to_owned()),
+        UpdateMenuState::Current => Some(text.balloon_up_to_date.to_owned()),
         UpdateMenuState::Available { version } => {
             Some(text.with_version(text.balloon_available, version))
         }
-        UpdateMenuState::Failed if notify_always => Some(text.balloon_check_failed.to_owned()),
+        UpdateMenuState::Failed => Some(text.balloon_check_failed.to_owned()),
         _ => None,
     }
 }
@@ -1162,34 +1159,35 @@ mod tests {
         assert_eq!(en.display_codex_week, "Codex week");
         assert_eq!(en.startup(true), "Launch at startup: On");
         assert_eq!(en.startup(false), "Launch at startup: Off");
-        assert_eq!(en.auto_update(true), "Auto-update on startup: On");
-        assert_eq!(en.auto_update(false), "Auto-update on startup: Off");
+        assert_eq!(en.auto_update(true), "Auto-update: On");
+        assert_eq!(en.auto_update(false), "Auto-update: Off");
         assert_eq!(en.pinned_flyout(true), "Pin monitor card: On");
         assert_eq!(en.pinned_flyout(false), "Pin monitor card: Off");
         assert_eq!(en.about, "About");
         assert_eq!(
-            update_balloon_text(en, &UpdateMenuState::Current, true).as_deref(),
+            update_balloon_text(en, &UpdateMenuState::Current).as_deref(),
             Some("RunDog is up to date.")
-        );
-        assert_eq!(
-            update_balloon_text(en, &UpdateMenuState::Current, false),
-            None
         );
         assert_eq!(
             update_balloon_text(
                 en,
                 &UpdateMenuState::Available {
                     version: "1.1.1".to_owned()
-                },
-                false
+                }
             )
             .as_deref(),
             Some("RunDog v1.1.1 is available.")
         );
         assert_eq!(
-            update_balloon_text(en, &UpdateMenuState::Failed, true).as_deref(),
+            update_balloon_text(en, &UpdateMenuState::Failed).as_deref(),
             Some("Could not check for updates.")
         );
-        assert_eq!(update_balloon_text(en, &UpdateMenuState::Idle, true), None);
+        for silent in [
+            UpdateMenuState::Idle,
+            UpdateMenuState::Checking,
+            UpdateMenuState::Launching,
+        ] {
+            assert_eq!(update_balloon_text(en, &silent), None);
+        }
     }
 }

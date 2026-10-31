@@ -66,8 +66,9 @@ Details: [privacy page](https://tsuyoshi-otake.github.io/run-dog/privacy.html).
 Network use that the user or installer requests is listed in
 [docs/PRIVACY.md](docs/PRIVACY.md). Short form:
 
-- GitHub Releases (`api.github.com` / `github.com`): once at startup, or Check
-  again. Download only after Install.
+- GitHub Releases (`api.github.com` / `github.com`): at startup, about once an
+  hour while running, or Check again. Download only after Install or, with
+  auto-update on, after an automatic check finds a newer release.
 - Claude: `api.anthropic.com` `/api/oauth/usage` about every 5 minutes; token
   refresh may rewrite `.credentials.json`.
 - Codex: `chatgpt.com` `/backend-api/wham/usage` about every 60 seconds.

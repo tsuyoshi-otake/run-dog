@@ -28,18 +28,26 @@ use windows_sys::Win32::{
         WinHttpSendRequest, WinHttpSetOption, WinHttpSetTimeouts,
         WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_DISABLE_REDIRECTS, WINHTTP_FLAG_SECURE,
         WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2, WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3,
-        WINHTTP_OPTION_DISABLE_FEATURE, WINHTTP_OPTION_SECURE_PROTOCOLS, WINHTTP_QUERY_FLAG_NUMBER,
-        WINHTTP_QUERY_LOCATION, WINHTTP_QUERY_STATUS_CODE,
+        WINHTTP_OPTION_DISABLE_FEATURE, WINHTTP_OPTION_SECURE_PROTOCOLS, WINHTTP_QUERY_CUSTOM,
+        WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_LOCATION, WINHTTP_QUERY_STATUS_CODE,
     },
     UI::WindowsAndMessaging::PostMessageW,
 };
 
 use crate::update::{
-    github_release_download_path, parse_checksum_manifest, select_update, Release, ReleaseAsset,
-    UpdateCandidate, UpdateRepository, Version, CHECKSUM_ASSET_NAME, INSTALLER_ASSET_NAME,
+    github_release_download_path, github_retry_not_before_ms, parse_checksum_manifest,
+    select_update, Release, ReleaseAsset, UpdateCandidate, UpdateCheckOutcome, UpdateRepository,
+    Version, CHECKSUM_ASSET_NAME, INSTALLER_ASSET_NAME, UPDATE_CHECK_MAX_JITTER_MS,
 };
 
-pub use super::messages::{UPDATE_CHECK_DONE_MESSAGE, UPDATE_REQUEST_EXIT_MESSAGE};
+pub use super::messages::{
+    UPDATE_CHECK_DONE_MESSAGE, UPDATE_INSTALL_FAILED_MESSAGE, UPDATE_REQUEST_EXIT_MESSAGE,
+};
+
+/// Wakes the update schedule. Due-ness is wall-clock, so this only bounds how
+/// late a check can start after it becomes due (including after sleep).
+pub const UPDATE_TIMER_ID: usize = 6;
+pub const UPDATE_TIMER_INTERVAL_MS: u32 = 60_000;
 
 const API_HOST: &str = "api.github.com";
 const RELEASE_HOST: &str = "github.com";
@@ -78,7 +86,7 @@ enum UpdateState {
     Available(UpdateCandidate),
     Downloading(UpdateCandidate),
     Launching,
-    Failed,
+    Failed { retry_not_before_ms: Option<u64> },
 }
 
 impl From<&UpdateState> for UpdateMenuState {
@@ -94,7 +102,7 @@ impl From<&UpdateState> for UpdateMenuState {
                 version: candidate.version.to_string(),
             },
             UpdateState::Launching => Self::Launching,
-            UpdateState::Failed => Self::Failed,
+            UpdateState::Failed { .. } => Self::Failed,
         }
     }
 }
@@ -129,13 +137,12 @@ impl UpdateController {
         UpdateMenuState::from(&*lock_state(&self.state))
     }
 
-    /// Starts an asynchronous check if no check or install is already active.
-    ///
-    /// `notify_always` is true for a user-initiated Check. Startup checks only
-    /// surface a balloon when a newer release is actually available.
-    pub fn check_for_updates(&self, hwnd: HWND, notify_always: bool) {
+    /// Starts an asynchronous check if no check or install is already active
+    /// and returns whether one started. A started check always ends with
+    /// `UPDATE_CHECK_DONE_MESSAGE`, after which `check_outcome` reports it.
+    pub fn check_for_updates(&self, hwnd: HWND) -> bool {
         if !begin_check(&self.state) {
-            return;
+            return false;
         }
 
         let state = Arc::clone(&self.state);
@@ -143,7 +150,6 @@ impl UpdateController {
         let current_version = self.current_version.clone();
         let cancelled = Arc::clone(&self.cancelled);
         let hwnd_bits = hwnd as usize;
-        let notify = usize::from(notify_always);
         let worker = thread::Builder::new()
             .name("run-dog-update-check".to_owned())
             .spawn(move || {
@@ -153,30 +159,56 @@ impl UpdateController {
                     match fetch_latest_release(&repository, &current_version) {
                         Ok(Some(candidate)) => UpdateState::Available(candidate),
                         Ok(None) => UpdateState::Current,
-                        Err(()) => UpdateState::Failed,
+                        Err(retry_not_before_ms) => UpdateState::Failed {
+                            retry_not_before_ms,
+                        },
                     }
                 };
 
                 if !cancelled.load(Ordering::Acquire) {
                     *lock_state(&state) = next_state;
-                    let _ = unsafe {
-                        PostMessageW(hwnd_bits as HWND, UPDATE_CHECK_DONE_MESSAGE, notify, 0)
-                    };
+                    let _ =
+                        unsafe { PostMessageW(hwnd_bits as HWND, UPDATE_CHECK_DONE_MESSAGE, 0, 0) };
                 }
             });
 
         if worker.is_err() {
-            *lock_state(&self.state) = UpdateState::Failed;
-            if notify_always && !hwnd.is_null() {
-                let _ = unsafe { PostMessageW(hwnd, UPDATE_CHECK_DONE_MESSAGE, 1, 0) };
+            *lock_state(&self.state) = UpdateState::Failed {
+                retry_not_before_ms: None,
+            };
+            if !hwnd.is_null() {
+                let _ = unsafe { PostMessageW(hwnd, UPDATE_CHECK_DONE_MESSAGE, 0, 0) };
             }
+        }
+        true
+    }
+
+    /// The finished check's result for the update schedule; `None` while a
+    /// check or install is still running or before the first check.
+    #[must_use]
+    pub fn check_outcome(&self) -> Option<UpdateCheckOutcome> {
+        match &*lock_state(&self.state) {
+            UpdateState::Current => Some(UpdateCheckOutcome::Current),
+            UpdateState::Available(candidate) => {
+                Some(UpdateCheckOutcome::Available(candidate.version.clone()))
+            }
+            UpdateState::Failed {
+                retry_not_before_ms,
+            } => Some(UpdateCheckOutcome::Failed {
+                retry_not_before_ms: *retry_not_before_ms,
+            }),
+            UpdateState::Idle
+            | UpdateState::Checking
+            | UpdateState::Downloading(_)
+            | UpdateState::Launching => None,
         }
     }
 
     /// Streams, verifies, and starts the available installer without blocking
-    /// the message-loop thread. Used by the tray Install action and by startup
-    /// auto-update after a newer release is selected. A successful launch
-    /// requests orderly shutdown.
+    /// the message-loop thread. Used by the tray Install action and by
+    /// automatic update after a newer release is selected. A successful launch
+    /// requests orderly shutdown; a failure posts
+    /// `UPDATE_INSTALL_FAILED_MESSAGE` so the schedule retries.
     pub fn install_available(&self, hwnd: HWND) {
         let candidate = {
             let mut state = lock_state(&self.state);
@@ -207,7 +239,10 @@ impl UpdateController {
             });
 
         if worker.is_err() {
-            *lock_state(&self.state) = UpdateState::Failed;
+            *lock_state(&self.state) = UpdateState::Failed {
+                retry_not_before_ms: None,
+            };
+            let _ = unsafe { PostMessageW(hwnd as HWND, UPDATE_INSTALL_FAILED_MESSAGE, 0, 0) };
         }
     }
 
@@ -259,25 +294,44 @@ fn install_candidate(
         }
         Ok(()) | Err(()) => {
             if !cancelled.load(Ordering::Acquire) {
-                *lock_state(state) = UpdateState::Failed;
+                *lock_state(state) = UpdateState::Failed {
+                    retry_not_before_ms: None,
+                };
+                let _ = unsafe { PostMessageW(hwnd, UPDATE_INSTALL_FAILED_MESSAGE, 0, 0) };
             }
         }
     }
 }
 
+/// `Err` carries GitHub's earliest retry time when the API rate-limited us.
 fn fetch_latest_release(
     repository: &UpdateRepository,
     current_version: &Version,
-) -> Result<Option<UpdateCandidate>, ()> {
+) -> Result<Option<UpdateCandidate>, Option<u64>> {
     let path = format!("/repos/{}/releases/latest", repository.as_str());
-    let (status, response) =
-        https_get(API_HOST, &path, API_HEADERS, MAX_RELEASE_METADATA_BYTES).map_err(|_| ())?;
+    let response = https_request(
+        "GET",
+        API_HOST,
+        &path,
+        API_HEADERS,
+        None,
+        MAX_RELEASE_METADATA_BYTES,
+    )
+    .map_err(|_| None)?;
 
-    if !latest_release_body_is_available(status)? {
+    if !latest_release_body_is_available(response.status).map_err(|()| {
+        github_retry_not_before_ms(
+            unix_now_ms(),
+            response.status,
+            response.retry.retry_after.as_deref(),
+            response.retry.ratelimit_remaining.as_deref(),
+            response.retry.ratelimit_reset.as_deref(),
+        )
+    })? {
         return Ok(None);
     }
 
-    let release: GitHubRelease = serde_json::from_slice(&response).map_err(|_| ())?;
+    let release: GitHubRelease = serde_json::from_slice(&response.body).map_err(|_| None)?;
     let release = Release {
         tag_name: release.tag_name,
         draft: release.draft,
@@ -291,7 +345,7 @@ fn fetch_latest_release(
             })
             .collect(),
     };
-    select_update(repository, current_version, &release).map_err(|_| ())
+    select_update(repository, current_version, &release).map_err(|_| None)
 }
 
 /// Maps GitHub's latest-release response into the update protocol's terminal
@@ -364,7 +418,7 @@ fn download_installer(
 
     let download_result = (|| {
         let mut file = File::create(&partial_path).map_err(|error| error.to_string())?;
-        let status = https_request_to_writer(
+        let (status, _) = https_request_to_writer(
             "GET",
             RELEASE_HOST,
             &asset_path,
@@ -648,8 +702,34 @@ fn https_bytes(
     payload: Option<&[u8]>,
     maximum_bytes: usize,
 ) -> Result<(u32, Vec<u8>), String> {
+    https_request(verb, host, path, headers, payload, maximum_bytes)
+        .map(|response| (response.status, response.body))
+}
+
+/// Rate-limit headers kept from a 403/429 response; empty for any other status.
+#[derive(Debug, Default)]
+struct RetryHeaders {
+    retry_after: Option<String>,
+    ratelimit_remaining: Option<String>,
+    ratelimit_reset: Option<String>,
+}
+
+struct HttpResponse {
+    status: u32,
+    body: Vec<u8>,
+    retry: RetryHeaders,
+}
+
+fn https_request(
+    verb: &str,
+    host: &str,
+    path: &str,
+    headers: &str,
+    payload: Option<&[u8]>,
+    maximum_bytes: usize,
+) -> Result<HttpResponse, String> {
     let mut body = Vec::new();
-    let status = https_request_to_writer(
+    let (status, retry) = https_request_to_writer(
         verb,
         host,
         path,
@@ -659,7 +739,11 @@ fn https_bytes(
         &mut body,
         None,
     )?;
-    Ok((status, body))
+    Ok(HttpResponse {
+        status,
+        body,
+        retry,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -672,7 +756,7 @@ fn https_request_to_writer(
     maximum_bytes: usize,
     writer: &mut impl Write,
     cancelled: Option<&AtomicBool>,
-) -> Result<u32, String> {
+) -> Result<(u32, RetryHeaders), String> {
     let policy = redirect_policy_for_host(host);
     let mut host = host.to_owned();
     let mut path = path.to_owned();
@@ -782,7 +866,16 @@ fn https_request_to_writer(
             continue;
         }
         if status != 200 {
-            return Ok(status);
+            let retry = if matches!(status, 403 | 429) {
+                RetryHeaders {
+                    retry_after: response_header(&request, "Retry-After"),
+                    ratelimit_remaining: response_header(&request, "X-RateLimit-Remaining"),
+                    ratelimit_reset: response_header(&request, "X-RateLimit-Reset"),
+                }
+            } else {
+                RetryHeaders::default()
+            };
+            return Ok((status, retry));
         }
 
         let mut bytes_written = 0_usize;
@@ -825,7 +918,7 @@ fn https_request_to_writer(
             bytes_written += bytes_read;
         }
 
-        return Ok(status);
+        return Ok((status, RetryHeaders::default()));
     }
 
     Err("HTTPS redirect limit exceeded".to_owned())
@@ -900,6 +993,33 @@ fn response_location(request: &HttpHandle) -> Result<String, String> {
         .map_err(|_| "Location header is not UTF-16".to_owned())
 }
 
+/// A response header by name; `None` when absent or unreadable.
+fn response_header(request: &HttpHandle, name: &str) -> Option<String> {
+    let name = wide(name);
+    let mut buffer = [0_u16; 256];
+    let mut size = (buffer.len() * 2) as u32;
+    let mut index = 0_u32;
+    if unsafe {
+        WinHttpQueryHeaders(
+            request.0,
+            WINHTTP_QUERY_CUSTOM,
+            name.as_ptr(),
+            buffer.as_mut_ptr().cast::<c_void>(),
+            &mut size,
+            &mut index,
+        )
+    } == 0
+    {
+        return None;
+    }
+    let units = ((size as usize) / 2).min(buffer.len());
+    let terminator = buffer[..units]
+        .iter()
+        .position(|unit| *unit == 0)
+        .unwrap_or(units);
+    String::from_utf16(&buffer[..terminator]).ok()
+}
+
 fn is_cancelled(cancelled: Option<&AtomicBool>) -> bool {
     cancelled.is_some_and(|value| value.load(Ordering::Acquire))
 }
@@ -970,6 +1090,28 @@ fn last_error(operation: &str) -> String {
     format!("{operation} failed with Win32 error {code}")
 }
 
+/// Wall-clock milliseconds since the Unix epoch: the time base of
+/// `UpdateSchedule` and of GitHub's `X-RateLimit-Reset` header.
+#[must_use]
+pub fn unix_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
+/// Random spread for the next check so instances behind one office IP do not
+/// reach the unauthenticated GitHub API in the same minute.
+#[must_use]
+pub fn update_check_jitter_ms() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u64(unix_now_ms());
+    hasher.finish() % (UPDATE_CHECK_MAX_JITTER_MS + 1)
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -1036,12 +1178,14 @@ mod tests {
     }
 
     #[test]
-    fn c2_startup_update_gate_rejects_each_active_state_and_allows_terminal_rechecks() {
+    fn c2_update_check_begin_rejects_each_active_state_and_allows_terminal_rechecks() {
         for state in [
             UpdateState::Idle,
             UpdateState::Current,
             UpdateState::Available(candidate()),
-            UpdateState::Failed,
+            UpdateState::Failed {
+                retry_not_before_ms: None,
+            },
         ] {
             let state = Mutex::new(state);
             assert!(begin_check(&state));
@@ -1059,7 +1203,7 @@ mod tests {
     }
 
     #[test]
-    fn component_startup_update_gate_allows_exactly_one_concurrent_claim() {
+    fn component_update_check_begin_allows_exactly_one_concurrent_claim() {
         let state = Arc::new(Mutex::new(UpdateState::Idle));
         let successful_claims = Arc::new(AtomicUsize::new(0));
 

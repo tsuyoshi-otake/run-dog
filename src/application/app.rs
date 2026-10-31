@@ -168,10 +168,8 @@ impl App {
             Effect::SetFpsMenu(self.settings.fps_limit),
             Effect::SetDisplayMenu(self.settings.display_mode),
             Effect::SetStartupMenu(self.settings.launch_at_startup),
-            Effect::SetAutoUpdateMenu(self.settings.auto_update_on_startup),
-            Effect::CheckForUpdates {
-                auto_install: self.settings.auto_update_on_startup,
-            },
+            Effect::SetAutoUpdateMenu(self.settings.auto_update),
+            Effect::CheckForUpdates,
         ]
     }
 
@@ -350,12 +348,9 @@ impl App {
         }
         let previous = self.settings;
         let mut settings = self.settings;
-        settings.auto_update_on_startup = !settings.auto_update_on_startup;
+        settings.auto_update = !settings.auto_update;
         let mut effects = self.begin_commit(settings, previous, false);
-        effects.insert(
-            0,
-            Effect::SetAutoUpdateMenu(settings.auto_update_on_startup),
-        );
+        effects.insert(0, Effect::SetAutoUpdateMenu(settings.auto_update));
         effects
     }
 
@@ -410,7 +405,7 @@ impl App {
                 Effect::SetFpsMenu(self.settings.fps_limit),
                 Effect::SetDisplayMenu(self.settings.display_mode),
                 Effect::SetStartupMenu(self.settings.launch_at_startup),
-                Effect::SetAutoUpdateMenu(self.settings.auto_update_on_startup),
+                Effect::SetAutoUpdateMenu(self.settings.auto_update),
             ];
         }
 
@@ -421,7 +416,7 @@ impl App {
                 Effect::SetFpsMenu(self.settings.fps_limit),
                 Effect::SetDisplayMenu(self.settings.display_mode),
                 Effect::SetStartupMenu(self.settings.launch_at_startup),
-                Effect::SetAutoUpdateMenu(self.settings.auto_update_on_startup),
+                Effect::SetAutoUpdateMenu(self.settings.auto_update),
             ];
         }
 
@@ -437,17 +432,15 @@ impl App {
             Effect::SetFpsMenu(self.settings.fps_limit),
             Effect::SetDisplayMenu(self.settings.display_mode),
             Effect::SetStartupMenu(self.settings.launch_at_startup),
-            Effect::SetAutoUpdateMenu(self.settings.auto_update_on_startup),
+            Effect::SetAutoUpdateMenu(self.settings.auto_update),
         ];
         if notify_startup {
             effects.push(Effect::NotifyStartupChanged(
                 self.settings.launch_at_startup,
             ));
         }
-        if pending.previous.auto_update_on_startup != self.settings.auto_update_on_startup {
-            effects.push(Effect::NotifyAutoUpdateChanged(
-                self.settings.auto_update_on_startup,
-            ));
+        if pending.previous.auto_update != self.settings.auto_update {
+            effects.push(Effect::NotifyAutoUpdateChanged(self.settings.auto_update));
         }
         if previous_resolved_theme != self.resolved_theme
             || previous_display_mode != self.settings.display_mode
@@ -559,31 +552,29 @@ mod tests {
             kind: TimerKind::Animation,
             interval_ms: 200,
         }));
-        assert!(effects.contains(&Effect::CheckForUpdates { auto_install: true }));
+        assert!(effects.contains(&Effect::CheckForUpdates));
         assert!(effects.contains(&Effect::SetAutoUpdateMenu(true)));
         assert!(app.start().is_empty());
     }
 
     #[test]
-    fn c2_startup_auto_update_off_still_checks_but_does_not_auto_install() {
+    fn c2_startup_checks_for_updates_even_with_auto_update_off() {
         let mut app = App::new(
             AppSettings {
-                auto_update_on_startup: false,
+                auto_update: false,
                 ..AppSettings::default()
             },
             ResolvedTheme::Dark,
         );
         let effects = app.start();
-        assert!(effects.contains(&Effect::CheckForUpdates {
-            auto_install: false
-        }));
+        assert!(effects.contains(&Effect::CheckForUpdates));
         assert!(effects.contains(&Effect::SetAutoUpdateMenu(false)));
     }
 
     #[test]
     fn c2_auto_update_toggle_waits_for_durable_ack() {
         let mut app = started_app();
-        assert!(app.snapshot().settings.auto_update_on_startup);
+        assert!(app.snapshot().settings.auto_update);
         let effects = app.dispatch(Event::ToggleAutoUpdate);
         assert!(effects.contains(&Effect::SetAutoUpdateMenu(false)));
         assert!(matches!(
@@ -592,26 +583,26 @@ mod tests {
                 .find(|effect| matches!(effect, Effect::CommitSettings { .. })),
             Some(Effect::CommitSettings {
                 settings: AppSettings {
-                    auto_update_on_startup: false,
+                    auto_update: false,
                     ..
                 },
                 sync_run_entry: false,
                 ..
             })
         ));
-        assert!(app.snapshot().settings.auto_update_on_startup);
+        assert!(app.snapshot().settings.auto_update);
         assert!(app.dispatch(Event::ToggleAutoUpdate).is_empty());
 
         let effects = app.dispatch(Event::SettingsCommitFinished {
             settings: AppSettings {
-                auto_update_on_startup: false,
+                auto_update: false,
                 ..AppSettings::default()
             },
             status: CommitStatus::Applied,
             new_generation: 1,
             last_operation_id: 1,
         });
-        assert!(!app.snapshot().settings.auto_update_on_startup);
+        assert!(!app.snapshot().settings.auto_update);
         assert!(effects.contains(&Effect::SetAutoUpdateMenu(false)));
         assert!(effects.contains(&Effect::NotifyAutoUpdateChanged(false)));
     }

@@ -82,7 +82,7 @@ export const I18N = {
       },
       {
         q: "外部にデータを送りますか？",
-        a: "起動時に GitHub Releases を一度確認します。Claude / Codex があるときだけ各社の上限 API を呼びます。RunDog 自身のサーバーへは送りません。生プロンプトは送りません。広告や解析 SDK はありません。",
+        a: "起動時と起動中の約 1 時間ごとに GitHub Releases を確認します。Claude / Codex があるときだけ各社の上限 API を呼びます。RunDog 自身のサーバーへは送りません。生プロンプトは送りません。広告や解析 SDK はありません。",
       },
       {
         q: "SmartScreen の警告が出ますか？",
@@ -103,7 +103,7 @@ export const I18N = {
     privacyBody: [
       "RunDog はアカウントを作りません。CPU・メモリ・GPU・ストレージは Windows の API で端末内だけ読みます。設定は HKCU\\Software\\SystemExe\\RunDog に保存します。",
       "読むファイルは Claude の projects JSONL と .credentials.json、Codex の sessions JSONL と auth.json、および RunDog 自身の %LOCALAPPDATA%\\RunDog\\usage です。JSONL の生プロンプトや応答を上限取得で送りません。",
-      "送信先は GitHub（api.github.com / github.com、起動時の更新確認と明示した導入）、Anthropic（api.anthropic.com の usage、必要時のみ platform.claude.com または console.anthropic.com の token refresh）、OpenAI（chatgpt.com の wham/usage）です。RunDog 自身のサーバーへは送りません。",
+      "送信先は GitHub（api.github.com / github.com、起動時と約 1 時間ごとの更新確認、自動更新または明示した導入）、Anthropic（api.anthropic.com の usage、必要時のみ platform.claude.com または console.anthropic.com の token refresh）、OpenAI（chatgpt.com の wham/usage）です。RunDog 自身のサーバーへは送りません。",
       "Claude の上限問い合わせは約 5 分ごと、Codex は約 60 秒ごとです。期限切れや認証失敗のとき Claude の refresh が走り、.credentials.json を ReplaceFileW で更新することがあります。Codex の auth.json は読み取りのみです。",
       "ベンダー上限の自動問い合わせは、Claude / Codex が端末にあるとき従来どおり On です。新しい「Automatic vendor usage-limit queries」設定はメニューと UX を壊すので見送りました。止めたい場合は認証情報か CLI を外してください。",
       "広告、解析、クラッシュ報告の SDK は入れていません。",
@@ -178,7 +178,7 @@ export const I18N = {
       },
       {
         q: "Does it send data off the machine?",
-        a: "It checks GitHub Releases once at startup. If Claude or Codex is present it queries those vendors' limit APIs. Nothing goes to a RunDog-owned server. Raw prompts are not sent. There is no ads or analytics SDK.",
+        a: "It checks GitHub Releases at startup and about once an hour while running. If Claude or Codex is present it queries those vendors' limit APIs. Nothing goes to a RunDog-owned server. Raw prompts are not sent. There is no ads or analytics SDK.",
       },
       {
         q: "Will SmartScreen warn me?",
@@ -199,7 +199,7 @@ export const I18N = {
     privacyBody: [
       "RunDog does not create an account. CPU, memory, GPU, and storage are read locally through Windows APIs. Settings live in HKCU\\Software\\SystemExe\\RunDog.",
       "It may read Claude projects JSONL and .credentials.json, Codex sessions JSONL and auth.json, plus RunDog's own %LOCALAPPDATA%\\RunDog\\usage store. Limit fetch does not send raw prompts or responses.",
-      "Destinations are GitHub (api.github.com / github.com — startup update check and explicit Install), Anthropic (api.anthropic.com usage; token refresh on platform.claude.com or console.anthropic.com when needed), and OpenAI (chatgpt.com wham/usage). There is no RunDog-owned server.",
+      "Destinations are GitHub (api.github.com / github.com — update check at startup and about hourly, plus auto-update or explicit Install), Anthropic (api.anthropic.com usage; token refresh on platform.claude.com or console.anthropic.com when needed), and OpenAI (chatgpt.com wham/usage). There is no RunDog-owned server.",
       "Claude limit queries run about every 5 minutes; Codex about every 60 seconds. An expired or unauthorized Claude token may refresh and rewrite .credentials.json via ReplaceFileW. Codex auth.json is read-only.",
       "Automatic vendor limit queries stay On when those CLIs are present. A new Automatic vendor usage-limit queries setting is deferred so the tray UX is not broken. Remove credentials or the CLI to stop queries.",
       "There is no advertising, analytics, or crash-reporting SDK.",
@@ -273,7 +273,7 @@ export const I18N = {
       },
       {
         q: "会把数据发送到外部吗？",
-        a: "启动时会向 GitHub Releases 检查一次更新。仅在使用 Claude 或 Codex 时，才会用本机已有的凭据查询各公司的限额 API。没有广告或分析 SDK。",
+        a: "启动时及运行期间约每小时向 GitHub Releases 检查更新。仅在使用 Claude 或 Codex 时，才会用本机已有的凭据查询各公司的限额 API。没有广告或分析 SDK。",
       },
       {
         q: "SmartScreen 会警告吗？",
@@ -366,7 +366,7 @@ export const I18N = {
       },
       {
         q: "會把資料傳送到外部嗎？",
-        a: "啟動時會向 GitHub Releases 檢查一次更新。僅在使用 Claude 或 Codex 時，才會用本機既有的認證資料查詢各公司的限額 API。沒有廣告或分析 SDK。",
+        a: "啟動時及執行期間約每小時向 GitHub Releases 檢查更新。僅在使用 Claude 或 Codex 時，才會用本機既有的認證資料查詢各公司的限額 API。沒有廣告或分析 SDK。",
       },
       {
         q: "SmartScreen 會警告嗎？",
@@ -459,7 +459,7 @@ export const I18N = {
       },
       {
         q: "데이터를 외부로 보내나요?",
-        a: "시작할 때 GitHub Releases에서 업데이트를 한 번 확인합니다. Claude나 Codex를 쓰는 경우에만 이미 있는 자격 증명으로 각 회사의 한도 API를 조회합니다. 광고나 분석 SDK는 없습니다.",
+        a: "시작할 때와 실행 중 약 1시간마다 GitHub Releases에서 업데이트를 확인합니다. Claude나 Codex를 쓰는 경우에만 이미 있는 자격 증명으로 각 회사의 한도 API를 조회합니다. 광고나 분석 SDK는 없습니다.",
       },
       {
         q: "SmartScreen 경고가 나오나요?",
@@ -553,7 +553,7 @@ export const I18N = {
       },
       {
         q: "Có gửi dữ liệu ra ngoài không?",
-        a: "Khi khởi động sẽ kiểm tra GitHub Releases một lần. Nếu dùng Claude hoặc Codex, có thể gọi API hạn mức bằng thông tin xác thực đã có trên máy. Không có SDK quảng cáo hay phân tích.",
+        a: "Kiểm tra GitHub Releases khi khởi động và khoảng mỗi giờ khi đang chạy. Nếu dùng Claude hoặc Codex, có thể gọi API hạn mức bằng thông tin xác thực đã có trên máy. Không có SDK quảng cáo hay phân tích.",
       },
       {
         q: "SmartScreen có cảnh báo không?",
@@ -647,7 +647,7 @@ export const I18N = {
       },
       {
         q: "Envoie-t-il des données à l'extérieur ?",
-        a: "Au démarrage, il interroge GitHub Releases une fois. Si vous utilisez Claude ou Codex, il peut interroger leurs API de plafond avec des identifiants déjà présents. Pas de SDK pub ou d'analyse.",
+        a: "Il interroge GitHub Releases au démarrage puis environ toutes les heures. Si vous utilisez Claude ou Codex, il peut interroger leurs API de plafond avec des identifiants déjà présents. Pas de SDK pub ou d'analyse.",
       },
       {
         q: "SmartScreen va-t-il m'avertir ?",
@@ -741,7 +741,7 @@ export const I18N = {
       },
       {
         q: "Werden Daten nach außen gesendet?",
-        a: "Beim Start prüft es einmal GitHub Releases. Wenn Sie Claude oder Codex nutzen, kann es deren Limit-APIs mit bereits vorhandenen Anmeldedaten abfragen. Kein Werbe- oder Analyse-SDK.",
+        a: "Es prüft GitHub Releases beim Start und danach etwa stündlich. Wenn Sie Claude oder Codex nutzen, kann es deren Limit-APIs mit bereits vorhandenen Anmeldedaten abfragen. Kein Werbe- oder Analyse-SDK.",
       },
       {
         q: "Warnt SmartScreen?",
@@ -835,7 +835,7 @@ export const I18N = {
       },
       {
         q: "¿Envía datos al exterior?",
-        a: "Al arrancar consulta GitHub Releases una vez. Si usas Claude o Codex, puede consultar sus API de límites con credenciales ya presentes. No hay SDK de anuncios ni de analítica.",
+        a: "Consulta GitHub Releases al arrancar y luego aproximadamente cada hora. Si usas Claude o Codex, puede consultar sus API de límites con credenciales ya presentes. No hay SDK de anuncios ni de analítica.",
       },
       {
         q: "¿Avisará SmartScreen?",
@@ -929,7 +929,7 @@ export const I18N = {
       },
       {
         q: "Отправляет ли оно данные наружу?",
-        a: "При запуске один раз проверяет GitHub Releases. Если вы пользуетесь Claude или Codex, может запросить их API лимитов с уже имеющимися учётными данными. Нет SDK рекламы или аналитики.",
+        a: "Проверяет GitHub Releases при запуске и затем примерно раз в час. Если вы пользуетесь Claude или Codex, может запросить их API лимитов с уже имеющимися учётными данными. Нет SDK рекламы или аналитики.",
       },
       {
         q: "Предупредит ли SmartScreen?",
@@ -1023,7 +1023,7 @@ export const I18N = {
       },
       {
         q: "Invia dati all'esterno?",
-        a: "All'avvio controlla GitHub Releases una volta. Se usi Claude o Codex, può interrogare le loro API dei limiti con credenziali già presenti. Nessun SDK di pubblicità o analitica.",
+        a: "Controlla GitHub Releases all'avvio e poi circa ogni ora. Se usi Claude o Codex, può interrogare le loro API dei limiti con credenziali già presenti. Nessun SDK di pubblicità o analitica.",
       },
       {
         q: "SmartScreen avviserà?",
@@ -1117,7 +1117,7 @@ export const I18N = {
       },
       {
         q: "ส่งข้อมูลออกเครื่องไหม?",
-        a: "ตอนเริ่มจะเช็ก GitHub Releases ครั้งเดียว ถ้าใช้ Claude หรือ Codex อาจเรียก API โควตาด้วยข้อมูลรับรองที่มีอยู่แล้ว ไม่มี SDK โฆษณาหรือวิเคราะห์",
+        a: "จะเช็ก GitHub Releases ตอนเริ่มและประมาณทุกชั่วโมงระหว่างทำงาน ถ้าใช้ Claude หรือ Codex อาจเรียก API โควตาด้วยข้อมูลรับรองที่มีอยู่แล้ว ไม่มี SDK โฆษณาหรือวิเคราะห์",
       },
       {
         q: "SmartScreen จะเตือนไหม?",
