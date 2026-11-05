@@ -13,13 +13,24 @@ use super::{
 
 const USAGE_STATE_HEADER_V1: &str = "rundog-usage-state-1";
 pub const USAGE_STATE_HEADER: &str = "rundog-usage-state-2";
-// Version 6 invalidates v1.1.38 cache markers without losing scan progress.
-pub const USAGE_STATE_SCHEMA_VERSION: u32 = 6;
+// Version 7 adds per-file cost contributions. States written without them
+// rebuild once so a rewritten transcript can swap its contribution instead
+// of double counting.
+pub const USAGE_STATE_SCHEMA_VERSION: u32 = 7;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum CursorKind {
     Claude,
     Codex,
+}
+
+/// One day's worth of a source file's contribution to the aggregate.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct FileDayContrib {
+    /// Month-scope cost nanos for that day.
+    pub nanos: u64,
+    pub input: u64,
+    pub output: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -42,6 +53,11 @@ pub struct UsageCursor {
     /// Last month in which new bytes were consumed. Missing legacy values
     /// conservatively use the checkpoint's aggregate month during restore.
     pub active_month: Option<u32>,
+    /// Per-day cost and token shares this file contributed to the aggregate.
+    /// A rebuild subtracts this contribution before replaying the file, so a
+    /// rewritten transcript replaces its share instead of billing every
+    /// retained event a second time.
+    pub contrib_days: Vec<(u32, FileDayContrib)>,
 }
 
 /// Why a cursor was rebuilt instead of appended. No paths or payloads.
@@ -97,6 +113,7 @@ impl UsageState {
                     last_model: None,
                     seen_keys: Vec::new(),
                     claude_pending: Vec::new(),
+                    contrib_days: Vec::new(),
                 }
             })
             .collect();
@@ -224,6 +241,14 @@ impl UsageState {
                     key.month
                 ));
             }
+            let mut contrib_days = cursor.contrib_days.clone();
+            contrib_days.sort_unstable_by_key(|(day, _)| *day);
+            for (day, contrib) in contrib_days {
+                out.push_str(&format!(
+                    "contrib_day={kind}\t{}\t{day}\t{}\t{}\t{}\n",
+                    cursor.logical_id, contrib.nanos, contrib.input, contrib.output
+                ));
+            }
             for event in &cursor.claude_pending {
                 if cursor.kind != CursorKind::Claude || !is_safe_model(&event.model) {
                     continue;
@@ -295,6 +320,8 @@ impl UsageState {
         let mut models: Vec<(CursorKind, String, String)> = Vec::new();
         let mut seen_keys: HashMap<(CursorKind, String), Vec<UsageDedupeKey>> = HashMap::new();
         let mut pending_by_cursor: HashMap<(CursorKind, String), Vec<ClaudePendingUsage>> =
+            HashMap::new();
+        let mut contrib_days: HashMap<(CursorKind, String), Vec<(u32, FileDayContrib)>> =
             HashMap::new();
         for line in lines {
             if line.is_empty() {
@@ -401,6 +428,25 @@ impl UsageState {
                     return None;
                 }
                 keys.push(key);
+            } else if let Some(value) = line.strip_prefix("contrib_day=") {
+                let parts: Vec<&str> = value.split('\t').collect();
+                if parts.len() != 6 || parts[1].is_empty() {
+                    return None;
+                }
+                let kind = parse_cursor_kind(parts[0])?;
+                let day: u32 = parts[2].parse().ok()?;
+                let days = contrib_days.entry((kind, parts[1].to_owned())).or_default();
+                if days.iter().any(|(existing, _)| *existing == day) {
+                    return None;
+                }
+                days.push((
+                    day,
+                    FileDayContrib {
+                        nanos: parts[3].parse().ok()?,
+                        input: parts[4].parse().ok()?,
+                        output: parts[5].parse().ok()?,
+                    },
+                ));
             } else if line.starts_with("codex_total=") || line.starts_with("dkey=") {
                 // Older schema state is decoded only so apply_state can request
                 // one clean accounting rebuild; these global watermarks are unused.
@@ -444,6 +490,8 @@ impl UsageState {
             let identity = (cursor.kind, cursor.logical_id.clone());
             cursor.seen_keys = seen_keys.remove(&identity).unwrap_or_default();
             cursor.claude_pending = pending_by_cursor.remove(&identity).unwrap_or_default();
+            cursor.contrib_days = contrib_days.remove(&identity).unwrap_or_default();
+            cursor.contrib_days.sort_unstable_by_key(|(day, _)| *day);
             if cursor.kind == CursorKind::Codex && !cursor.claude_pending.is_empty() {
                 return None;
             }
@@ -461,7 +509,7 @@ impl UsageState {
                 return None;
             }
         }
-        if !seen_keys.is_empty() || !pending_by_cursor.is_empty() {
+        if !seen_keys.is_empty() || !pending_by_cursor.is_empty() || !contrib_days.is_empty() {
             return None;
         }
         let schema_version = schema_version?;
@@ -507,6 +555,7 @@ impl UsageState {
             cursor
                 .claude_pending
                 .retain(|event| event.key.month >= month_start);
+            cursor.contrib_days.retain(|(day, _)| *day >= month_start);
         }
     }
 }
@@ -575,6 +624,7 @@ fn parse_cursor_line(value: &str) -> Option<UsageCursor> {
         last_model: None,
         seen_keys: Vec::new(),
         claude_pending: Vec::new(),
+        contrib_days: Vec::new(),
     })
 }
 
@@ -757,6 +807,7 @@ mod tests {
                     20_260_901,
                 )],
                 claude_pending: Vec::new(),
+                contrib_days: Vec::new(),
             }],
         }
     }
@@ -774,6 +825,7 @@ mod tests {
             last_model: Some("gpt-5.4".to_owned()),
             seen_keys: vec![UsageDedupeKey::new(42, 20_260_901)],
             claude_pending: Vec::new(),
+            contrib_days: Vec::new(),
         });
         state
     }
@@ -848,6 +900,7 @@ mod tests {
                 last_model: None,
                 seen_keys: Vec::new(),
                 claude_pending: Vec::new(),
+                contrib_days: Vec::new(),
             },
             UsageCursor {
                 active_month: None,
@@ -860,6 +913,7 @@ mod tests {
                 last_model: None,
                 seen_keys: Vec::new(),
                 claude_pending: Vec::new(),
+                contrib_days: Vec::new(),
             },
             UsageCursor {
                 active_month: None,
@@ -872,6 +926,7 @@ mod tests {
                 last_model: None,
                 seen_keys: Vec::new(),
                 claude_pending: Vec::new(),
+                contrib_days: Vec::new(),
             },
         ];
         let encoded = state.encode();

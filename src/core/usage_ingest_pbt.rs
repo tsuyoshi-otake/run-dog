@@ -62,6 +62,7 @@ fn arb_cursor() -> impl Strategy<Value = UsageCursor> {
                 },
                 seen_keys: Vec::new(),
                 claude_pending: Vec::new(),
+                contrib_days: Vec::new(),
             }
         })
 }
@@ -479,6 +480,7 @@ fn state_at(offset: u64) -> UsageState {
             last_model: None,
             seen_keys: Vec::new(),
             claude_pending: Vec::new(),
+            contrib_days: Vec::new(),
         }],
     }
 }

@@ -173,6 +173,7 @@ mod tests {
                 last_model: None,
                 seen_keys: Vec::new(),
                 claude_pending: Vec::new(),
+                contrib_days: Vec::new(),
             }],
         }
     }

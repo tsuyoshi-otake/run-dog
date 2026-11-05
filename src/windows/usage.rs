@@ -55,7 +55,7 @@ use crate::core::{
     windows_tz_bias_minutes, ymd_iso, ymd_key, CheckpointSource, ClaudePendingUsage,
     CodexTokenTotals, CursorKind, CursorRebuildReason, DiagnosticEvent, DiagnosticKind,
     DiagnosticRing, DiagnosticSnapshot, FetchErrorKind, FetchOutcome, FileCheckpointKey,
-    FileDedupeWindow, LimitWindow, LoadStatus, PersistStatus, ProviderFetchKind,
+    FileDayContrib, FileDedupeWindow, LimitWindow, LoadStatus, PersistStatus, ProviderFetchKind,
     ProviderFetchState, ProviderUsage, RebuildState, RescanReason, RestoreResult, StartupMode,
     TokenUsage, UsageCursor, UsageDedupeKey, UsageSnapshot, UsageState, PENDING_RETENTION_MS,
     SEEN_CAP_CLAUDE, SEEN_CAP_CODEX, USAGE_STATE_SCHEMA_VERSION,
@@ -151,6 +151,11 @@ struct FileCursor {
     last_file_id: Option<FileId>,
     waiting_incomplete: bool,
     kind: SourceKind,
+    /// Per-day cost and token shares this file contributed to the aggregate.
+    /// A rebuild subtracts this contribution before replaying the file, so a
+    /// rewritten transcript replaces its share instead of billing retained
+    /// events again when the dedupe window cannot span the replay.
+    contrib_days: HashMap<u32, FileDayContrib>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -858,7 +863,10 @@ impl UsageCollector {
             self.begin_month_rescan(window, unix_now_ms());
             return;
         }
-        if state.schema_version < 5 {
+        if state.schema_version < 7 {
+            // Schemas before 7 lack per-file contributions, so a later rebuild
+            // could not subtract the stale share. Rebuild once instead of
+            // restoring accounting that a rewrite would silently double count.
             self.record_diag(
                 DiagnosticKind::RestoreResult,
                 RestoreResult::Rebuilding as u64,
@@ -952,6 +960,12 @@ impl UsageCollector {
                 last_model: cursor.last_model.clone(),
                 seen_keys: cursor.dedupe.seen_keys(),
                 claude_pending: cursor.dedupe.pending_values(),
+                contrib_days: {
+                    let mut days: Vec<_> =
+                        cursor.contrib_days.iter().map(|(d, c)| (*d, *c)).collect();
+                    days.sort_unstable_by_key(|(day, _)| *day);
+                    days
+                },
             });
         }
         for (key, cursor) in &self.file_checkpoint {
@@ -1064,6 +1078,9 @@ impl UsageCollector {
         self.snapshot.codex.month_output_tokens = 0;
         for cursor in self.files.values_mut() {
             cursor.dedupe.retain_month(window.month_start);
+            cursor
+                .contrib_days
+                .retain(|day, _| *day >= window.month_start);
         }
         for cursor in self.file_checkpoint.values_mut() {
             cursor
@@ -1072,6 +1089,9 @@ impl UsageCollector {
             cursor
                 .claude_pending
                 .retain(|event| event.key.month >= window.month_start);
+            cursor
+                .contrib_days
+                .retain(|(day, _)| *day >= window.month_start);
         }
         // Cached directory listings and failed discovery paths must not outlive
         // their month indefinitely. Discovery repopulates these lazily.
@@ -1578,14 +1598,28 @@ impl UsageCollector {
                 size,
                 (prefix, file_id),
             );
+            let stored = file_checkpoint_key(path, &self.claude_dir, &self.codex_home, kind)
+                .and_then(|key| self.file_checkpoint.get(&key));
             if let Some(reason) = rebuild {
                 self.last_rebuild_reason = Some(reason);
                 self.cursor_reset_count = self.cursor_reset_count.saturating_add(1);
                 registered_rebuild = Some(reason);
                 self.checkpoint_dirty = true;
+                if let Some(cursor) = stored {
+                    // The file changed while no cursor watched it. The stored
+                    // contribution is stale now; remove it so the full replay
+                    // below rebuilds exactly what the file still contains.
+                    let target = match kind {
+                        SourceKind::Claude => &mut self.snapshot.claude,
+                        SourceKind::Codex => &mut self.snapshot.codex,
+                    };
+                    subtract_file_contrib(
+                        target,
+                        window.today,
+                        cursor.contrib_days.iter().copied(),
+                    );
+                }
             }
-            let stored = file_checkpoint_key(path, &self.claude_dir, &self.codex_home, kind)
-                .and_then(|key| self.file_checkpoint.get(&key));
             self.checkpoint_dirty |= stored.is_none_or(|cursor| {
                 cursor.file_id != file_id.map(FileId::durable)
                     || cursor.prefix != prefix
@@ -1596,12 +1630,18 @@ impl UsageCollector {
             } else {
                 stored.and_then(|cursor| cursor.last_model.clone())
             };
-            let mut dedupe = stored.map_or_else(FileDedupeWindow::default, |cursor| {
-                FileDedupeWindow::from_parts(
-                    cursor.seen_keys.clone(),
-                    cursor.claude_pending.clone(),
-                )
-            });
+            // A replayed file dedupes within its own fresh window: the stored
+            // window cannot span a whole-file replay anyway.
+            let mut dedupe = if rebuild.is_some() {
+                FileDedupeWindow::default()
+            } else {
+                stored.map_or_else(FileDedupeWindow::default, |cursor| {
+                    FileDedupeWindow::from_parts(
+                        cursor.seen_keys.clone(),
+                        cursor.claude_pending.clone(),
+                    )
+                })
+            };
             if now_ms.saturating_sub(mtime_ms) > PENDING_RETENTION_MS
                 && offset == size
                 && dedupe.clear_pending()
@@ -1623,6 +1663,13 @@ impl UsageCollector {
                 last_file_id: file_id,
                 waiting_incomplete: false,
                 kind,
+                contrib_days: if rebuild.is_some() {
+                    HashMap::new()
+                } else {
+                    stored.map_or_else(HashMap::new, |cursor| {
+                        cursor.contrib_days.iter().copied().collect()
+                    })
+                },
             });
             if size > offset {
                 self.enqueue_scan(path.to_path_buf(), mtime_ms, window);
@@ -1660,17 +1707,23 @@ impl UsageCollector {
             let _ = self.record_path_failure(path, now_ms);
             return 0;
         }
-        let (kind, offset, previous_model, rebuild, size_matches_offset) = {
+        let (kind, offset, previous_model, rebuild, size_matches_offset, stale_contrib) = {
             let Some(cursor) = self.files.get_mut(path) else {
                 return 0;
             };
             cursor.last_stat_ms = now_ms;
             let rebuild = cursor_rebuild_reason(cursor, size, mtime_ms, prefix, file_id);
+            let mut stale_contrib = None;
             if rebuild.is_some() {
                 cursor.offset = 0;
                 cursor.discard_offset = None;
                 cursor.last_model = None;
                 cursor.waiting_incomplete = false;
+                // The replay dedupes within a fresh window: the old window
+                // cannot span a whole-file replay anyway, and keeping its
+                // partial keys is what produced the double-count cascade.
+                cursor.dedupe = FileDedupeWindow::default();
+                stale_contrib = Some(std::mem::take(&mut cursor.contrib_days));
             }
             if now_ms.saturating_sub(mtime_ms) > PENDING_RETENTION_MS
                 && cursor.offset == cursor.size
@@ -1691,7 +1744,14 @@ impl UsageCollector {
                 cursor.mtime_ms = mtime_ms;
                 cursor.waiting_incomplete = false;
             }
-            (kind, offset, previous_model, rebuild, size == cursor.offset)
+            (
+                kind,
+                offset,
+                previous_model,
+                rebuild,
+                size == cursor.offset,
+                stale_contrib,
+            )
         };
         if let Some(reason) = rebuild {
             self.last_rebuild_reason = Some(reason);
@@ -1703,6 +1763,15 @@ impl UsageCollector {
                 0,
             );
             self.checkpoint_dirty = true;
+        }
+        if let Some(days) = stale_contrib {
+            // Remove what this file previously contributed before the replay
+            // below re-adds exactly what the rewritten file still contains.
+            let target = match kind {
+                SourceKind::Claude => &mut self.snapshot.claude,
+                SourceKind::Codex => &mut self.snapshot.codex,
+            };
+            subtract_file_contrib(target, window.today, days);
         }
         if size_matches_offset {
             return 0;
@@ -1761,6 +1830,7 @@ impl UsageCollector {
                 apply_provider_limits(&mut self.snapshot.codex, limits);
             }
         }
+        let mut contrib_delta: HashMap<u32, ContribDelta> = HashMap::new();
         for (event, digest) in chunk.events.into_iter().zip(chunk.dedupe) {
             let (year, month, day_of_month) = window.local_date(event.timestamp_ms);
             let day = ymd_key(year, month, day_of_month);
@@ -1811,6 +1881,10 @@ impl UsageCollector {
                     if previous.day == window.today {
                         self.snapshot.claude.subtract_today_nanos(old_nanos);
                     }
+                    let delta = contrib_delta.entry(previous.day).or_default();
+                    delta.nanos -= i128::from(old_nanos);
+                    delta.input -= i128::from(previous.usage.processed_input_tokens());
+                    delta.output -= i128::from(previous.usage.processed_output_tokens());
                 } else {
                     // Count each file-local event once. `total_token_usage` is
                     // cumulative and intentionally has no role in this decision.
@@ -1836,6 +1910,10 @@ impl UsageCollector {
                 target.month_output_tokens = target
                     .month_output_tokens
                     .saturating_add(event.usage.processed_output_tokens());
+                let delta = contrib_delta.entry(day).or_default();
+                delta.nanos += i128::from(nanos);
+                delta.input += i128::from(event.usage.processed_input_tokens());
+                delta.output += i128::from(event.usage.processed_output_tokens());
             }
             self.last_collected_ms = self.last_collected_ms.max(event.timestamp_ms);
             self.checkpoint_dirty = true;
@@ -1854,6 +1932,18 @@ impl UsageCollector {
         }
         if let Some(cursor) = self.files.get_mut(path) {
             cursor.dedupe = dedupe;
+            if !contrib_delta.is_empty() {
+                for (day, delta) in contrib_delta {
+                    let entry = cursor.contrib_days.entry(day).or_default();
+                    entry.nanos = apply_signed_delta(entry.nanos, delta.nanos);
+                    entry.input = apply_signed_delta(entry.input, delta.input);
+                    entry.output = apply_signed_delta(entry.output, delta.output);
+                }
+                cursor.contrib_days.retain(|_, contrib| {
+                    contrib.nanos > 0 || contrib.input > 0 || contrib.output > 0
+                });
+                self.checkpoint_dirty = true;
+            }
         }
         chunk.consumed
     }
@@ -3830,6 +3920,41 @@ fn restored_cursor_offset(
     (cursor.offset.min(size), None)
 }
 
+/// Removes a source file's recorded contribution from the aggregate: each
+/// contributed day's nanos (month scope, plus today scope when the day is
+/// still today) and its month token counters.
+fn subtract_file_contrib(
+    target: &mut ProviderUsage,
+    today: u32,
+    days: impl IntoIterator<Item = (u32, FileDayContrib)>,
+) {
+    for (day, contrib) in days {
+        target.subtract_month_nanos(contrib.nanos);
+        if day == today {
+            target.subtract_today_nanos(contrib.nanos);
+        }
+        target.month_input_tokens = target.month_input_tokens.saturating_sub(contrib.input);
+        target.month_output_tokens = target.month_output_tokens.saturating_sub(contrib.output);
+    }
+}
+
+/// Signed per-day contribution delta accumulated while applying a chunk, so a
+/// superseding usage can net against earlier ticks before it merges.
+#[derive(Default)]
+struct ContribDelta {
+    nanos: i128,
+    input: i128,
+    output: i128,
+}
+
+fn apply_signed_delta(value: u64, delta: i128) -> u64 {
+    if delta >= 0 {
+        value.saturating_add(delta.min(i128::from(u64::MAX)) as u64)
+    } else {
+        value.saturating_sub((-delta).min(i128::from(u64::MAX)) as u64)
+    }
+}
+
 fn cursor_rebuild_reason(
     cursor: &FileCursor,
     size: u64,
@@ -3889,6 +4014,7 @@ mod tests {
     };
     use crate::core::{local_hms, local_ymd, CursorKind, CursorRebuildReason, UsageCursor};
     use std::{
+        collections::HashMap,
         fs,
         path::{Path, PathBuf},
         ptr,
@@ -3983,6 +4109,7 @@ mod tests {
                 last_file_id: None,
                 waiting_incomplete: false,
                 kind: SourceKind::Codex,
+                contrib_days: HashMap::new(),
             },
         );
         assert!(collector.reconcile_otak_snapshot(source));
@@ -4074,6 +4201,7 @@ mod tests {
             last_model: None,
             seen_keys: Vec::new(),
             claude_pending: Vec::new(),
+            contrib_days: Vec::new(),
             active_month: Some(window.month_start),
         });
 
@@ -4185,6 +4313,7 @@ mod tests {
                     last_model: None,
                     seen_keys: Vec::new(),
                     claude_pending: Vec::new(),
+                    contrib_days: Vec::new(),
                 },
             );
         }
@@ -6262,6 +6391,7 @@ mod tests {
                     last_model: None,
                     seen_keys: Vec::new(),
                     claude_pending: Vec::new(),
+                    contrib_days: Vec::new(),
                 },
             );
         }
@@ -7248,6 +7378,132 @@ mod tests {
     }
 
     #[test]
+    fn component_rewritten_transcript_replaces_contribution_instead_of_rebilling() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-usage-rewrite-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let project = root.join("claude").join("projects").join("p1");
+        fs::create_dir_all(&project).expect("temp project");
+        let session = project.join("session.jsonl");
+        let now = unix_now_ms();
+        let (year, month, day) = local_ymd(now, 0);
+        let (hour, minute) = local_hms(now, 0);
+        let timestamp = format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:00Z");
+        let event = |id: usize| {
+            format!(
+                r#"{{"type":"assistant","timestamp":"{timestamp}","requestId":"r{id}","message":{{"id":"m{id}","model":"claude-opus-5","usage":{{"input_tokens":1000000,"output_tokens":0}}}}}}"#
+            )
+        };
+        let write_session = |path: &Path, count: usize| {
+            let mut body = String::new();
+            for id in 0..count {
+                body.push_str(&event(id));
+                body.push('\n');
+            }
+            fs::write(path, body).expect("jsonl");
+        };
+        // More events than the 512-key dedupe window: a replay must not re-bill
+        // keys that leave the window while the replay is still in flight.
+        write_session(&session, 600);
+
+        let mut collector =
+            UsageCollector::with_dirs(root.join("claude"), root.join("codex"), false);
+        let mut last = UsageTick::MoreWork;
+        for _ in 0..64 {
+            last = collector.tick(ptr::null_mut());
+            if last == UsageTick::Idle && collector.snapshot().claude.month_cents == 300_000 {
+                break;
+            }
+        }
+        assert_eq!(last, UsageTick::Idle);
+        assert_eq!(collector.snapshot().claude.month_cents, 300_000);
+
+        // Atomic replacement keeps the 600 events and adds 10. A FileId change
+        // rebuilds the cursor; the totals must reflect the replacement, not
+        // the old share plus the full replay.
+        // A non-.jsonl staged name stays out of the scanner's discovery.
+        let staged = project.join("session.staged");
+        write_session(&staged, 610);
+        fs::remove_file(&session).expect("remove old");
+        fs::rename(&staged, &session).expect("replace");
+        collector.last_discover_ms = 0;
+        last = UsageTick::MoreWork;
+        for _ in 0..64 {
+            last = collector.tick(ptr::null_mut());
+            if last == UsageTick::Idle && collector.snapshot().claude.month_cents == 305_000 {
+                break;
+            }
+        }
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(last, UsageTick::Idle);
+        assert_eq!(collector.snapshot().claude.month_cents, 305_000);
+        assert_eq!(collector.snapshot().claude.month_input_tokens, 610_000_000);
+    }
+
+    #[test]
+    fn component_shrunk_transcript_removes_the_dropped_share() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-usage-shrink-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let project = root.join("claude").join("projects").join("p1");
+        fs::create_dir_all(&project).expect("temp project");
+        let session = project.join("session.jsonl");
+        let now = unix_now_ms();
+        let (year, month, day) = local_ymd(now, 0);
+        let (hour, minute) = local_hms(now, 0);
+        let timestamp = format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:00Z");
+        let event = |id: usize| {
+            format!(
+                r#"{{"type":"assistant","timestamp":"{timestamp}","requestId":"r{id}","message":{{"id":"m{id}","model":"claude-opus-5","usage":{{"input_tokens":1000000,"output_tokens":0}}}}}}"#
+            )
+        };
+        let write_session = |count: usize| {
+            let mut body = String::new();
+            for id in 0..count {
+                body.push_str(&event(id));
+                body.push('\n');
+            }
+            fs::write(&session, body).expect("jsonl");
+        };
+        write_session(600);
+
+        let mut collector =
+            UsageCollector::with_dirs(root.join("claude"), root.join("codex"), false);
+        let mut last = UsageTick::MoreWork;
+        for _ in 0..64 {
+            last = collector.tick(ptr::null_mut());
+            if last == UsageTick::Idle && collector.snapshot().claude.month_cents == 300_000 {
+                break;
+            }
+        }
+        assert_eq!(last, UsageTick::Idle);
+        assert_eq!(collector.snapshot().claude.month_cents, 300_000);
+
+        // Truncate in place: the dropped 10 events must leave the aggregate.
+        // An in-place rewrite leaves the directory mtime untouched, so the
+        // file re-enters through the cooled-down hot restat arm instead of a
+        // rediscovery.
+        write_session(590);
+        let mut tick_ms = unix_now_ms() + super::STAT_COOLDOWN_MS;
+        last = UsageTick::MoreWork;
+        for _ in 0..64 {
+            last = collector.tick_at(ptr::null_mut(), tick_ms);
+            if last == UsageTick::Idle && collector.snapshot().claude.month_cents == 295_000 {
+                break;
+            }
+            tick_ms += super::STAT_COOLDOWN_MS;
+        }
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(last, UsageTick::Idle);
+        assert_eq!(collector.snapshot().claude.month_cents, 295_000);
+        assert_eq!(collector.snapshot().claude.month_input_tokens, 590_000_000);
+    }
+
+    #[test]
     fn component_older_jsonl_still_counts_after_newer_file() {
         use super::{unix_now_ms, UsageCollector, UsageTick};
 
@@ -7738,7 +7994,9 @@ mod tests {
         .unwrap();
         let mut restored = new_persisted_collector(&root, store);
         assert_eq!(tick_idle(&mut restored), UsageTick::Idle);
-        assert_eq!(restored.snapshot.claude.month_input_tokens, 3_000_000);
+        // The replacement file holds only "new"+"newer": its contribution
+        // swaps out the vanished "old" line instead of adding on top.
+        assert_eq!(restored.snapshot.claude.month_input_tokens, 2_000_000);
         assert_eq!(
             restored.last_rebuild_reason,
             Some(CursorRebuildReason::FileIdChanged)
@@ -7890,7 +8148,8 @@ mod tests {
         assert_eq!(tick_idle(&mut collector), UsageTick::Idle);
         let cents = collector.snapshot().claude.month_cents;
         let _ = fs::remove_dir_all(&root);
-        assert_eq!(cents, 1_000);
+        // The truncation removed "a" from the file; only "b" contributes.
+        assert_eq!(cents, 500);
     }
 
     #[test]
@@ -7932,7 +8191,8 @@ mod tests {
         );
         let cents = collector.snapshot().claude.month_cents;
         let _ = fs::remove_dir_all(&root);
-        assert_eq!(cents, 1_000);
+        // The rewrite replaced "a" with "b"; the file contributes "b" once.
+        assert_eq!(cents, 500);
     }
 
     #[test]

@@ -82,6 +82,6 @@ pub use usage_perf::{
     ScenarioRunStatus, UsageWorkCounters,
 };
 pub use usage_state::{
-    usage_store_root_is_forbidden, CursorKind, CursorRebuildReason, UsageAggregate, UsageCursor,
-    UsageState, USAGE_STATE_HEADER, USAGE_STATE_SCHEMA_VERSION,
+    usage_store_root_is_forbidden, CursorKind, CursorRebuildReason, FileDayContrib, UsageAggregate,
+    UsageCursor, UsageState, USAGE_STATE_HEADER, USAGE_STATE_SCHEMA_VERSION,
 };
