@@ -8,3 +8,7 @@
 verification/evidence/**/mutants.out/
 verification/tools/*.jar
 formal/*_TTrace_*
+
+# Local Claude Code working notes (session journal, rubrics); kept out of the
+# public history.
+/.claude/
