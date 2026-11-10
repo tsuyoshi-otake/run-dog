@@ -116,6 +116,13 @@ const STAT_COOLDOWN_MS: u64 = USAGE_IDLE_INTERVAL_MS as u64;
 const COLD_RESTAT_MS: u64 = 10 * 60 * 1_000;
 const HOT_AGE_MS: u64 = 48 * 60 * 60 * 1_000;
 const REDISCOVER_MS: u64 = USAGE_IDLE_INTERVAL_MS as u64;
+/// Codex keeps a session in the day directory of its start date and appends
+/// there for as long as it is resumed, so neither that directory's mtime nor
+/// its month's says the session is active. Only a walk that looks at the
+/// files finds one that has no cursor. It runs when discovery starts with no
+/// cursors to rely on (process start, month rescan) and then at most this
+/// often, so a session resumed after its cursor retired is counted again.
+const CODEX_HISTORY_WALK_MS: u64 = 60 * 60 * 1_000;
 /// An unreadable registration/probe gets a small number of retry turns.
 /// Once exhausted, the path has an explicit terminal outcome for the
 /// current catch-up; it is revisited only after the cooldown below.
@@ -240,6 +247,8 @@ pub struct UsageCollector {
     retirement: VecDeque<(PathBuf, SourceKind)>,
     retired_paths: HashSet<PathBuf>,
     last_discover_ms: u64,
+    /// 0 until the first Codex history walk of this discovery run.
+    last_history_walk_ms: u64,
     last_codex_limits_ms: u64,
     catch_up: bool,
     deferred: VecDeque<PathBuf>,
@@ -428,6 +437,7 @@ impl UsageCollector {
             retirement: VecDeque::new(),
             retired_paths: HashSet::new(),
             last_discover_ms: 0,
+            last_history_walk_ms: 0,
             last_codex_limits_ms: 0,
             catch_up: true,
             deferred: VecDeque::new(),
@@ -1277,6 +1287,8 @@ impl UsageCollector {
         self.snapshot.codex.month_output_tokens = 0;
         self.checkpoint_dirty = true;
         self.last_discover_ms = 0;
+        // The cursors are gone, so every session has to be found again.
+        self.last_history_walk_ms = 0;
         self.queue_roots(now_ms);
     }
 
@@ -1284,18 +1296,33 @@ impl UsageCollector {
         self.discover.clear();
         let window = day_window(now_ms);
         let (year, month, _) = window.local_date(now_ms);
-        self.discover
-            .push_back(codex_month_dir(&self.codex_home, year, month));
-        self.discover.push_back(self.claude_dir.join("projects"));
+        let current = codex_month_dir(&self.codex_home, year, month);
         let (prev_year, prev_month) = previous_month(year, month);
-        self.discover
-            .push_back(codex_month_dir(&self.codex_home, prev_year, prev_month));
-        queue_recent_codex_month_dirs(
+        let previous = codex_month_dir(&self.codex_home, prev_year, prev_month);
+        self.discover.push_back(current.clone());
+        self.discover.push_back(self.claude_dir.join("projects"));
+        self.discover.push_back(previous.clone());
+        let history_walk = self.last_history_walk_ms == 0
+            || now_ms.saturating_sub(self.last_history_walk_ms) >= CODEX_HISTORY_WALK_MS;
+        if history_walk {
+            self.last_history_walk_ms = now_ms;
+            // A cached listing skips a day directory whose mtime is unchanged,
+            // and an append never changes it. Forget the older months so the
+            // walk looks at their files; every file of the two recent months
+            // already has a cursor.
+            let sessions = self.codex_home.join("sessions");
+            self.dirs.retain(|dir, _| {
+                !dir.starts_with(&sessions)
+                    || dir.starts_with(&current)
+                    || dir.starts_with(&previous)
+            });
+        }
+        queue_codex_month_dirs(
             &mut self.discover,
             &self.codex_home,
             year,
             now_ms,
-            HOT_AGE_MS,
+            (!history_walk).then_some(HOT_AGE_MS),
         );
         self.reconcile_known_paths(window, now_ms);
     }
@@ -1408,12 +1435,15 @@ impl UsageCollector {
         if self.files.contains_key(&path) {
             return;
         }
-        let today = if recent {
-            let window = day_window(now_ms);
-            path_mtime_ms(&path).is_some_and(|mtime| window.day(mtime) == window.today)
-        } else {
-            false
-        };
+        let window = day_window(now_ms);
+        let mtime_ms = if recent { path_mtime_ms(&path) } else { None };
+        // Discovery offers every file of an enumerated directory. One that
+        // registration would drop for its age must not take a queue slot:
+        // a history walk offers years of them.
+        if mtime_ms.is_some_and(|mtime| window.day(mtime) < previous_month_start(window)) {
+            return;
+        }
+        let today = mtime_ms.is_some_and(|mtime| window.day(mtime) == window.today);
         if self.registration_paths.contains(&path) {
             if recent {
                 if let Some(index) = self
@@ -3828,15 +3858,15 @@ fn codex_month_dir(home: &Path, year: i32, month: u8) -> PathBuf {
         .join(format!("{month:02}"))
 }
 
-/// Enqueue Codex `sessions/{year}/{month}` dirs touched within `hot_age_ms`.
-/// Walks the current and previous calendar years only — metadata, not a
-/// full-history JSONL scan.
-fn queue_recent_codex_month_dirs(
+/// Enqueue Codex `sessions/{year}/{month}` dirs of the current and previous
+/// calendar years: only those touched within `max_age_ms`, or every one when
+/// it is `None`. Metadata only — never a full-history JSONL scan.
+fn queue_codex_month_dirs(
     discover: &mut VecDeque<PathBuf>,
     home: &Path,
     year: i32,
     now_ms: u64,
-    hot_age_ms: u64,
+    max_age_ms: Option<u64>,
 ) {
     for walk_year in [year, year - 1] {
         let year_dir = home.join("sessions").join(walk_year.to_string());
@@ -3851,11 +3881,13 @@ fn queue_recent_codex_month_dirs(
             if !file_type.is_dir() {
                 continue;
             }
-            let Some(mtime_ms) = path_mtime_ms(&path) else {
-                continue;
-            };
-            if now_ms.saturating_sub(mtime_ms) > hot_age_ms {
-                continue;
+            if let Some(max_age_ms) = max_age_ms {
+                let Some(mtime_ms) = path_mtime_ms(&path) else {
+                    continue;
+                };
+                if now_ms.saturating_sub(mtime_ms) > max_age_ms {
+                    continue;
+                }
             }
             if !discover.contains(&path) {
                 discover.push_back(path);
@@ -4850,6 +4882,40 @@ mod tests {
             body.push('\n');
         }
         fs::write(&session, body).expect("jsonl");
+        session
+    }
+
+    /// A Codex session that started two months before the current one. Its
+    /// day and month directories look untouched since then, as they do on
+    /// disk: appending to a session changes neither.
+    fn write_old_codex_session(root: &Path, name: &str, lines: &[String]) -> PathBuf {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        let (year, month, _) = local_ymd(unix_now_ms(), 0);
+        let (year, month) = super::previous_month(year, month);
+        let (year, month) = super::previous_month(year, month);
+        let month_dir = super::codex_month_dir(&root.join("codex"), year, month);
+        let day_dir = month_dir.join("05");
+        fs::create_dir_all(&day_dir).expect("old codex day");
+        let session = day_dir.join(name);
+        let mut body = String::from(r#"{"type":"turn_context","payload":{"model":"gpt-5.4"}}"#);
+        body.push('\n');
+        for line in lines {
+            body.push_str(line);
+            body.push('\n');
+        }
+        fs::write(&session, body).expect("jsonl");
+        let untouched =
+            std::time::SystemTime::now() - std::time::Duration::from_secs(40 * 24 * 60 * 60);
+        for dir in [&day_dir, &month_dir] {
+            fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+                .open(dir)
+                .expect("open dir")
+                .set_modified(untouched)
+                .expect("age dir");
+        }
         session
     }
 
@@ -6497,7 +6563,82 @@ mod tests {
     }
 
     #[test]
-    fn component_codex_cold_month_dir_is_not_queued_for_history_scan() {
+    fn component_month_rescan_counts_codex_session_started_before_previous_month() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-codex-old-start-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let stamp = current_stamp();
+        let session = write_old_codex_session(
+            &root,
+            "rollout.jsonl",
+            &[token_count_line(&stamp, 80, 20, 5, 80, 20, 5)],
+        );
+        let mut collector = new_claude_collector(&root);
+        assert_eq!(tick_idle(&mut collector), UsageTick::Idle);
+        assert_eq!(collector.snapshot().codex.month_input_tokens, 80);
+        assert!(collector.files.contains_key(&session));
+
+        collector.rescan_current_month();
+        assert_eq!(collector.snapshot().codex.month_input_tokens, 0);
+        assert_eq!(tick_idle(&mut collector), UsageTick::Idle);
+        assert_eq!(collector.snapshot().codex.month_input_tokens, 80);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn component_codex_session_resumed_after_retirement_is_found_by_the_history_walk() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-codex-resumed-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let session = write_old_codex_session(&root, "rollout.jsonl", &[]);
+        let dormant =
+            std::time::SystemTime::now() - std::time::Duration::from_secs(100 * 24 * 60 * 60);
+        fs::File::options()
+            .write(true)
+            .open(&session)
+            .unwrap()
+            .set_modified(dormant)
+            .unwrap();
+        let mut collector = new_claude_collector(&root);
+        let start = unix_now_ms();
+        assert_eq!(collector.tick_at(ptr::null_mut(), start), UsageTick::Idle);
+        assert!(!collector.catch_up);
+        // Too old for a cursor, and it never took a registration slot.
+        assert!(!collector.files.contains_key(&session));
+        collector.queue_registration(session.clone(), true, start);
+        assert!(collector.registrations.is_empty());
+
+        let day_dir = session.parent().unwrap().to_path_buf();
+        let dir_mtime = super::path_mtime_ms(&day_dir);
+        append_codex_lines(
+            &session,
+            &[token_count_line(&current_stamp(), 80, 20, 5, 80, 20, 5)],
+        );
+        assert_eq!(super::path_mtime_ms(&day_dir), dir_mtime);
+
+        // Ordinary rediscovery trusts the unchanged directories.
+        let before_walk = start + super::CODEX_HISTORY_WALK_MS - super::REDISCOVER_MS;
+        let _ = collector.tick_at(ptr::null_mut(), before_walk);
+        assert!(collector.discover.is_empty());
+        assert!(!collector.files.contains_key(&session));
+
+        let mut now = start + super::CODEX_HISTORY_WALK_MS;
+        for _ in 0..8 {
+            if collector.tick_at(ptr::null_mut(), now) == UsageTick::Idle {
+                break;
+            }
+            now += super::REDISCOVER_MS;
+        }
+        assert_eq!(collector.snapshot().codex.month_input_tokens, 80);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn component_codex_cold_month_dir_waits_for_the_history_walk() {
         let root = std::env::temp_dir().join(format!(
             "run-dog-codex-cold-{}-{}",
             std::process::id(),
@@ -6507,15 +6648,12 @@ mod tests {
         fs::create_dir_all(&dir).expect("cold month");
         let mtime = super::path_mtime_ms(&dir).expect("mtime");
         let mut discover = std::collections::VecDeque::new();
-        super::queue_recent_codex_month_dirs(
-            &mut discover,
-            &root,
-            2024,
-            mtime.saturating_add(super::HOT_AGE_MS + 1),
-            super::HOT_AGE_MS,
-        );
-        let _ = fs::remove_dir_all(&root);
+        let now = mtime.saturating_add(super::HOT_AGE_MS + 1);
+        super::queue_codex_month_dirs(&mut discover, &root, 2024, now, Some(super::HOT_AGE_MS));
         assert!(!discover.iter().any(|path| path == &dir));
+        super::queue_codex_month_dirs(&mut discover, &root, 2024, now, None);
+        let _ = fs::remove_dir_all(&root);
+        assert!(discover.iter().any(|path| path == &dir));
     }
 
     #[test]
