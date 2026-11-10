@@ -47,7 +47,7 @@ pub use usage::{
     format_fable_limit_label, format_limit_label, format_plan_label, format_usage_heading,
     is_long_context_request, local_hms, local_ymd, parse_rfc3339_ms, resolve_codex_model,
     windows_tz_bias_minutes, ymd_iso, ymd_key, LimitWindow, ProviderUsage, TokenUsage,
-    UsageSnapshot, NANOS_PER_CENT,
+    UsageSnapshot, NANOS_PER_CENT, PRICING_REVISION,
 };
 pub use usage_checkpoint::{
     FileCheckpointCursor, FileCheckpointKey, UsageCheckpoint, USAGE_CHECKPOINT_MIGRATION_VERSION,

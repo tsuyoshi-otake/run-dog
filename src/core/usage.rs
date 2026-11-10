@@ -575,8 +575,24 @@ fn entry_prompt_tier(
     pricing
 }
 
-fn pricing_table() -> [ModelPricing; 67] {
+/// Revision of everything that decides the cost of an already-ingested event:
+/// the price table, its dated revisions, and model matching.
+///
+/// Persisted month totals and per-file contributions are nanodollars computed
+/// under one revision. A checkpoint carrying a different value is rebuilt from
+/// the transcripts instead of restored, so bump this with every such change.
+/// `component_pricing_revision_is_bumped_whenever_a_rate_changes` pins the
+/// table and its dated revisions to this value; a matching-rule change is not
+/// covered by the pin and needs the bump by hand. Real revisions start at 1;
+/// a checkpoint without the field reads as 0.
+pub const PRICING_REVISION: u32 = 1;
+
+fn pricing_table() -> [ModelPricing; 72] {
     [
+        entry_cache_read("claude-fable-5-2-fast", 16.0, 0.4, 80.0),
+        entry_cache_read("claude-mythos-5-2-fast", 16.0, 0.4, 80.0),
+        entry_cache_read("claude-fable-5-2", 8.0, 0.2, 40.0),
+        entry_cache_read("claude-mythos-5-2", 8.0, 0.2, 40.0),
         entry_cache_read("claude-fable-5-1", 10.0, 0.25, 50.0),
         entry_cache_read("claude-mythos-5-1", 10.0, 0.25, 50.0),
         entry_cache_read("claude-opus-5-5-fast", 8.0, 0.4, 40.0),
@@ -596,7 +612,7 @@ fn pricing_table() -> [ModelPricing; 67] {
         entry("claude-opus-4-8-fast", 10.0, 50.0),
         entry("claude-opus-4-7-fast", 30.0, 150.0),
         entry("claude-opus-4-6-fast", 30.0, 150.0),
-        entry("claude-sonnet-5-5", 2.0, 10.0),
+        entry_cache_read("claude-sonnet-5-5", 2.0, 0.1, 10.0),
         entry("claude-sonnet-5", 2.0, 10.0),
         entry("claude-sonnet-4-6", 3.0, 15.0),
         entry("claude-sonnet-4-5", 3.0, 15.0),
@@ -612,6 +628,7 @@ fn pricing_table() -> [ModelPricing; 67] {
         entry("claude-3-haiku", 0.25, 1.25),
         entry_long_context("gpt-6-astra", 10.0, 1.0, 50.0),
         entry_long_context("gpt-6.1-sol", 2.0, 0.1, 10.0),
+        entry_long_context("gpt-6.1-terra", 1.0, 0.05, 5.0),
         entry_long_context("gpt-6-sol", 2.0, 0.2, 10.0),
         entry_long_context("gpt-6-luna", 0.1, 0.01, 0.5),
         entry_long_context("gpt-5.6-sol", 5.0, 0.5, 30.0),
@@ -677,7 +694,7 @@ fn apply_revisions(pricing: &mut ModelPricing, effective_day: Option<&str>) {
             pricing.cached_input = 0.02;
             pricing.output = 1.2;
         }
-        "gpt-5.6-sol" if day >= "2026-08-21" => {
+        "gpt-5.6-sol" | "gpt-5.6" if day >= "2026-08-21" => {
             pricing.input = 4.0;
             pricing.output = 20.0;
             refresh_cache_from_input(pricing);
@@ -744,13 +761,26 @@ const LONG_CONTEXT_SUFFIX: &str = "-long-context";
 
 /// Prefix match; a SKU suffix also matches a dated model carrying it.
 fn model_matches(model: &str, key: &str) -> bool {
-    if model.starts_with(key) {
+    if has_key_prefix(model, key) {
         return true;
     }
     ["-fast", LONG_CONTEXT_SUFFIX].iter().any(|suffix| {
         key.ends_with(suffix)
             && model.ends_with(suffix)
-            && model[..model.len() - suffix.len()].starts_with(&key[..key.len() - suffix.len()])
+            && has_key_prefix(
+                &model[..model.len() - suffix.len()],
+                &key[..key.len() - suffix.len()],
+            )
+    })
+}
+
+/// `key` is a prefix of `model` that ends on a number boundary. A key never
+/// splits a number, so the dated Fable 5 ID `claude-fable-5-20260601` stays on
+/// `claude-fable-5` instead of matching the `claude-fable-5-2` key.
+fn has_key_prefix(model: &str, key: &str) -> bool {
+    model.strip_prefix(key).is_some_and(|rest| {
+        !(key.ends_with(|last: char| last.is_ascii_digit())
+            && rest.starts_with(|next: char| next.is_ascii_digit()))
     })
 }
 
@@ -923,8 +953,9 @@ mod tests {
         claude_pricing_model, cost_cents, cost_nanos, days_to_ymd, display_cents,
         format_banked_reset_label, format_chatgpt_plan_label, format_compact_token_count,
         format_fable_limit_label, format_limit_label, format_plan_label, format_usage_heading,
-        is_long_context_request, local_ymd, parse_rfc3339_ms, resolve_codex_model,
-        windows_tz_bias_minutes, ymd_iso, ymd_key, LimitWindow, ProviderUsage, TokenUsage,
+        is_long_context_request, local_ymd, parse_rfc3339_ms, pricing_table, resolve_codex_model,
+        resolve_pricing, windows_tz_bias_minutes, ymd_iso, ymd_key, LimitWindow, ProviderUsage,
+        TokenUsage, PRICING_REVISION,
     };
 
     #[test]
@@ -1093,10 +1124,16 @@ mod tests {
             cache_write_1h: 1_000_000,
             ..TokenUsage::default()
         };
+        // Sonnet 5.5 cache hits cost 0.05x input ($0.10); Sonnet 5 keeps 0.1x.
         assert_eq!(
             cost_cents("claude-sonnet-5-5", sonnet_cache, Some("2026-09-30")),
-            Some(670)
+            Some(660)
         );
+        assert_eq!(
+            cost_cents("claude-sonnet-5-5-20260928", sonnet_cache, None),
+            Some(660)
+        );
+        assert_eq!(cost_cents("claude-sonnet-5", sonnet_cache, None), Some(670));
         assert_eq!(cost_cents("gpt-5.6-sol", usage, None), Some(3_500));
         assert_eq!(
             cost_cents("gpt-5.6-sol", usage, Some("2026-08-20")),
@@ -1191,6 +1228,146 @@ mod tests {
             Some(3_250)
         );
         assert_eq!(cost_cents("claude-fable-5", cache_write, None), Some(3_250));
+    }
+
+    #[test]
+    fn component_fable_52_matches_published_standard_and_fast_rates() {
+        let standard = TokenUsage {
+            input: 1_000_000,
+            output: 1_000_000,
+            ..TokenUsage::default()
+        };
+        let cache_hits = TokenUsage {
+            cache_read: 1_000_000,
+            ..TokenUsage::default()
+        };
+        let cache_write = TokenUsage {
+            cache_write_5m: 1_000_000,
+            cache_write_1h: 1_000_000,
+            ..TokenUsage::default()
+        };
+        // $8 input, $40 output, $0.20 cache read, $10 / $16 cache writes.
+        for model in [
+            "claude-fable-5-2",
+            "claude-mythos-5-2",
+            "claude-fable-5-2-20261109",
+        ] {
+            assert_eq!(cost_cents(model, standard, None), Some(4_800), "{model}");
+            assert_eq!(cost_cents(model, cache_hits, None), Some(20), "{model}");
+            assert_eq!(cost_cents(model, cache_write, None), Some(2_600), "{model}");
+            assert!(!is_long_context_request(model, 2_000_000), "{model}");
+        }
+        // Fast mode doubles the base rates and the cache multipliers stack.
+        for model in [
+            "claude-fable-5-2-fast",
+            "claude-mythos-5-2-fast",
+            "claude-fable-5-2-20261109-fast",
+        ] {
+            assert_eq!(cost_cents(model, standard, None), Some(9_600), "{model}");
+            assert_eq!(cost_cents(model, cache_hits, None), Some(40), "{model}");
+            assert_eq!(cost_cents(model, cache_write, None), Some(5_200), "{model}");
+        }
+    }
+
+    #[test]
+    fn component_dated_model_id_never_matches_a_key_that_splits_its_number() {
+        let standard = TokenUsage {
+            input: 1_000_000,
+            output: 1_000_000,
+            ..TokenUsage::default()
+        };
+        let cache_hits = TokenUsage {
+            cache_read: 1_000_000,
+            ..TokenUsage::default()
+        };
+        // The date starts with `2`, but `5-2026…` is Fable 5, not Fable 5.2.
+        for model in [
+            "claude-fable-5-20260601",
+            "claude-mythos-5-20260601",
+            "claude-fable-5-20260601-fast",
+        ] {
+            assert_eq!(cost_cents(model, standard, None), Some(6_000), "{model}");
+            assert_eq!(cost_cents(model, cache_hits, None), Some(100), "{model}");
+        }
+        assert_eq!(
+            cost_cents("claude-opus-4-20250514", standard, None),
+            Some(9_000)
+        );
+        assert_eq!(cost_cents("claude-opus-4-10", standard, None), Some(9_000));
+        assert_eq!(cost_cents("gpt-5-2025-08-07", standard, None), Some(1_125));
+    }
+
+    #[test]
+    fn component_gpt61_terra_and_bare_gpt56_follow_published_rates() {
+        let standard = TokenUsage {
+            input: 1_000_000,
+            output: 1_000_000,
+            ..TokenUsage::default()
+        };
+        let cached = TokenUsage {
+            cached_input: 1_000_000,
+            ..TokenUsage::default()
+        };
+        let long = TokenUsage {
+            long_context_input: standard.input,
+            long_context_output: standard.output,
+            ..standard
+        };
+        // $1 input, $0.05 cached, $5 output; 2x / 1.5x above 272K.
+        assert_eq!(cost_cents("gpt-6.1-terra", standard, None), Some(600));
+        assert_eq!(cost_cents("gpt-6.1-terra", cached, None), Some(5));
+        assert_eq!(cost_cents("gpt-6.1-terra", long, None), Some(950));
+        assert!(is_long_context_request("gpt-6.1-terra", 272_001));
+        assert!(!is_long_context_request("gpt-6.1-terra", 272_000));
+
+        // The bare family ID follows the same 2026-08-21 revision as `-sol`.
+        assert_eq!(
+            cost_cents("gpt-5.6", standard, Some("2026-08-20")),
+            Some(3_500)
+        );
+        assert_eq!(
+            cost_cents("gpt-5.6", standard, Some("2026-08-21")),
+            Some(2_400)
+        );
+        assert_eq!(cost_cents("gpt-5.6", cached, Some("2026-08-21")), Some(40));
+        assert_eq!(cost_cents("gpt-5.6", standard, None), Some(3_500));
+    }
+
+    #[test]
+    fn component_pricing_revision_is_bumped_whenever_a_rate_changes() {
+        // FNV-1a over every key's rates on both sides of each dated revision.
+        // A new revision date must be added to `days`.
+        let days = ["2026-07-29", "2026-07-30", "2026-08-20", "2026-08-21"];
+        let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+        let mut mix = |bytes: &[u8]| {
+            for byte in bytes {
+                hash = (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        };
+        for entry in pricing_table() {
+            for day in days {
+                let pricing = resolve_pricing(entry.key, Some(day)).expect("table key resolves");
+                mix(pricing.key.as_bytes());
+                for rate in [
+                    pricing.input,
+                    pricing.output,
+                    pricing.cached_input,
+                    pricing.cache_read,
+                    pricing.cache_write_5m,
+                    pricing.cache_write_1h,
+                    pricing.long_context_input_multiplier.unwrap_or(1.0),
+                    pricing.long_context_output_multiplier.unwrap_or(1.0),
+                ] {
+                    mix(&rate.to_bits().to_le_bytes());
+                }
+                mix(&pricing.long_context_threshold.unwrap_or(0).to_le_bytes());
+            }
+        }
+        assert_eq!(
+            (PRICING_REVISION, hash),
+            (1, 0x689c_7f42_4db0_63dc_u64),
+            "price table changed: bump PRICING_REVISION (rebuilds persisted totals), then this pin"
+        );
     }
 
     #[test]

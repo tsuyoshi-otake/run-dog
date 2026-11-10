@@ -87,6 +87,9 @@ pub struct UsageAggregate {
 pub struct UsageState {
     pub generation: u64,
     pub schema_version: u32,
+    /// [`crate::core::PRICING_REVISION`] the aggregate and the per-file
+    /// contributions were priced under. 0 when the state predates the field.
+    pub pricing_revision: u32,
     pub aggregate: UsageAggregate,
     pub cursors: Vec<UsageCursor>,
 }
@@ -123,6 +126,7 @@ impl UsageState {
             // Registry checkpoints predate durable identities and still need
             // the legacy aggregate/cursor migration before the next save.
             schema_version: 2,
+            pricing_revision: 0,
             aggregate: UsageAggregate {
                 month_start: checkpoint.month_start,
                 today: checkpoint.today,
@@ -147,6 +151,7 @@ impl UsageState {
             concat!(
                 "{header}\n",
                 "schema={schema}\n",
+                "pricing={pricing}\n",
                 "generation={generation}\n",
                 "month={month}\n",
                 "day={day}\n",
@@ -168,6 +173,7 @@ impl UsageState {
             ),
             header = USAGE_STATE_HEADER,
             schema = self.schema_version,
+            pricing = self.pricing_revision,
             generation = self.generation,
             month = self.aggregate.month_start,
             day = self.aggregate.today,
@@ -295,6 +301,7 @@ impl UsageState {
             _ => return None,
         }
         let mut schema_version = None;
+        let mut pricing_revision = 0_u32;
         let mut generation = None;
         let mut month_start = None;
         let mut today = None;
@@ -329,6 +336,8 @@ impl UsageState {
             }
             if let Some(value) = line.strip_prefix("schema=") {
                 schema_version = Some(value.parse().ok()?);
+            } else if let Some(value) = line.strip_prefix("pricing=") {
+                pricing_revision = value.parse().ok()?;
             } else if let Some(value) = line.strip_prefix("generation=") {
                 generation = Some(value.parse().ok()?);
             } else if let Some(value) = line.strip_prefix("month=") {
@@ -519,6 +528,7 @@ impl UsageState {
         Some(Self {
             generation: generation?,
             schema_version,
+            pricing_revision,
             aggregate: UsageAggregate {
                 month_start: month_start?,
                 today: today?,
@@ -765,6 +775,7 @@ mod tests {
         UsageState {
             generation: 3,
             schema_version: crate::core::USAGE_STATE_SCHEMA_VERSION,
+            pricing_revision: crate::core::PRICING_REVISION,
             aggregate: super::UsageAggregate {
                 month_start: 20_260_901,
                 today: 20_260_905,
@@ -1040,6 +1051,28 @@ mod tests {
         state.prune_event_keys_before_month(20_260_901);
         assert_eq!(state.cursors[0].seen_keys.len(), 1);
         assert_eq!(state.cursors[0].seen_keys[0].month, 20_260_901);
+    }
+
+    #[test]
+    fn component_usage_state_round_trips_pricing_revision_and_defaults_to_zero() {
+        let mut state = sample_state(true);
+        state.pricing_revision = 41;
+        let encoded = state.encode();
+        assert!(encoded.lines().any(|line| line == "pricing=41"));
+        assert_eq!(UsageState::decode(&encoded).unwrap().pricing_revision, 41);
+
+        // A state written before the field existed has no line: it reads as 0,
+        // which no real revision uses, so the collector rebuilds it.
+        let legacy: String = encoded
+            .lines()
+            .filter(|line| !line.starts_with("pricing="))
+            .flat_map(|line| [line, "\n"])
+            .collect();
+        assert!(!legacy.contains("pricing="));
+        let decoded = UsageState::decode(&legacy).unwrap();
+        assert_eq!(decoded.pricing_revision, 0);
+        assert_eq!(decoded.aggregate, state.aggregate);
+        assert!(UsageState::decode(&encoded.replace("pricing=41", "pricing=x")).is_none());
     }
 
     #[test]

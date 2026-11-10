@@ -58,7 +58,7 @@ use crate::core::{
     FileDayContrib, FileDedupeWindow, LimitWindow, LoadStatus, PersistStatus, ProviderFetchKind,
     ProviderFetchState, ProviderUsage, RebuildState, RescanReason, RestoreResult, StartupMode,
     TokenUsage, UsageCursor, UsageDedupeKey, UsageSnapshot, UsageState, PENDING_RETENTION_MS,
-    SEEN_CAP_CLAUDE, SEEN_CAP_CODEX, USAGE_STATE_SCHEMA_VERSION,
+    PRICING_REVISION, SEEN_CAP_CLAUDE, SEEN_CAP_CODEX, USAGE_STATE_SCHEMA_VERSION,
 };
 
 #[cfg(test)]
@@ -880,6 +880,23 @@ impl UsageCollector {
             self.begin_month_rescan(window, unix_now_ms());
             return;
         }
+        if state.pricing_revision != PRICING_REVISION {
+            // The restored totals and per-file contributions are nanodollars
+            // priced by another table. Restoring them would keep the old rates
+            // for the rest of the month, so replay the month at current rates.
+            self.record_diag(
+                DiagnosticKind::RestoreResult,
+                RestoreResult::Rebuilding as u64,
+                0,
+            );
+            self.record_diag(
+                DiagnosticKind::RescanReason,
+                RescanReason::PricingRevision as u64,
+                0,
+            );
+            self.begin_month_rescan(window, unix_now_ms());
+            return;
+        }
         self.snapshot = state.aggregate.snapshot;
         // A marker means an older release may have mixed cached dollars into
         // the local aggregate. Its cursors cannot recover the local-only sum.
@@ -981,6 +998,7 @@ impl UsageCollector {
         UsageState {
             generation: 0,
             schema_version: crate::core::USAGE_STATE_SCHEMA_VERSION,
+            pricing_revision: crate::core::PRICING_REVISION,
             aggregate: crate::core::UsageAggregate {
                 month_start: window.month_start,
                 today: window.today,
@@ -4012,7 +4030,10 @@ mod tests {
         CodexAuthFile, FetchErrorKind, FileCursor, OtakSnapshot, ProviderSnapshot, SourceKind,
         UsageCollector, UsageTick,
     };
-    use crate::core::{local_hms, local_ymd, CursorKind, CursorRebuildReason, UsageCursor};
+    use crate::core::{
+        local_hms, local_ymd, CursorKind, CursorRebuildReason, FileDayContrib, RescanReason,
+        UsageCursor, PRICING_REVISION,
+    };
     use std::{
         collections::HashMap,
         fs,
@@ -4170,6 +4191,78 @@ mod tests {
             collector.snapshot.claude.today_cost_nanos,
             "local usage above the floor wins"
         );
+    }
+
+    #[test]
+    fn component_checkpoint_priced_by_another_table_rebuilds_the_month() {
+        let root = std::env::temp_dir().join(format!(
+            "run-dog-pricing-revision-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let window = day_window(unix_now_ms());
+        let stale_cursor = || UsageCursor {
+            kind: CursorKind::Claude,
+            logical_id: "projects/p/session.jsonl".into(),
+            offset: 12,
+            size: 12,
+            file_id: Some([1, 2, 3]),
+            prefix: Some(42),
+            last_model: None,
+            seen_keys: Vec::new(),
+            claude_pending: Vec::new(),
+            contrib_days: vec![(
+                window.today,
+                FileDayContrib {
+                    nanos: 147_470_000_000,
+                    input: 10,
+                    output: 20,
+                },
+            )],
+            active_month: Some(window.month_start),
+        };
+        let priced_state = |collector: &UsageCollector, pricing_revision: u32| {
+            let mut state = collector.build_state(window);
+            state.pricing_revision = pricing_revision;
+            state.aggregate.catch_up_done = true;
+            state
+                .aggregate
+                .snapshot
+                .claude
+                .add_month_nanos(147_470_000_000);
+            state.cursors.push(stale_cursor());
+            state
+        };
+
+        // A checkpoint without the field (0) or from any other revision was
+        // priced by a different table: drop the totals and replay the month.
+        for other in [0, PRICING_REVISION + 1] {
+            let mut collector =
+                UsageCollector::with_dirs(root.join("claude"), root.join("codex"), false);
+            let state = priced_state(&collector, other);
+            collector.apply_state(window, state);
+            assert!(collector.catch_up, "revision {other}");
+            assert_eq!(collector.snapshot.claude.month_cost_nanos, 0);
+            assert!(collector.file_checkpoint.is_empty());
+            assert!(collector.checkpoint_dirty);
+            assert_eq!(
+                collector.diagnostics().rescan_reason,
+                RescanReason::PricingRevision as u64
+            );
+        }
+
+        // The same revision restores the totals without a replay.
+        let mut collector =
+            UsageCollector::with_dirs(root.join("claude"), root.join("codex"), false);
+        let state = priced_state(&collector, PRICING_REVISION);
+        assert_eq!(
+            state.pricing_revision,
+            collector.build_state(window).pricing_revision
+        );
+        collector.apply_state(window, state);
+        assert!(!collector.catch_up);
+        assert_eq!(collector.snapshot.claude.month_cost_nanos, 147_470_000_000);
+        assert_eq!(collector.file_checkpoint.len(), 1);
     }
 
     #[test]

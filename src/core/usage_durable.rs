@@ -154,6 +154,7 @@ mod tests {
         UsageState {
             generation: 0,
             schema_version: crate::core::USAGE_STATE_SCHEMA_VERSION,
+            pricing_revision: crate::core::PRICING_REVISION,
             aggregate: UsageAggregate {
                 month_start: 20_260_901,
                 today: 20_260_905,

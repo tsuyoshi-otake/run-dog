@@ -101,6 +101,7 @@ pub enum RescanReason {
     User = 1,
     LegacyIdentity = 2,
     UsageAccountingSchema = 3,
+    PricingRevision = 4,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

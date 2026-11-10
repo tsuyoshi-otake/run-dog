@@ -79,6 +79,7 @@ fn arb_state() -> impl Strategy<Value = UsageState> {
             |(generation, month_start, today, cursors, catch_up_done)| UsageState {
                 generation,
                 schema_version: crate::core::USAGE_STATE_SCHEMA_VERSION,
+                pricing_revision: crate::core::PRICING_REVISION,
                 aggregate: UsageAggregate {
                     month_start,
                     today,
@@ -461,6 +462,7 @@ fn state_at(offset: u64) -> UsageState {
     UsageState {
         generation: 0,
         schema_version: crate::core::USAGE_STATE_SCHEMA_VERSION,
+        pricing_revision: crate::core::PRICING_REVISION,
         aggregate: UsageAggregate {
             month_start: 20_260_901,
             today: 20_260_905,
