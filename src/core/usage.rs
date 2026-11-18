@@ -585,9 +585,9 @@ fn entry_prompt_tier(
 /// table and its dated revisions to this value; a matching-rule change is not
 /// covered by the pin and needs the bump by hand. Real revisions start at 1;
 /// a checkpoint without the field reads as 0.
-pub const PRICING_REVISION: u32 = 1;
+pub const PRICING_REVISION: u32 = 2;
 
-fn pricing_table() -> [ModelPricing; 72] {
+fn pricing_table() -> [ModelPricing; 74] {
     [
         entry_cache_read("claude-fable-5-2-fast", 16.0, 0.4, 80.0),
         entry_cache_read("claude-mythos-5-2-fast", 16.0, 0.4, 80.0),
@@ -626,6 +626,8 @@ fn pricing_table() -> [ModelPricing; 72] {
         entry("claude-3-opus", 15.0, 75.0),
         entry("claude-3-sonnet", 3.0, 15.0),
         entry("claude-3-haiku", 0.25, 1.25),
+        entry_long_context("gpt-6.2-astra", 8.0, 0.4, 40.0),
+        entry_long_context("gpt-6.2-sol", 2.0, 0.1, 10.0),
         entry_long_context("gpt-6-astra", 10.0, 1.0, 50.0),
         entry_long_context("gpt-6.1-sol", 2.0, 0.1, 10.0),
         entry_long_context("gpt-6.1-terra", 1.0, 0.05, 5.0),
@@ -1334,6 +1336,58 @@ mod tests {
     }
 
     #[test]
+    fn component_gpt62_astra_and_sol_follow_published_rates() {
+        let standard = TokenUsage {
+            input: 1_000_000,
+            output: 1_000_000,
+            ..TokenUsage::default()
+        };
+        let cached = TokenUsage {
+            cached_input: 1_000_000,
+            ..TokenUsage::default()
+        };
+        let long = TokenUsage {
+            long_context_input: standard.input,
+            long_context_output: standard.output,
+            ..standard
+        };
+        let long_cached = TokenUsage {
+            long_context_cached_input: cached.cached_input,
+            ..cached
+        };
+
+        // Astra: $8 input, $0.40 cached, $40 output; above 272K $16 / $0.80 / $60.
+        assert_eq!(cost_cents("gpt-6.2-astra", standard, None), Some(4_800));
+        assert_eq!(
+            cost_cents("gpt-6.2-astra-20261117", standard, None),
+            Some(4_800)
+        );
+        assert_eq!(cost_cents("gpt-6.2-astra", cached, None), Some(40));
+        assert_eq!(cost_cents("gpt-6.2-astra", long, None), Some(7_600));
+        assert_eq!(cost_cents("gpt-6.2-astra", long_cached, None), Some(80));
+        assert!(is_long_context_request("gpt-6.2-astra", 272_001));
+        assert!(!is_long_context_request("gpt-6.2-astra", 272_000));
+
+        // Sol keeps the GPT-6.1 Sol rates: $2 / $0.10 / $10; above 272K $4 / $0.20 / $15.
+        assert_eq!(cost_cents("gpt-6.2-sol", standard, None), Some(1_200));
+        assert_eq!(
+            cost_cents("gpt-6.2-sol-20261117", standard, None),
+            Some(1_200)
+        );
+        assert_eq!(cost_cents("gpt-6.2-sol", cached, None), Some(10));
+        assert_eq!(cost_cents("gpt-6.2-sol", long, None), Some(1_900));
+        assert_eq!(cost_cents("gpt-6.2-sol", long_cached, None), Some(20));
+        assert!(is_long_context_request("gpt-6.2-sol", 272_001));
+        assert!(!is_long_context_request("gpt-6.2-sol", 272_000));
+
+        // The new keys leave the GPT-6 rows alone: Astra $10 / $1, Sol $0.20 cached.
+        assert_eq!(cost_cents("gpt-6-astra", standard, None), Some(6_000));
+        assert_eq!(cost_cents("gpt-6-astra", cached, None), Some(100));
+        assert_eq!(cost_cents("gpt-6-sol", cached, None), Some(20));
+        assert_eq!(cost_cents("gpt-6.1-sol", standard, None), Some(1_200));
+    }
+
+    #[test]
     fn component_pricing_revision_is_bumped_whenever_a_rate_changes() {
         // FNV-1a over every key's rates on both sides of each dated revision.
         // A new revision date must be added to `days`.
@@ -1365,7 +1419,7 @@ mod tests {
         }
         assert_eq!(
             (PRICING_REVISION, hash),
-            (1, 0x689c_7f42_4db0_63dc_u64),
+            (2, 0xa7c3_e34f_2c88_c2c0_u64),
             "price table changed: bump PRICING_REVISION (rebuilds persisted totals), then this pin"
         );
     }
